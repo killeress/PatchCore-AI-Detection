@@ -83,6 +83,17 @@ web:
   host: 0.0.0.0
   port: 80
 
+# ------------------------------------------------------------
+# 中控看板告警 — 停線判斷與機種切換提醒（供中央看板 /api/status 取用）
+# ------------------------------------------------------------
+# halt_window_minutes       : 停線判斷的滾動窗口（分鐘），統計窗口內 request 筆數
+# halt_max_panels           : 窗口內筆數 ≤ 此值時判定停線
+# model_switch_alert_minutes: 機種切換提醒持續時間（分鐘），期間再次切換則重新起算
+dashboard_alert:
+  halt_window_minutes: 120
+  halt_max_panels: 20
+  model_switch_alert_minutes: 120
+
 # SOP 集中發布：留空沿用中央帳號中心 IP（HTTP 80）。
 # center_url 僅填服務根網址，例如 http://10.174.37.81 或 http://host:8080。
 # published_dir 只需在文件中心建立；相對路徑以本設定檔所在目錄為基準。

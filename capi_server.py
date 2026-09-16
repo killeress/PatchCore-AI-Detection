@@ -72,7 +72,7 @@ from capi_station_adapter import (
     resolve_station_profile_from_hostname,
 )
 from capi_white_frame import WhiteFrameInspection, inspect_white_frame_image
-from capi_database import CAPIDatabase
+from capi_database import CAPIDatabase, track_client_model_switch
 from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
 from capi_web import (
@@ -115,6 +115,7 @@ class ServerStatusTracker:
         self.total_err = 0
         self.last_inference_time = None
         self.last_judgment_result = None  # 最近一筆判定結果 {glass_id, model_id, machine_no, ai_judgment, time, duration}
+        self.last_model_by_machine = {}  # machine_no → 最近回報機種（機種切換偵測基線）
         
     def get_status(self):
         """取得即時狀態 JSON Object"""
@@ -1876,6 +1877,14 @@ class CAPIServer:
         db_path = db_cfg.get("path", "/data/capi_ai/capi_results.db")
         self.db = CAPIDatabase(db_path)
         logger.info(f"Database: {db_path}")
+        # 啟動回填各機台機種基線：重啟後第一片才能正確判斷是否切換
+        try:
+            with server_status.lock:
+                server_status.last_model_by_machine.update(
+                    self.db.get_latest_models_by_machine()
+                )
+        except Exception as e:
+            logger.warning(f"[ClientModelSwitch] 啟動回填機種基線失敗: {e}")
         self._load_mark_forced_char_conversions()
         try:
             from capi_mark_detector import (
@@ -1940,6 +1949,11 @@ class CAPIServer:
         self._async_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="async-save")
         self._async_executor_lock = threading.Lock()
         self._async_executor_shutdown = False
+
+        # 機種切換獨立依序處理，避免 DB 鎖或 Heatmap 儲存阻塞 Client 回覆。
+        self._model_switch_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="model-switch-save",
+        )
 
         # 多機種 config 字典 (machine_id → CAPIConfig)；由 _load_model_configs 填入
         self.configs_by_machine: Dict[str, "CAPIConfig"] = {}
@@ -2754,6 +2768,10 @@ class CAPIServer:
             logger.info("Background save tasks completed")
         else:
             logger.info("Background save executor already stopped")
+
+        model_switch_executor = getattr(self, "_model_switch_executor", None)
+        if model_switch_executor is not None:
+            model_switch_executor.shutdown(wait=True, cancel_futures=False)
             
         if self._server_socket:
             try:
@@ -2798,6 +2816,22 @@ class CAPIServer:
         if should_save_sync:
             logger.warning("Async save executor is stopped; saving result synchronously")
             self._save_results_async(*args, **kwargs)
+
+    def _queue_client_model_switch(self, parsed):
+        """Snapshot the report and persist switches in order without waiting for DB I/O."""
+        if not parsed:
+            return
+        report = {key: parsed.get(key) for key in ("machine_no", "model_id")}
+        switched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self._model_switch_executor.submit(
+                track_client_model_switch,
+                self.db, server_status.last_model_by_machine, server_status.lock,
+                report, switched_at=switched_at,
+            )
+        except RuntimeError as exc:
+            # Shutdown must never fall back to synchronous DB writes before a reply.
+            logger.warning("[ClientModelSwitch] 無法排入機種切換追蹤: %s", exc)
 
     def _handle_client(self, client_socket: socket.socket, client_addr: tuple):
         """處理客戶端連線（長連線模式）
@@ -2945,6 +2979,7 @@ class CAPIServer:
                                 "time": datetime.now().strftime("%H:%M:%S"),
                                 "duration": "0.00s"
                             }
+                        self._queue_client_model_switch(parsed)
                         _send_response(client_socket, response, request_context, kind="hy")
                         request_count += 1
                         self._queue_save_results_async(
@@ -3002,6 +3037,7 @@ class CAPIServer:
                             "duration": f"{processing_seconds:.2f}s"
                         }
 
+                    self._queue_client_model_switch(parsed)
                     # 🚀 先發送回覆（不等 Heatmap 儲存）
                     _send_response(client_socket, response, request_context)
                     request_count += 1
@@ -3071,6 +3107,7 @@ class CAPIServer:
                         response = build_dual_protocol_response(parsed, error_msg, [], request_config)
                     else:
                         response = build_dual_protocol_response(None, error_msg, [], None)
+                    self._queue_client_model_switch(parsed)
                     try:
                         _send_response(client_socket, response, request_context, kind="internal_error")
                     except Exception:

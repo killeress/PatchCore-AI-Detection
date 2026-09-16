@@ -118,6 +118,34 @@ Access-Control-Allow-Origin: *
 
 API 暫時離線時，看板會保留最後一次成功資料並標示離線，不會把既有數字清空。
 
+## 線體狀態與提醒（2026-09 新增）
+
+### 停線
+- 線體端統計最近 `halt_window_minutes` 分鐘（預設 120）內的 request 筆數
+  （含 OK / NG / ERR，同片重送不重複扣除），筆數 ≤ `halt_max_panels`
+  （預設 20）時狀態顯示「停線」（琥珀色）。
+- 判斷由線體端 `/api/status` 的 `line_activity` 區塊回傳，看板純顯示；
+  離線 / 服務異常時不判停線，舊版線體（無此欄位）一律視同正常。
+- 滾動窗口與班別無關，跨班仍取完整窗口。
+
+### 機種切換提醒
+- 線體端按機台追蹤 client 回報機種，與同機台上一片不同即寫入
+  `model_switch_events` 表（server 重啟不丟，啟動時自 inference_records 回填基線）。
+- 提醒持續 `model_switch_alert_minutes` 分鐘（預設 120），期間再次切換
+  以最新一次重新起算；期滿自動消失，無手動關閉。
+- 首次回報與空機種不觸發提醒。
+
+### 當班投入（總覽表）
+- 總覽表「當班投入」欄 = 卡片同款數字（OK + NG + ERR），舊版線體亦提供。
+
+### 線體端配置（server_config.yaml）
+```yaml
+dashboard_alert:
+  halt_window_minutes: 120
+  halt_max_panels: 20
+  model_switch_alert_minutes: 120
+```
+
 ## 設備健康提醒
 
 看板會在「目前告警」區塊提醒設備健康狀況；提醒只會在 API 有提供對應數值時觸發：

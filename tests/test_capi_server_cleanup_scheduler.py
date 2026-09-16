@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from capi_server import CAPIServer
@@ -58,6 +59,7 @@ def test_cleanup_scheduler_thread_stops_with_server():
         _cleanup_thread=None,
         _async_executor_lock=threading.Lock(),
         _async_executor_shutdown=True,
+        _model_switch_executor=ThreadPoolExecutor(max_workers=1),
         _server_socket=None,
     )
 
@@ -66,7 +68,11 @@ def test_cleanup_scheduler_thread_stops_with_server():
     assert cleanup_thread is server._cleanup_thread
     assert cleanup_thread.is_alive()
 
+    switch_saved = threading.Event()
+    server._model_switch_executor.submit(switch_saved.set)
     CAPIServer.stop(server)
 
     assert not cleanup_thread.is_alive()
     assert server._cleanup_thread is None
+    assert switch_saved.is_set()
+    assert all(not thread.is_alive() for thread in server._model_switch_executor._threads)

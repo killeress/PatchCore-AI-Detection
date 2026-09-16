@@ -1,12 +1,15 @@
 import logging
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 import capi_server
+from capi_database import CAPIDatabase
 
 
 @pytest.fixture
@@ -22,6 +25,7 @@ def tcp_server(monkeypatch, caplog):
         "OK", "[]", [], False, None, None, False, None, None,
     ))
     server._queue_save_results_async = MagicMock()
+    server._queue_client_model_switch = MagicMock()
     server._save_error_record = MagicMock()
     return server
 
@@ -32,6 +36,92 @@ def make_socket(chunks):
     client.gettimeout.return_value = None
     client.recv.side_effect = chunks
     return client
+
+
+@pytest.mark.parametrize("judgment", ["OK", "HY", "INTERNAL_ERROR"])
+def test_model_switch_db_lock_does_not_block_client_replies(tcp_server, tmp_path, judgment):
+    tcp_server.db = CAPIDatabase(tmp_path / "switch.db")
+    tcp_server._model_switch_executor = ThreadPoolExecutor(max_workers=1)
+    tcp_server._queue_client_model_switch = (
+        capi_server.CAPIServer._queue_client_model_switch.__get__(tcp_server)
+    )
+    capi_server.server_status.last_model_by_machine["CAPI33"] = "MODEL_A"
+    if judgment == "INTERNAL_ERROR":
+        tcp_server._process_request.side_effect = RuntimeError("inference failed")
+    machine_judgment = "HY" if judgment == "HY" else "OK"
+    client = make_socket([
+        f"AOI@G{i};MODEL_{model};CAPI33;1920,1200;{machine_judgment};/images\n".encode()
+        for i, model in enumerate(("B", "C"))
+    ] + [b""])
+    replies = threading.Event()
+    client.sendall.side_effect = lambda _: replies.set() if client.sendall.call_count == 2 else None
+    write_started = threading.Event()
+    record_switch = tcp_server.db.record_model_switch_event
+
+    def write(*args, **kwargs):
+        write_started.set()
+        return record_switch(*args, **kwargs)
+
+    tcp_server.db.record_model_switch_event = write
+    handler = threading.Thread(target=tcp_server._handle_client, args=(client, ("127.0.0.1", 1000)))
+    tcp_server.db._lock.acquire()
+    try:
+        handler.start()
+        assert write_started.wait(3), "model switch worker did not start"
+        assert replies.wait(3), "Client replies waited for the model switch DB lock"
+        assert tcp_server.db.get_active_model_switches(120) == []
+    finally:
+        tcp_server.db._lock.release()
+        handler.join(timeout=3)
+        tcp_server._model_switch_executor.shutdown(wait=True)
+    assert not handler.is_alive()
+    events = tcp_server.db.get_active_model_switches(120)
+    assert [(e["previous_model"], e["new_model"]) for e in events] == [("MODEL_B", "MODEL_C")]
+
+
+def test_queued_switch_preserves_report_time_and_order(tcp_server, tmp_path, monkeypatch):
+    tcp_server.db = CAPIDatabase(tmp_path / "switch.db")
+    tcp_server._model_switch_executor = ThreadPoolExecutor(max_workers=1)
+    capi_server.server_status.last_model_by_machine["CAPI33"] = "A"
+    detected_at = datetime(2020, 1, 1, 10, 0, 0)
+    monkeypatch.setattr(capi_server, "datetime", SimpleNamespace(now=lambda: detected_at))
+    release = threading.Event()
+    tcp_server._model_switch_executor.submit(release.wait)
+    report = {"machine_no": "CAPI33", "model_id": "B"}
+    try:
+        capi_server.CAPIServer._queue_client_model_switch(tcp_server, report)
+        report["model_id"] = "C"
+        capi_server.CAPIServer._queue_client_model_switch(tcp_server, report)
+        report["model_id"] = "SHOULD_NOT_BE_SAVED"
+    finally:
+        release.set()
+        tcp_server._model_switch_executor.shutdown(wait=True)
+    conn = tcp_server.db._get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT previous_model, new_model, switched_at FROM model_switch_events ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("A", "B", "2020-01-01 10:00:00"),
+            ("B", "C", "2020-01-01 10:00:00"),
+        ]
+    finally:
+        conn.close()
+    assert tcp_server.db.get_active_model_switches(120) == []
+
+
+def test_stopped_model_switch_queue_does_not_write_synchronously(tcp_server, caplog):
+    tcp_server.db = MagicMock()
+    tcp_server._model_switch_executor = ThreadPoolExecutor(max_workers=1)
+    tcp_server._model_switch_executor.shutdown(wait=True)
+    capi_server.server_status.last_model_by_machine["CAPI33"] = "A"
+
+    capi_server.CAPIServer._queue_client_model_switch(
+        tcp_server, {"machine_no": "CAPI33", "model_id": "B"},
+    )
+
+    tcp_server.db.record_model_switch_event.assert_not_called()
+    assert messages(caplog, "[ClientModelSwitch]")
 
 
 def messages(caplog, tag):
