@@ -661,9 +661,9 @@ main {
     display: inline-flex;
     align-items: center;
     padding: 4px 7px;
-    color: var(--amber);
-    background: rgba(182, 106, 0, 0.09);
-    border: 1px solid rgba(182, 106, 0, 0.28);
+    color: var(--cyan);
+    background: rgba(0, 143, 186, 0.09);
+    border: 1px solid rgba(0, 143, 186, 0.28);
     border-radius: 999px;
     font-size: 0.65rem;
     font-weight: 900;
@@ -696,6 +696,15 @@ main {
     font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
     font-size: 0.84rem;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 當班投入數字對齊程式版本的字體（等寬、字重 800），大小維持 0.84rem */
+.overview-total {
+    color: var(--heading-soft);
+    font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+    font-size: 0.84rem;
+    font-weight: 800;
     font-variant-numeric: tabular-nums;
 }
 

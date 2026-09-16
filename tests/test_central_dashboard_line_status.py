@@ -290,8 +290,9 @@ def test_frontend_model_switch_badge_wiring():
     assert 'data-field="switch-badges"' in index_html
     assert 'data-field="overview-switch-badges"' in app_js
     assert ".line-switch-badge" in styles
-    # 徽章文字必須含「切換機種」與新舊機種
-    assert "切換機種" in app_js
+    # 徽章只顯示四字「機種切換」，新舊機種與時間收進 tooltip
+    assert "機種切換" in app_js
+    assert "expiresAt" in app_js
 
 
 def test_frontend_overview_shift_total_column():

@@ -544,7 +544,7 @@ def _get_cached_hardware_status(disk_path: Any) -> Dict[str, Any]:
         return status
 
 
-_LINE_ACTIVITY_CACHE_SECONDS = 30.0
+_LINE_ACTIVITY_CACHE_SECONDS = 5.0
 _line_activity_cache: Dict[str, Tuple[float, int]] = {}
 _line_activity_lock = threading.Lock()
 
@@ -572,7 +572,7 @@ def _dashboard_alert_config(server_config: Any) -> Dict[str, int]:
 
 
 def _get_cached_recent_request_count(db: Any, window_minutes: int) -> int:
-    """停線計數加 30 秒快取，避免多面看板輪詢直打線體 DB。"""
+    """停線計數加 5 秒快取：避免多面看板輪詢直打線體 DB，又讓狀態變化近乎即時。"""
     cache_key = f"{getattr(db, 'db_path', id(db))}:{int(window_minutes)}"
     now = time.monotonic()
     with _line_activity_lock:
