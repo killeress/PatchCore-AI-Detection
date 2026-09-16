@@ -598,6 +598,15 @@ main {
     background: rgba(207, 63, 80, 0.065);
 }
 
+.overview-table tbody tr[data-state="halted"] {
+    background: rgba(182, 106, 0, 0.045);
+}
+
+.overview-table tbody tr[data-production="true"][data-state="halted"],
+.overview-table tbody tr[data-production="true"][data-state="halted"]:hover {
+    background: rgba(182, 106, 0, 0.085);
+}
+
 .overview-line {
     display: flex;
     align-items: center;
@@ -1031,6 +1040,10 @@ main {
     background: var(--amber);
 }
 
+.line-card[data-state="halted"]::before {
+    background: var(--amber);
+}
+
 .line-card[data-state="offline"]::before {
     background: var(--red);
 }
@@ -1125,6 +1138,17 @@ main {
 [data-state="offline"] .status-pill::before {
     background: var(--red);
     box-shadow: 0 0 0 3px rgba(207, 63, 80, 0.12);
+}
+
+[data-state="halted"] .status-pill {
+    color: #945500;
+    background: #fff8ea;
+    border-color: #eed39e;
+}
+
+[data-state="halted"] .status-pill::before {
+    background: var(--amber);
+    box-shadow: 0 0 0 3px rgba(182, 106, 0, 0.12);
 }
 
 .line-links {
