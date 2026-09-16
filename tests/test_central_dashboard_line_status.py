@@ -196,7 +196,7 @@ def test_server_wiring_all_judgment_paths_and_backfill():
     （ProtocolError 路徑為解析失敗、無 parsed 可用，故不呼叫。）"""
     from pathlib import Path
     src = (Path(__file__).parent.parent / "capi_server.py").read_text(encoding="utf-8")
-    assert src.count("track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)") == 3
+    assert src.count("self._queue_client_model_switch(parsed)") == 3
     assert "server_status.last_model_by_machine.update(" in src
     assert "self.last_model_by_machine = {}" in src
 

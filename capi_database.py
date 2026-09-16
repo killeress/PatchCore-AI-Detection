@@ -2256,7 +2256,8 @@ class CAPIDatabase:
             conn.close()
 
     def record_model_switch_event(
-        self, machine_no: str, previous_model: str, new_model: str
+        self, machine_no: str, previous_model: str, new_model: str,
+        switched_at: Optional[str] = None,
     ) -> int:
         """寫入一筆 client 機種切換事件，回傳 event id。"""
         with self._lock:
@@ -2264,9 +2265,9 @@ class CAPIDatabase:
             try:
                 cursor = conn.execute(
                     """INSERT INTO model_switch_events
-                       (machine_no, previous_model, new_model)
-                       VALUES (?, ?, ?)""",
-                    (machine_no, previous_model, new_model),
+                       (machine_no, previous_model, new_model, switched_at)
+                       VALUES (?, ?, ?, COALESCE(?, datetime('now', 'localtime')))""",
+                    (machine_no, previous_model, new_model, switched_at),
                 )
                 conn.commit()
                 return int(cursor.lastrowid)
@@ -8028,13 +8029,16 @@ class CAPIDatabase:
             conn.close()
 
 
-def track_client_model_switch(db, baseline: dict, lock, parsed: dict) -> None:
+def track_client_model_switch(
+    db, baseline: dict, lock, parsed: dict, switched_at: Optional[str] = None,
+) -> None:
     """依機台追蹤 client 回報機種；偵測到切換時寫入 model_switch_events。
 
     - 首次回報（無基線）只建基線，不產生提醒事件。
     - 空機種或空機台略過（不建基線、不清基線）。
     - baseline 由呼叫方持有（server_status.last_model_by_machine），
-      lock 用 server_status.lock；DB 寫入在鎖外進行，避免阻塞熱路徑。
+      lock 用 server_status.lock；DB 寫入在鎖外進行，由 server 背景佇列呼叫。
+    - switched_at 保留排入佇列時的時間，避免 DB 等待延長提醒期限。
     """
     if not parsed:
         return  # 解析失敗的錯誤路徑沒有機種可追蹤
@@ -8050,7 +8054,7 @@ def track_client_model_switch(db, baseline: dict, lock, parsed: dict) -> None:
     if previous is None:
         return  # 首次回報：只建基線
     try:
-        db.record_model_switch_event(machine_no, previous, model_id)
+        db.record_model_switch_event(machine_no, previous, model_id, switched_at=switched_at)
         logger.info("[ClientModelSwitch] %s 機種切換：%s → %s", machine_no, previous, model_id)
     except Exception as e:
         logger.warning("[ClientModelSwitch] 寫入機種切換事件失敗: %s", e)
