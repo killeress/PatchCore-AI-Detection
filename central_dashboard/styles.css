@@ -1426,6 +1426,10 @@ main {
     background: rgba(255, 180, 84, 0.11);
 }
 
+:root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-state="halted"] {
+    background: rgba(255, 180, 84, 0.11);
+}
+
 :root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-state="offline"],
 :root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-health="critical"] {
     background: rgba(255, 113, 131, 0.1);
@@ -1449,6 +1453,12 @@ main {
 }
 
 :root[data-theme="dark"] [data-state="warning"] .status-pill {
+    color: var(--amber);
+    background: #322515;
+    border-color: #68502d;
+}
+
+:root[data-theme="dark"] [data-state="halted"] .status-pill {
     color: var(--amber);
     background: #322515;
     border-color: #68502d;

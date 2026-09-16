@@ -571,7 +571,14 @@
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
         const statusPill = card.querySelector('[data-field="status"]');
-        if (state.status === "halted" && data && data.lineActivity.available) {
+        if (
+            state.status === "halted" &&
+            data &&
+            data.lineActivity.available &&
+            data.lineActivity.windowMinutes !== null &&
+            data.lineActivity.panelCount !== null &&
+            data.lineActivity.haltThreshold !== null
+        ) {
             statusPill.title = `最近 ${data.lineActivity.windowMinutes} 分鐘僅生產 ${data.lineActivity.panelCount} 片（≤ ${data.lineActivity.haltThreshold} 片視為停線）`;
         } else {
             statusPill.removeAttribute("title");
