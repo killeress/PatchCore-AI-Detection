@@ -291,3 +291,13 @@ def test_frontend_model_switch_badge_wiring():
     assert ".line-switch-badge" in styles
     # 徽章文字必須含「切換機種」與新舊機種
     assert "切換機種" in app_js
+
+
+def test_frontend_overview_shift_total_column():
+    from pathlib import Path
+    root = Path(__file__).parent.parent
+    app_js = (root / "central_dashboard" / "app.js").read_text(encoding="utf-8")
+    index_html = (root / "central_dashboard" / "index.html").read_text(encoding="utf-8")
+    assert '<th scope="col">當班投入</th>' in index_html
+    assert 'data-field = "overview-total"' in app_js or 'dataset.field = "overview-total"' in app_js
+    assert "overview-total" in app_js
