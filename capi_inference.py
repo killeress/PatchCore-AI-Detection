@@ -47,6 +47,7 @@ from capi_image_orientation import (
     use_capi_aoi_fast_path,
 )
 from capi_station_adapter import StationAdapter, create_station_adapter
+from capi_model_provenance import snapshot_model_training, log_model_training
 
 # ── 舊版 anomalib 相容性修補 ─────────────────────────────
 # 修補 1: PrecisionType stub
@@ -140,8 +141,19 @@ def score_normalization_diagnostic(
     image_max: Optional[float],
     image_threshold: Optional[float],
     normalization_enabled: Optional[bool] = None,
+    normalization_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Explain Anomalib's clamp-to-zero image-score normalization boundary."""
+    """Explain the score scale actually stored in this model."""
+    from capi_normalization_config import OK_MAX_NORMALIZATION
+    if normalization_mode == OK_MAX_NORMALIZATION and normalization_enabled is not False:
+        available = (raw_score is not None and np.isfinite(float(raw_score))
+                     and image_max is not None and np.isfinite(float(image_max))
+                     and float(image_max) > 0)
+        return {
+            "normalization_available": bool(available),
+            "normalization_zero_boundary": 0.0 if available else None,
+            "normalization_zero_clamped": False,
+        }
     if normalization_enabled is False:
         return {
             "normalization_available": False,
@@ -268,6 +280,8 @@ class TileInfo:
     model_image_max: Optional[float] = None # Anomalib image-score normalization 上界
     model_image_threshold: Optional[float] = None # Anomalib image-score normalization threshold
     model_normalization_enabled: Optional[bool] = None # 本次模型是否啟用 Anomalib normalization
+    model_normalization_mode: Optional[str] = None
+    model_pixel_max: Optional[float] = None
     raw_anomaly_map_max: Optional[float] = None # 未正規化 anomaly map 最高值
     normalized_anomaly_map_max: Optional[float] = None # 正規化 anomaly map 最高值
     pre_decay_map_max: float = 0.0          # mask/edge margin 前 anomaly_map max
@@ -710,6 +724,7 @@ class CAPIInferencer:
 
         # fp16 KNN 優化: 將 memory bank 轉為 fp16，並 patch euclidean_dist 使用 tensor core
         self._optimize_model_fp16(inferencer_obj)
+        inferencer_obj._capi_training_provenance = snapshot_model_training(inferencer_obj, model_path)
 
         self._log_cuda_memory(f"after-load model={model_path.name}")
 
@@ -2316,6 +2331,8 @@ class CAPIInferencer:
             "model_image_max": None,
             "model_image_threshold": None,
             "model_normalization_enabled": None,
+            "model_normalization_mode": None,
+            "model_pixel_max": None,
             "raw_anomaly_map_max": None,
             "normalized_anomaly_map_max": None,
         }
@@ -2323,9 +2340,13 @@ class CAPIInferencer:
         post_processor = getattr(outer_model, "post_processor", None)
         if post_processor is None:
             return diagnostics
+        from capi_normalization_config import LEGACY_NORMALIZATION
+        diagnostics["model_normalization_mode"] = getattr(
+            post_processor, "normalization_mode", LEGACY_NORMALIZATION,
+        )
 
         for field_name in (
-            "image_min", "image_max", "image_threshold",
+            "image_min", "image_max", "image_threshold", "pixel_max",
         ):
             diagnostics[f"model_{field_name}"] = self._prediction_value(
                 getattr(post_processor, field_name, None)
@@ -2566,6 +2587,8 @@ class CAPIInferencer:
         tile.model_image_max = None
         tile.model_image_threshold = None
         tile.model_normalization_enabled = None
+        tile.model_normalization_mode = None
+        tile.model_pixel_max = None
         tile.raw_anomaly_map_max = None
         tile.normalized_anomaly_map_max = None
 
@@ -2622,6 +2645,8 @@ class CAPIInferencer:
                 tile.model_normalization_enabled = diagnostics[
                     "model_normalization_enabled"
                 ]
+                tile.model_normalization_mode = diagnostics["model_normalization_mode"]
+                tile.model_pixel_max = diagnostics["model_pixel_max"]
                 tile.raw_anomaly_map_max = diagnostics["raw_anomaly_map_max"]
                 tile.normalized_anomaly_map_max = diagnostics["normalized_anomaly_map_max"]
 
@@ -3207,12 +3232,14 @@ class CAPIInferencer:
 
         t_infer_start = time.time()
         anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+        logged_models = set()
         for ti in tile_infos:
             zone = ti.zone if ti.zone in ("inner", "edge") else "inner"
             active_thr = inner_thr if zone == "inner" else edge_thr
             ti.score_threshold = active_thr
             try:
                 model = self._get_model_for(self.config.machine_id, lighting, zone)
+                log_model_training(model, lighting, zone, logged_models)
             except Exception as exc:
                 raise RuntimeError(
                     f"[v2-debug] {lighting}/{zone} 模型載入失敗: {exc}"
@@ -4942,7 +4969,8 @@ class CAPIInferencer:
 
         # --- 左上: Heatmap Overlay ---
         if anomaly_map is not None:
-            norm = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            from capi_heatmap import heatmap_to_uint8
+            norm = heatmap_to_uint8(anomaly_map)
             norm = cv2.resize(norm, (sz, sz))
             heatmap_color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
             panel_tl = cv2.addWeighted(base, 0.5, heatmap_color, 0.5, 0)
@@ -5114,7 +5142,8 @@ class CAPIInferencer:
         hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
 
         # --- 左上: Heatmap + Hot Zone ---
-        norm = cv2.normalize(anomaly_f, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        from capi_heatmap import heatmap_to_uint8
+        norm = heatmap_to_uint8(anomaly_f)
         norm_rsz = cv2.resize(norm, (sz, sz))
         hm_color = cv2.applyColorMap(norm_rsz, cv2.COLORMAP_JET)
         panel_tl = cv2.addWeighted(base_sm, 0.5, hm_color, 0.5, 0)
@@ -6267,10 +6296,13 @@ class CAPIInferencer:
 
         return defects
 
-    @staticmethod
-    def _aoi_prefix_matches(report_prefix: str, target_prefix: str) -> bool:
+    def _aoi_prefix_matches(self, report_prefix: str, target_prefix: str) -> bool:
         if not report_prefix or not target_prefix:
             return False
+        # Compare internal lighting keys while preserving station-specific naming.
+        # CAPI U0F00000 is STANDARD; AAPI keeps these lightings distinct.
+        report_prefix = self._get_image_prefix(report_prefix)
+        target_prefix = self._get_image_prefix(target_prefix)
         return (
             report_prefix == target_prefix
             or report_prefix.startswith(target_prefix + "_")
@@ -7196,13 +7228,13 @@ class CAPIInferencer:
         target_type = bomb_info["defect_type"]
         
         for bomb in self.config.bomb_defects:
-            if (bomb.image_prefix == target_prefix and 
+            if (self._aoi_prefix_matches(bomb.image_prefix, target_prefix) and
                 bomb.defect_type == target_type):
                 return bomb.defect_code
         
         # 若只有 prefix 匹配 (不分 type)，也可以 fallback
         for bomb in self.config.bomb_defects:
-            if bomb.image_prefix == target_prefix:
+            if self._aoi_prefix_matches(bomb.image_prefix, target_prefix):
                 return bomb.defect_code
         
         return "UNKNOWN"
@@ -7240,8 +7272,7 @@ class CAPIInferencer:
     
         for bomb in bombs:
             # 比對前綴 (支援帶時間戳的檔名, e.g. "G0F00000" 匹配 "G0F00000_031447")
-            if not (image_prefix == bomb.image_prefix or 
-                    image_prefix.startswith(bomb.image_prefix + "_")):
+            if not self._aoi_prefix_matches(image_prefix, bomb.image_prefix):
                 continue
             
             if bomb.defect_type == "line" and len(bomb.coordinates) >= 2:
@@ -7733,6 +7764,7 @@ class CAPIInferencer:
             if target_inferencer is None:
                 print(f"⚠️ {result.image_path.name} 無可用模型，跳過推論")
                 continue
+            log_model_training(target_inferencer, img_prefix, "shared")
 
             # 模型路由 log (僅在多模型模式下顯示)
             if self._model_mapping:
@@ -8245,8 +8277,7 @@ class CAPIInferencer:
                             aoi_matches_bomb = False
                             tolerance = self.config.bomb_match_tolerance
                             for bomb in active_bombs:
-                                if not (img_prefix == bomb.image_prefix or
-                                        img_prefix.startswith(bomb.image_prefix + "_")):
+                                if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                                     continue
                                 if bomb.defect_type == "point":
                                     for coord in bomb.coordinates:
@@ -8285,8 +8316,7 @@ class CAPIInferencer:
                     if not result.anomaly_tiles or result.raw_bounds is None:
                         continue
                     img_prefix = self._get_image_prefix(result.image_path.name)
-                    if not (img_prefix == bomb.image_prefix or
-                            img_prefix.startswith(bomb.image_prefix + "_")):
+                    if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                         continue
                     # 計算此 bomb line 已確認的 tile 數
                     confirmed = sum(
@@ -9031,8 +9061,7 @@ class CAPIInferencer:
             for bomb in active_bombs:
                 if bomb.defect_type != "point":
                     continue
-                if not (img_prefix == bomb.image_prefix or
-                        img_prefix.startswith(bomb.image_prefix + "_")):
+                if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                     continue
                 for coord in bomb.coordinates:
                     dx = abs(product_x - coord[0])
@@ -9108,8 +9137,7 @@ class CAPIInferencer:
                         aoi_matches_bomb = False
                         tolerance = self.config.bomb_match_tolerance
                         for bomb in active_bombs:
-                            if not (img_prefix == bomb.image_prefix or
-                                    img_prefix.startswith(bomb.image_prefix + "_")):
+                            if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                                 continue
                             if bomb.defect_type == "point":
                                 for coord in bomb.coordinates:
@@ -9198,8 +9226,7 @@ class CAPIInferencer:
                 if not result.anomaly_tiles or result.raw_bounds is None:
                     continue
                 img_prefix = self._get_image_prefix(result.image_path.name)
-                if not (img_prefix == bomb.image_prefix or
-                        img_prefix.startswith(bomb.image_prefix + "_")):
+                if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                     continue
                 confirmed = sum(
                     1 for t, _, _ in result.anomaly_tiles
@@ -9541,8 +9568,13 @@ class CAPIInferencer:
             aoi_only_fast_path_enabled=use_capi_aoi_fast_path(
                 self.config, self.station_adapter.profile,
             ),
-            recover_failed_raw_boundary=use_capi_aoi_fast_path(
-                self.config, self.station_adapter.profile,
+            # Boundary recovery is also needed on padded AAPI frames, where
+            # raw edges pass validation but fail the large-panel occupancy gate.
+            # Keep it independent of the CAPI-only image I/O fast path.
+            recover_failed_raw_boundary=bool(
+                self.station_adapter.profile in ("capi", "aapi")
+                and self.config.aoi_coord_inspection_enabled
+                and not self.config.grid_tiling_enabled
             ),
             cache_processed_image=(
                 aoi_only_mode
@@ -9853,12 +9885,14 @@ class CAPIInferencer:
                 f"edge: {edge_path or '?'} (thr={edge_thr:.3f})"
             )
 
+            logged_models = set()
             for ti in result.tiles:
                 zone = zone_by_tile_id.get(ti.tile_id, "inner")
                 threshold = inner_thr if zone == "inner" else edge_thr
                 ti.score_threshold = threshold
                 try:
                     model = self._get_model_for(self.config.machine_id, model_lighting, zone)
+                    log_model_training(model, model_lighting, zone, logged_models)
                     score, anomaly_map = self.predict_tile(
                         ti,
                         inferencer=model,
@@ -9996,6 +10030,21 @@ class CAPIInferencer:
 
         回 True 表示有被踢掉舊 cache；False 代表本來就沒載入過（也不需要 reload）。
         """
+        # A retrained model may use a new score scale. Refresh its threshold
+        # together with the model cache so a legacy value is never reused.
+        import yaml
+        mapping = getattr(getattr(self, "config", None), "model_mapping", {}) or {}
+        model_path = (mapping.get(lighting) or {}).get(zone)
+        if model_path:
+            model_path = Path(model_path)
+            if not model_path.is_absolute():
+                model_path = self.base_dir / model_path
+            recipe_path = model_path.parent / "machine_config.yaml"
+            if recipe_path.is_file():
+                recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8")) or {}
+                value = (recipe.get("threshold_mapping", {}).get(lighting) or {}).get(zone)
+                if value is not None:
+                    self.config.threshold_mapping.setdefault(lighting, {})[zone] = float(value)
         key = (machine_id, lighting, zone)
         if key in self._model_cache_v2:
             del self._model_cache_v2[key]
@@ -10359,8 +10408,7 @@ class CAPIInferencer:
             active_bombs = self.config.bomb_defects
             
         for bomb in active_bombs:
-            if not (img_prefix == bomb.image_prefix or
-                    img_prefix.startswith(bomb.image_prefix + "_")):
+            if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                 continue
             
             if bomb.defect_type == "line" and len(bomb.coordinates) >= 2:

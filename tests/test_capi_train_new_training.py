@@ -2,8 +2,14 @@ import os
 import platform
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+
+class _FakeScorePostProcessor:
+    def validate_calibration(self):
+        pass
 
 
 def test_normalize_panel_modes_defaults_and_validates():
@@ -465,7 +471,8 @@ def test_stage_dataset_keeps_duplicate_basenames_distinct(tmp_path):
 
 
 @pytest.mark.parametrize("with_calibration", [False, True])
-def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration):
+@pytest.mark.parametrize("with_bomb", [False, True])
+def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration, with_bomb):
     """smoke test：mock anomalib，確認 orchestration 順序正確。"""
     from capi_train_new import train_one_patchcore
 
@@ -476,6 +483,7 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration):
     if with_calibration:
         (staging / "test" / "normal").mkdir(parents=True)
         (staging / "test" / "normal" / "ok.png").write_bytes(b"ok")
+    if with_bomb:
         (staging / "test" / "anormal" / "ng.png").write_bytes(b"ng")
 
     calls = []
@@ -497,7 +505,9 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration):
 
     class FakePatchcore:
         def __init__(self, *a, **kw):
+            self.post_processor = kw["post_processor"]
             calls.append(("Patchcore", kw))
+            self.model = SimpleNamespace()
 
         @staticmethod
         def configure_pre_processor(image_size):
@@ -515,6 +525,7 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration):
         FakeEngine,
         type("ExportType", (), {"TORCH": "torch"}),
         "same_as_test",
+        _FakeScorePostProcessor,
     ))
 
     out = train_one_patchcore(
@@ -531,13 +542,15 @@ def test_train_one_patchcore_smoke(tmp_path, monkeypatch, with_calibration):
     assert patchcore_call[1]["layers"] == ("layer2", "layer3")
     folder_call = next(c for c in calls if c[0] == "Folder")
     assert folder_call[1]["num_workers"] == 16
+    assert folder_call[1]["abnormal_dir"] is None
+    assert folder_call[1]["test_split_mode"] == "from_dir"
+    assert folder_call[1]["test_split_ratio"] == 0.2
     if with_calibration:
         assert folder_call[1]["normal_test_dir"] == "test/normal"
-        assert folder_call[1]["abnormal_dir"] == "test/anormal"
-        assert "test_split_mode" not in folder_call[1]
     else:
-        assert folder_call[1]["abnormal_dir"] is None
-        assert folder_call[1]["test_split_mode"] == "synthetic"
+        assert "normal_test_dir" not in folder_call[1]
+    exported_model = next(c[1]["model"] for c in calls if c[0] == "export")
+    assert exported_model.model.training_provenance["normalization_source"] == "ok_only"
     # 回傳路徑要存在
     assert out.exists()
     assert out.name == "model.pt"
@@ -565,7 +578,9 @@ def test_train_one_patchcore_layer3_only(tmp_path, monkeypatch):
 
     class FakePatchcore:
         def __init__(self, *a, **kw):
+            self.post_processor = kw["post_processor"]
             calls.append(kw)
+            self.model = SimpleNamespace()
 
         @staticmethod
         def configure_pre_processor(image_size):
@@ -583,6 +598,7 @@ def test_train_one_patchcore_layer3_only(tmp_path, monkeypatch):
         FakeEngine,
         type("ExportType", (), {"TORCH": "torch"}),
         "same_as_test",
+        _FakeScorePostProcessor,
     ))
 
     cfg = TrainingConfig(
@@ -606,6 +622,7 @@ def test_train_one_patchcore_applies_pool5_and_skips_edge_cleaning(tmp_path, mon
 
     class FakePatchcore:
         def __init__(self, *a, **kw):
+            self.post_processor = kw["post_processor"]
             self.model = type("InnerModel", (), {"feature_pooler": object()})()
             captured["model"] = self
 
@@ -635,6 +652,7 @@ def test_train_one_patchcore_applies_pool5_and_skips_edge_cleaning(tmp_path, mon
     monkeypatch.setattr("capi_train_new._import_anomalib", lambda: (
         FakeFolder, FakePatchcore, FakeEngine,
         type("ExportType", (), {"TORCH": "torch"}), "same_as_test",
+        _FakeScorePostProcessor,
     ))
     cfg = TrainingConfig(
         machine_id="M", panel_paths=[], over_review_root=Path("/r"),
@@ -687,6 +705,7 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
 
     class FakePatchcore:
         def __init__(self, *a, **kw):
+            self.post_processor = kw["post_processor"]
             import torch
             dense = torch.tensor([[1.0, 0.0]]).repeat(34, 1)
             outlier = torch.tensor([[-1.0, 0.0]])
@@ -730,6 +749,7 @@ def test_train_one_patchcore_cleans_selected_zone_before_export(
     monkeypatch.setattr("capi_train_new._import_anomalib", lambda: (
         FakeFolder, FakePatchcore, FakeEngine,
         type("ExportType", (), {"TORCH": "torch"}), "same_as_test",
+        _FakeScorePostProcessor,
     ))
     cfg = TrainingConfig(
         machine_id="M", panel_paths=[], over_review_root=Path("/r"),
@@ -799,6 +819,12 @@ def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning
         "tile_width": 8,
         "tile_height": 8,
     })
+    bomb_path = tmp_path / "tiles" / "bomb.png"
+    bomb_path.write_bytes(b"bomb")
+    pool.append({
+        "id": 1000, "lighting": "W0F00000", "zone": "edge",
+        "source": "ng", "decision": "accept", "source_path": str(bomb_path),
+    })
 
     list_calls = []
 
@@ -817,6 +843,7 @@ def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning
         experiment_stats_out=None, trace_sources=None,
     ):
         captured["trace_sources"] = trace_sources
+        assert [p.read_bytes() for p in (staging_dir / "test" / "anormal").iterdir()] == [b"bomb"]
         if experiment_stats_out is not None:
             experiment_stats_out.update({
                 "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
@@ -832,9 +859,16 @@ def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning
         return output
 
     monkeypatch.setattr("capi_train_new.train_one_patchcore", fake_train)
+
+    def evaluate_exported_model(model_path, train_paths, ng_paths):
+        assert model_path.is_file()
+        assert len(train_paths) == 30
+        captured["evaluation_ng_paths"] = ng_paths
+        return 0.1, [0.1], [0.6]
+
     monkeypatch.setattr(
         "capi_train_new._calibrate_from_model",
-        lambda *args, **kwargs: (0.1, [0.1], []),
+        evaluate_exported_model,
     )
     monkeypatch.setattr("capi_train_new._setup_offline_env", lambda *args, **kwargs: None)
     config = TrainingConfig(
@@ -845,7 +879,7 @@ def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning
         feature_cleaning_scope="inner_and_edge",
     )
 
-    train_single_submodel(
+    result = train_single_submodel(
         db=MockDB(),
         job_id="job",
         lighting="W0F00000",
@@ -857,6 +891,10 @@ def test_train_single_submodel_does_not_load_rejected_tiles_for_context_cleaning
 
     assert len(captured["trace_sources"]) == 30
     assert not any(call.get("decision") == "reject" for call in list_calls)
+    assert captured["evaluation_ng_paths"] == [bomb_path]
+    assert result["ng_count"] == 1
+    assert result["metrics"]["ng_caught_count"] == 1
+    assert result["metrics"]["normalization_source"] == "ok_only"
 
 
 def test_calibrate_threshold_returns_default():
@@ -866,7 +904,7 @@ def test_calibrate_threshold_returns_default():
     改為使用者在 UI 微調。
     """
     from capi_train_new import calibrate_threshold, DEFAULT_THRESHOLD
-    assert DEFAULT_THRESHOLD == 0.35
+    assert DEFAULT_THRESHOLD == 0.5
     # 不論 NG / train_max 多少，都回固定值
     assert calibrate_threshold(ng_scores=[0.5, 0.7, 0.9], train_max_score=0.4) == DEFAULT_THRESHOLD
     assert calibrate_threshold(ng_scores=[], train_max_score=0.95) == DEFAULT_THRESHOLD

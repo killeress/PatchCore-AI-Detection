@@ -2,8 +2,31 @@
 (function () {
     'use strict';
     const stages = {image_list: '建立影像清單', mark_primary: '主要定位標記偵測', mark_fallback: '備用定位標記偵測', mark_read_locate_recognize: '讀取及辨識定位標記', omit_read_check: '讀取灰塵檢查影像'};
+    function trainingModel(raw) {
+        const marker = '[MODEL_TRAINING] ';
+        const start = raw.indexOf(marker);
+        if (start < 0) return null;
+        let data;
+        try { data = JSON.parse(raw.slice(start + marker.length)); } catch (_) { return null; }
+        if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.mode !== 'string') return null;
+        const label = value => typeof value === 'string' && value ? value : '未記錄';
+        const modes = {off: 'PatchCore（清洗關閉）', knn_cosine_q99_v1: 'PatchCore＋KNN 百分位清洗', context_overlap_adaptive_v1: 'PatchCore＋重疊上下文清洗', softpatch_plus_v1: 'SoftPatch+（Tile 適配）'};
+        const details = [];
+        if (data.mode === 'softpatch_plus_v1') {
+            details.push(({lof: 'LOF', lof_gaussian: 'LOF＋Gaussian'})[data.discriminator] || '評分設定未記錄');
+            details.push(data.soft_weight === true ? '推論權重開啟' : data.soft_weight === false ? '推論權重關閉' : '權重開關未記錄');
+            if (typeof data.weight_strength === 'number' && Number.isFinite(data.weight_strength)) details.push(`強度 ${data.weight_strength}`);
+            if ([data.weight_min, data.weight_max].every(v => typeof v === 'number' && Number.isFinite(v))) {
+                details.push(`實際倍率 ${data.weight_min.toFixed(2)}～${data.weight_max.toFixed(2)}`);
+            }
+        }
+        const zone = ({inner: 'INNER', edge: 'EDGE', shared: '共用'})[data.zone] || label(data.zone);
+        return {unit: `${label(data.lighting)} / ${zone}`, mode: modes[data.mode] || '訓練清洗方式未記錄', settings: details.join('；') || '—', path: label(data.model_path)};
+    }
     function describe(raw) {
         let m;
+        const model = trainingModel(raw);
+        if (model) return `使用模型：${model.unit} · ${model.mode}${model.settings === '—' ? '' : ' · ' + model.settings} · ${model.path}`;
         if ((m = raw.match(/\[stage\] (\S+) elapsed_ms=([\d.]+)/))) return `${stages[m[1]] || (m[1].startsWith('aoi_raw_bounds:') ? '取得 AOI 原圖邊界：' + m[1].slice(15) : m[1])} · ${(Number(m[2]) / 1000).toFixed(2)} 秒`;
         if ((m = raw.match(/\[image-io\] source=(.*?) flags=.*?cache=(\w+).*?total_ms=([\d.]+)/))) return `影像讀取：${m[1]} · ${m[2] === 'hit' ? '使用快取' : '重新讀取'} · ${(Number(m[3]) / 1000).toFixed(2)} 秒`;
         if (raw.includes('no dot-matrix mark candidate found')) return '未偵測到點陣定位標記；詳見原始紀錄。';
@@ -17,13 +40,15 @@
         return raw.replace(/^\[[^\]]+\]\s+(?:INFO|WARNING|ERROR|DEBUG|CRITICAL)\s+\[[^\]]+\]\s*/, '').replace(/^\[v2\]\s*/, '');
     }
     function parseLog(text) {
-        const events = []; const specs = []; const timings = []; const alerts = new Map();
+        const events = []; const specs = []; const timings = []; const alerts = new Map(); const models = new Map();
         let decision = '紀錄未提供可辨識的最終規格判定', overview = '', report = '';
         for (const raw of text.split(/\r?\n/).filter(line => line.trim())) {
             const message = describe(raw);
             const level = /\b(ERROR|CRITICAL)\b|Traceback/.test(raw) ? 'error' : /\bWARNING\b|no dot-matrix|large-panel raw boundary skipped|BOMB_FORCE/.test(raw) ? 'attention' : 'info';
             const time = (raw.match(/^\[\d{4}-\d\d-\d\d ([\d:]+)\]/) || [,''])[1];
             const event = {raw, message, level, time}; events.push(event);
+            const model = trainingModel(raw);
+            if (model) models.set(JSON.stringify(model), model);
             if (level !== 'info') {
                 const key = message;
                 if (!alerts.has(key)) alerts.set(key, {message, level, count: 0, lines: []});
@@ -46,7 +71,7 @@
                 specs.push([parts.shift(), parts.join('：').replace(/；/g, '\n')]);
             }
         }
-        return {events, specs, timings, alerts: [...alerts.values()], decision, overview, report};
+        return {events, specs, timings, models: [...models.values()], alerts: [...alerts.values()], decision, overview, report};
     }
     if (typeof module !== 'undefined' && module.exports) module.exports = {parseLog, describe};
     if (typeof document === 'undefined') return;
@@ -73,6 +98,9 @@
     function initialize() {
         if (initialized) return; initialized = true; parsed = parseLog(raw);
         const summary = find('#il-summary'); summary.append(node('strong', parsed.decision), node('p', parsed.overview || '耗時摘要未記錄'), node('p', parsed.report));
+        const models = disclosure(summary, `本次使用模型（${parsed.models.length} 組）`, true);
+        if (parsed.models.length) table(models, ['光源／區域', '訓練方式', '推論權重／評分', '模型檔案'], parsed.models.map(m => [m.unit, m.mode, m.settings, m.path]));
+        else models.append(node('p', '此紀錄未保存模型訓練方式，無法判定是否使用 SoftPatch+。'));
         if (parsed.specs.length) {
             const failed = parsed.specs.filter(row => /結果=NG/.test(row[1]));
             summary.append(node('p', `規格檢查 ${parsed.specs.length} 項，其中 ${failed.length} 項未通過；可展開查看尺寸、點數與 AOI 點檢出狀態。`));

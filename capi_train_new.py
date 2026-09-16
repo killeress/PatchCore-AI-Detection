@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Callable, Protocol, runtime_checkable, Iterable, Any
 import cv2
+from capi_normalization_config import OK_MAX_NORMALIZATION, OK_MAX_DEFAULT_THRESHOLD
+from capi_softpatch_config import SOFTPATCH_MODE, cleaning_keep_ratio_min, normalize_softpatch_config
 
 from capi_image_naming import canonical_image_prefix
 from capi_image_orientation import read_detection_image
@@ -74,6 +76,7 @@ MIN_TRAIN_TILES = 30
 OOM_WARNING_TILES = 600
 NG_TILES_PER_LIGHTING = 100
 TRAIN_ZERO_SCORE_EPSILON = 1e-6
+NORMALIZATION_OK_SPLIT_RATIO = 0.2
 
 PANEL_MODE_FULL = "full"
 PANEL_MODE_INNER_ONLY = "inner_only"
@@ -103,10 +106,12 @@ FEATURE_CLEANING_MODE_OFF = "off"
 # Stable recipe id for existing jobs/bundles; the actual keep ratio is stored separately.
 FEATURE_CLEANING_MODE_KNN_Q99 = "knn_cosine_q99_v1"
 FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE = "context_overlap_adaptive_v1"
+FEATURE_CLEANING_MODE_SOFTPATCH_PLUS = SOFTPATCH_MODE
 FEATURE_CLEANING_MODE_CHOICES = (
     FEATURE_CLEANING_MODE_OFF,
     FEATURE_CLEANING_MODE_KNN_Q99,
     FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE,
+    FEATURE_CLEANING_MODE_SOFTPATCH_PLUS,
 )
 FEATURE_CLEANING_K = 30
 FEATURE_CLEANING_K_MIN = 1
@@ -192,7 +197,8 @@ def panel_mode_zones(mode: str) -> set:
     raise ValueError(f"invalid panel mode: {mode}")
 
 # AOI 炸彈依映射後的 crop 中心位置判定 inner/edge。
-# 該 zone 的 NG 樣本少於此閾值時，訓練端退回該 lighting 全部 NG（避免 calibration 失準）。
+# 該 zone 的 NG 樣本少於此閾值時，抓取率評估退回該 lighting 全部 NG。
+# NG 僅用於匯出後評估，不參與 Anomalib 正規化。
 MIN_NG_PER_ZONE = 5
 
 
@@ -229,6 +235,8 @@ class TrainingConfig:
     feature_layers: str = PATCHCORE_FEATURE_LAYERS_DEFAULT
     feature_pool_kernel_size: int = PATCHCORE_FEATURE_POOL_KERNEL_DEFAULT
     feature_cleaning_mode: str = FEATURE_CLEANING_MODE_OFF
+    feature_cleaning_k: int = FEATURE_CLEANING_K
+    softpatch_plus_config: Dict[str, Any] = field(default_factory=dict)
     feature_cleaning_scope: str = FEATURE_CLEANING_SCOPE_INNER_ONLY
     feature_cleaning_keep_ratio: float = FEATURE_CLEANING_KEEP_RATIO_DEFAULT
     feature_cleaning_center_size: int = FEATURE_CLEANING_CENTER_SIZE_DEFAULT
@@ -261,9 +269,11 @@ USER_TRAINABLE_PARAM_SPECS: Dict[str, Dict] = {
     "feature_pool_kernel_size": {"type": int, "choices": list(PATCHCORE_FEATURE_POOL_KERNEL_CHOICES)},
     "feature_cleaning_mode": {"type": str, "choices": list(FEATURE_CLEANING_MODE_CHOICES)},
     "feature_cleaning_scope": {"type": str, "choices": list(FEATURE_CLEANING_SCOPE_CHOICES)},
+    "feature_cleaning_k": {"type": int, "min": FEATURE_CLEANING_K_MIN, "max": FEATURE_CLEANING_K_MAX},
+    "softpatch_plus_config": {"type": dict},
     "feature_cleaning_keep_ratio": {
         "type": float,
-        "min": FEATURE_CLEANING_KEEP_RATIO_MIN,
+        "min": 0.50,  # The mode-specific lower bound is validated after parsing.
         "max": FEATURE_CLEANING_KEEP_RATIO_MAX,
     },
     "feature_cleaning_center_size": {
@@ -332,10 +342,10 @@ def normalize_feature_cleaning_by_zone(raw: Any) -> Dict[str, Dict[str, Any]]:
             raise ValueError(
                 f"feature_cleaning_by_zone.{zone}.keep_ratio must be a number"
             ) from exc
-        if not FEATURE_CLEANING_KEEP_RATIO_MIN <= keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
+        if not cleaning_keep_ratio_min(mode) <= keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
             raise ValueError(
                 f"feature_cleaning_by_zone.{zone}.keep_ratio must be between "
-                f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
+                f"{cleaning_keep_ratio_min(mode)} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
             )
         normalized[zone] = {
             "mode": mode,
@@ -380,7 +390,7 @@ def feature_cleaning_config_for_zone(
     )
     return {
         "mode": cfg.feature_cleaning_mode if enabled else FEATURE_CLEANING_MODE_OFF,
-        "k": FEATURE_CLEANING_K,
+        "k": cfg.feature_cleaning_k,
         "keep_ratio": float(cfg.feature_cleaning_keep_ratio),
     }
 
@@ -427,6 +437,8 @@ def apply_user_training_params(
     for key, val in params.items():
         if key == "feature_cleaning_by_zone":
             val = normalize_feature_cleaning_by_zone(val)
+        if key == "softpatch_plus_config":
+            val = normalize_softpatch_config(val)
         if key == "validation_config":
             # Compatibility with old saved jobs: the wizard no longer calibrates.
             continue
@@ -1268,7 +1280,7 @@ def stage_dataset(
     結構：
       staging_dir/
         train/         (個別 file 的 hardlink/copy)
-        test/anormal/  (個別 file)
+        test/anormal/  (個別 file；僅供匯出後評估，不送入 Anomalib)
 
     為避免 anomalib Folder 對 symlink 行為不一致，用個別檔案 hardlink / copy
     （不是整目錄 mklink）。
@@ -1304,12 +1316,13 @@ def _import_anomalib():
     from anomalib.deploy import ExportType
     from anomalib.engine import Engine
     from anomalib.models import Patchcore
+    from capi_patchcore_post_processor import OKMaxPostProcessor
     try:
         from anomalib.data.utils import ValSplitMode
         val_mode = ValSplitMode.SAME_AS_TEST
     except ImportError:
         val_mode = "same_as_test"
-    return Folder, Patchcore, Engine, ExportType, val_mode
+    return Folder, Patchcore, Engine, ExportType, val_mode, OKMaxPostProcessor
 
 
 def train_one_patchcore(
@@ -1331,7 +1344,7 @@ def train_one_patchcore(
     cfg = cfg or TrainingConfig(
         machine_id="?", panel_paths=[], over_review_root=Path("?"),
     )
-    Folder, Patchcore, Engine, ExportType, val_mode = _import_anomalib()
+    Folder, Patchcore, Engine, ExportType, val_mode, ScorePostProcessor = _import_anomalib()
 
     if run_root.exists():
         shutil.rmtree(run_root, ignore_errors=True)
@@ -1339,20 +1352,24 @@ def train_one_patchcore(
 
     if log:
         log(f"{unit_label}: 建立 Folder datamodule")
-    abnormal_dir = staging_dir / "test" / "anormal"
-    has_abnormal_images = abnormal_dir.is_dir() and any(
-        path.is_file() for path in abnormal_dir.iterdir()
-    )
-    folder_kwargs = {}
+    # Keep Bomb/NG out of BOTH image and pixel normalization statistics and
+    # adaptive thresholds. Folder holds out normal images when no separate OK
+    # validation directory exists. Do not use synthetic anomalies as a fallback:
+    # their scores would again determine the exported normalization scale.
+    folder_kwargs = {
+        "abnormal_dir": None,
+        "test_split_mode": "from_dir",
+        "test_split_ratio": NORMALIZATION_OK_SPLIT_RATIO,
+    }
     calibration_normal = staging_dir / "test" / "normal"
     if calibration_normal.is_dir() and any(calibration_normal.iterdir()):
         folder_kwargs["normal_test_dir"] = "test/normal"
-    if has_abnormal_images:
-        folder_kwargs["abnormal_dir"] = "test/anormal"
-    else:
-        folder_kwargs.update(abnormal_dir=None, test_split_mode="synthetic")
         if log:
-            log(f"{unit_label}: 無 NG 樣本，改用 synthetic anomaly 建立驗證集")
+            log(f"{unit_label}: 使用獨立 OK 圖決定正規化尺度")
+    elif log:
+        log(f"{unit_label}: 從 OK 圖保留 {NORMALIZATION_OK_SPLIT_RATIO:.0%} 決定正規化尺度")
+    if log:
+        log(f"{unit_label}: NG Bomb 僅供訓練後抓取率評估，不影響正規化尺度")
 
     datamodule = Folder(
         name=f"unit_{unit_label}",
@@ -1378,6 +1395,7 @@ def train_one_patchcore(
         layers=feature_layers,
         coreset_sampling_ratio=cfg.coreset_ratio,
         precision=cfg.precision,
+        post_processor=ScorePostProcessor(),
     )
     model.pre_processor = Patchcore.configure_pre_processor(image_size=cfg.image_size)
 
@@ -1406,10 +1424,10 @@ def train_one_patchcore(
     if cleaning_scope not in FEATURE_CLEANING_SCOPE_CHOICES:
         raise ValueError(f"unsupported feature_cleaning_scope: {cleaning_scope}")
     cleaning_keep_ratio = float(cfg.feature_cleaning_keep_ratio)
-    if not FEATURE_CLEANING_KEEP_RATIO_MIN <= cleaning_keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
+    if not cleaning_keep_ratio_min(cleaning_mode) <= cleaning_keep_ratio <= FEATURE_CLEANING_KEEP_RATIO_MAX:
         raise ValueError(
             "feature_cleaning_keep_ratio must be between "
-            f"{FEATURE_CLEANING_KEEP_RATIO_MIN} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
+            f"{cleaning_keep_ratio_min(cleaning_mode)} and {FEATURE_CLEANING_KEEP_RATIO_MAX}"
         )
     cleaning_center_size = int(cfg.feature_cleaning_center_size)
     max_center_size = min(int(cfg.image_size[0]), int(cfg.image_size[1]))
@@ -1423,6 +1441,9 @@ def train_one_patchcore(
     zone_cleaning_mode = zone_cleaning["mode"]
     zone_cleaning_k = int(zone_cleaning["k"])
     zone_cleaning_keep_ratio = float(zone_cleaning["keep_ratio"])
+    if isinstance(zone_cleaning["k"], bool) or zone_cleaning_k != zone_cleaning["k"] or not 1 <= zone_cleaning_k <= 200:
+        raise ValueError("feature_cleaning_k must be an integer between 1 and 200")
+    softpatch_options = normalize_softpatch_config(cfg.softpatch_plus_config)
     per_zone_cleaning = bool(cfg.feature_cleaning_by_zone)
     cleaning_stats: Dict[str, Any] = {
         "mode": zone_cleaning_mode,
@@ -1439,12 +1460,20 @@ def train_one_patchcore(
     if zone_cleaning_mode in (
         FEATURE_CLEANING_MODE_KNN_Q99,
         FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE,
+        FEATURE_CLEANING_MODE_SOFTPATCH_PLUS,
     ):
         from capi_patchcore_feature_cleaning import FeatureDensityCleaningCallback
         context_adaptive = (
             zone_cleaning_mode == FEATURE_CLEANING_MODE_CONTEXT_OVERLAP_ADAPTIVE
         )
-        cleaning_callback = FeatureDensityCleaningCallback(
+        callback_type = FeatureDensityCleaningCallback
+        callback_options = {}
+        if zone_cleaning_mode == FEATURE_CLEANING_MODE_SOFTPATCH_PLUS:
+            from capi_patchcore_softpatch import SoftPatchPlusCleaningCallback, enable_softpatch_model
+            enable_softpatch_model(model.model)
+            callback_type = SoftPatchPlusCleaningCallback
+            callback_options["options"] = softpatch_options
+        cleaning_callback = callback_type(
             k=zone_cleaning_k,
             keep_ratio=zone_cleaning_keep_ratio,
             center_size=None if context_adaptive else cleaning_center_size,
@@ -1458,6 +1487,7 @@ def train_one_patchcore(
                 else "quantile"
             ),
             adaptive_mad_z=FEATURE_CLEANING_ADAPTIVE_MAD_Z,
+            **callback_options,
         )
         callbacks = [cleaning_callback]
         cleaning_stats["reason"] = "pending"
@@ -1467,11 +1497,13 @@ def train_one_patchcore(
                 if context_adaptive
                 else f"center={cleaning_center_size}x{cleaning_center_size}"
             )
+            if zone_cleaning_mode == FEATURE_CLEANING_MODE_SOFTPATCH_PLUS:
+                cleaning_detail = f"SoftPatch+ {softpatch_options}"
             log(
                 f"{unit_label}: feature cleaning enabled "
                 f"(scope={'per_zone' if per_zone_cleaning else cleaning_scope}, "
                 f"mode={zone_cleaning_mode}, "
-                f"cosine k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%}, "
+                f"k={zone_cleaning_k}, keep={zone_cleaning_keep_ratio:.1%}, "
                 f"{cleaning_detail})"
             )
     elif (
@@ -1493,6 +1525,7 @@ def train_one_patchcore(
     if log:
         log(f"{unit_label}: engine.fit 開始")
     engine.fit(datamodule=datamodule, model=model)
+    model.post_processor.validate_calibration()
     if cleaning_callback is not None:
         if not cleaning_callback.stats:
             raise RuntimeError("feature cleaning callback did not run")
@@ -1513,9 +1546,17 @@ def train_one_patchcore(
         experiment_stats_out.update({
             "feature_pool_kernel_size": pool_kernel,
             "feature_cleaning": cleaning_stats,
+            "normalization_source": "ok_only",
+            "normalization_mode": OK_MAX_NORMALIZATION,
         })
     if log:
         log(f"{unit_label}: engine.fit 完成，開始 export")
+    model.model.training_provenance = {
+        "mode": zone_cleaning_mode,
+        "softpatch_plus_config": dict(softpatch_options) if zone_cleaning_mode == SOFTPATCH_MODE else {},
+        "normalization_source": "ok_only",
+        "normalization_mode": OK_MAX_NORMALIZATION,
+    }
     engine.export(model=model, export_type=ExportType.TORCH)
 
     candidates = list(run_root.rglob("weights/torch/model.pt"))
@@ -1526,15 +1567,14 @@ def train_one_patchcore(
     return candidates[0]
 
 
-DEFAULT_THRESHOLD = 0.35
+DEFAULT_THRESHOLD = OK_MAX_DEFAULT_THRESHOLD
 
 
 def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
     """所有 unit 統一回傳 DEFAULT_THRESHOLD。
 
-    舊版用 max(NG P10, train_max × 1.05) 但 NG 抽樣未分 zone（inner/edge
-    共用同一批），導致校準不準（見 docs）。改為固定預設值，由使用者在
-    模型庫頁面依誤判情況微調。
+    等比例正規化將 OK 校準最高分對應到 0.5，以此作為新模型起始門檻。
+    NG 不參與選門檻。正式啟用前仍需確認抓取率及正常圖誤報。
 
     參數保留是因為呼叫端仍傳入這兩個值，且 ng_scores 仍用於計算 metrics
     （AUROC、ng_caught_rate）給 UI 顯示。
@@ -2193,7 +2233,7 @@ def train_single_submodel(
     """訓練單一 (lighting, zone) unit。
 
     回傳 dict 包含：
-      - threshold: float (永遠 = DEFAULT_THRESHOLD = 0.35，calibrate 寫死)
+      - threshold: float (DEFAULT_THRESHOLD = 0.5，對應 OK 校準最高分)
       - metrics: dict (compute_unit_metrics 結果)
       - tile_count: int (訓練用 tile 數)
       - ng_count: int (NG 數)
@@ -2246,11 +2286,9 @@ def train_single_submodel(
                        and (t["decision"] == "accept" or t.get("label_source") == "review_decision")]
         calibration_ok = [t for t in calibration if t.get("validation_label") == "ok"]
         ng_tiles = [t for t in calibration if t.get("validation_label") == "ng"]
-        # A complete calibration pair supplies anomalib's normalization data.
-        # Missing classes use the existing train-only synthetic fallback;
-        # acceptance images are never supplied to Folder.
-        if not calibration_ok or not ng_tiles:
-            calibration_ok, ng_tiles = [], []
+        # Only OK supplies anomalib's normalization data. NG remains available
+        # for exported-model evaluation, even when one class is absent.
+        # Acceptance images are never supplied to Folder.
         ng_used = "independent_calibration" if ng_tiles else "none"
 
     if len(train_tiles) < MIN_TRAIN_TILES:
@@ -2278,8 +2316,8 @@ def train_single_submodel(
                 snapshots = {s["tile_id"]: output_pt_path.parent / s["asset_path"] for s in frozen_inputs[0]}
                 calibration_ok = [{**t, "source_path": str(snapshots[t["id"]])} for t in calibration_ok if t["id"] in snapshots]
                 ng_tiles = [{**t, "source_path": str(snapshots[t["id"]])} for t in ng_tiles if t["id"] in snapshots]
-                if not calibration_ok or not ng_tiles:
-                    calibration_ok, ng_tiles, ng_used = [], [], "none"
+                if not ng_tiles:
+                    ng_used = "none"
                 if staging.exists():
                     staging.resolve().relative_to(Path(".tmp/training_staging").resolve())
                     shutil.rmtree(staging)
@@ -2335,6 +2373,8 @@ def train_single_submodel(
             metrics["train_count"] = len(train_tiles)
             metrics["memory_estimate"] = memory_estimate
             metrics["ng_used"] = ng_used
+            metrics["normalization_source"] = "ok_only"
+            metrics["normalization_mode"] = OK_MAX_NORMALIZATION
             metrics["feature_pool_kernel_size"] = experiment_stats.get(
                 "feature_pool_kernel_size", cfg.feature_pool_kernel_size,
             )
@@ -2354,10 +2394,11 @@ def train_single_submodel(
             elapsed = time.monotonic() - unit_start
             metrics["elapsed_seconds"] = int(elapsed)
 
-            output_pt_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = output_pt_path.with_suffix(output_pt_path.suffix + ".tmp")
-            shutil.copy2(model_pt, tmp_path)
-            os.replace(tmp_path, output_pt_path)
+            from capi_model_registry import install_trained_submodel
+            threshold_reset = install_trained_submodel(model_pt, output_pt_path, metrics)
+            if threshold_reset:
+                metrics["normalization_threshold_reset"] = threshold_reset
+                log(f"{unit_label}: 改用等比例正規化，舊尺度門檻重設為 {DEFAULT_THRESHOLD}")
             size = output_pt_path.stat().st_size
 
             if cfg.validation_config:
@@ -2418,6 +2459,8 @@ def train_single_submodel(
                     report_tmp = report_path.with_suffix(report_path.suffix + ".tmp")
                     report_payload = {
                         "schema_version": 2,
+                        "score_metric": metrics["feature_cleaning"].get("score_metric", "cosine_distance"),
+                        "softpatch_plus_config": metrics["feature_cleaning"].get("softpatch_plus_config"),
                         "unit_label": unit_label,
                         "k": metrics["feature_cleaning"].get("k"),
                         "keep_ratio": metrics["feature_cleaning"].get("keep_ratio"),
@@ -2691,7 +2734,8 @@ def run_training_pipeline(
             "feature_pool_kernel_size": cfg.feature_pool_kernel_size,
             "feature_cleaning_mode": cfg.feature_cleaning_mode,
             "feature_cleaning_scope": cfg.feature_cleaning_scope,
-            "feature_cleaning_k": FEATURE_CLEANING_K,
+            "feature_cleaning_k": cfg.feature_cleaning_k,
+            "softpatch_plus_config": normalize_softpatch_config(cfg.softpatch_plus_config),
             "feature_cleaning_keep_ratio": cfg.feature_cleaning_keep_ratio,
             "feature_cleaning_center_size": cfg.feature_cleaning_center_size,
             "feature_cleaning_seed": FEATURE_CLEANING_SEED,

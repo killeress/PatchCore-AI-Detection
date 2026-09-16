@@ -242,10 +242,11 @@ def test_keep_ratio_one_skips_distance_cleaning():
     assert callback.stats["reason"] == "keep_all"
 
 
-def test_removes_isolated_feature_and_preserves_raw_embeddings():
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
+def test_removes_isolated_feature_and_preserves_raw_embeddings(dtype):
     raw = torch.tensor(
         [[10.0, 0.0], [9.0, 0.1], [11.0, -0.1], [8.0, 0.05], [-3.0, 0.0]],
-        dtype=torch.float64,
+        dtype=dtype,
     )
     model = _model_with_store(raw[:3].clone(), raw[3:].clone())
     callback = FeatureDensityCleaningCallback(k=2, keep_ratio=0.8, reference_size=5, query_chunk=2)
@@ -254,7 +255,7 @@ def test_removes_isolated_feature_and_preserves_raw_embeddings():
 
     cleaned = torch.cat(model.model.embedding_store)
     assert torch.equal(cleaned, raw[:4])
-    assert cleaned.dtype == torch.float64
+    assert cleaned.dtype == dtype
     assert callback.stats["total"] == 5
     assert callback.stats["kept"] == 4
     assert callback.stats["removed"] == 1
