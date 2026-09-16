@@ -251,6 +251,10 @@
         watchBadge.textContent = "★ 重點關注";
         watchBadge.hidden = true;
         lineIdentity.appendChild(watchBadge);
+        const switchBadges = document.createElement("span");
+        switchBadges.className = "overview-switch-badges";
+        switchBadges.dataset.field = "overview-switch-badges";
+        lineIdentity.appendChild(switchBadges);
         lineCell.appendChild(lineIdentity);
 
         const ipCell = document.createElement("td");
@@ -453,6 +457,7 @@
         const disk = asObject(hardware.disk);
         const update = asObject(raw.update);
         const lineActivity = asObject(raw.line_activity);
+        const modelSwitchAlert = asObject(raw.model_switch_alert);
 
         return {
             running: server.running !== false,
@@ -509,7 +514,19 @@
                 panelCount: optionalNumber(lineActivity.panel_count),
                 haltThreshold: optionalNumber(lineActivity.halt_threshold),
                 isHalted: lineActivity.is_halted === true
-            }
+            },
+            modelSwitches: (Array.isArray(modelSwitchAlert.events) ? modelSwitchAlert.events : [])
+                .map((event) => {
+                    const item = asObject(event);
+                    return {
+                        machineNo: textValue(item.machine_no),
+                        previousModel: textValue(item.previous_model),
+                        newModel: textValue(item.new_model),
+                        switchedAt: textValue(item.switched_at),
+                        expiresAt: textValue(item.expires_at)
+                    };
+                })
+                .filter((event) => event.newModel)
         };
     }
 
@@ -560,6 +577,30 @@
         }
     }
 
+    function formatSwitchBadgeText(event) {
+        const hhmm = event.switchedAt.length >= 16
+            ? event.switchedAt.slice(11, 16)
+            : event.switchedAt;
+        return `⚠ ${hhmm} 切換機種 ${event.previousModel || "?"}→${event.newModel}`;
+    }
+
+    function updateSwitchBadges(container, state) {
+        if (!container) {
+            return;
+        }
+        container.replaceChildren();
+        if (!state.data || state.status === "offline") {
+            return;
+        }
+        for (const event of state.data.modelSwitches) {
+            const badge = document.createElement("span");
+            badge.className = "line-switch-badge";
+            badge.textContent = formatSwitchBadgeText(event);
+            badge.title = `機台 ${event.machineNo || "未知"} 於 ${event.switchedAt} 由 ${event.previousModel || "未知"} 切換為 ${event.newModel}，提醒至 ${event.expiresAt}`;
+            container.appendChild(badge);
+        }
+    }
+
     function renderLineCard(state) {
         const card = state.card;
         const data = state.data;
@@ -584,6 +625,7 @@
             statusPill.removeAttribute("title");
         }
         updateWatchBadge(card.querySelector('[data-field="watch-badge"]'), state);
+        updateSwitchBadges(card.querySelector('[data-field="switch-badges"]'), state);
 
         const errorElement = card.querySelector('[data-field="error"]');
         errorElement.hidden = !state.error;
@@ -655,6 +697,7 @@
         }
         row.dataset.state = state.status;
         updateWatchBadge(row.querySelector('[data-field="overview-watch"]'), state);
+        updateSwitchBadges(row.querySelector('[data-field="overview-switch-badges"]'), state);
         const status = row.querySelector('[data-field="overview-status"]');
         setText(status, statusText(state.status));
         status.title = state.error || statusText(state.status);
