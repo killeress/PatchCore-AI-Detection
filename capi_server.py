@@ -1884,7 +1884,7 @@ class CAPIServer:
                     self.db.get_latest_models_by_machine()
                 )
         except Exception as e:
-            logger.warning(f"[ModelSwitch] 啟動回填機種基線失敗: {e}")
+            logger.warning(f"[ClientModelSwitch] 啟動回填機種基線失敗: {e}")
         self._load_mark_forced_char_conversions()
         try:
             from capi_mark_detector import (
@@ -3082,6 +3082,7 @@ class CAPIServer:
                         response = build_dual_protocol_response(parsed, error_msg, [], request_config)
                     else:
                         response = build_dual_protocol_response(None, error_msg, [], None)
+                    track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)
                     try:
                         _send_response(client_socket, response, request_context, kind="internal_error")
                     except Exception:

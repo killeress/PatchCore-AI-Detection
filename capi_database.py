@@ -8036,6 +8036,8 @@ def track_client_model_switch(db, baseline: dict, lock, parsed: dict) -> None:
     - baseline 由呼叫方持有（server_status.last_model_by_machine），
       lock 用 server_status.lock；DB 寫入在鎖外進行，避免阻塞熱路徑。
     """
+    if not parsed:
+        return  # 解析失敗的錯誤路徑沒有機種可追蹤
     machine_no = str(parsed.get("machine_no") or "").strip()
     model_id = str(parsed.get("model_id") or "").strip()
     if not machine_no or not model_id:
@@ -8049,9 +8051,9 @@ def track_client_model_switch(db, baseline: dict, lock, parsed: dict) -> None:
         return  # 首次回報：只建基線
     try:
         db.record_model_switch_event(machine_no, previous, model_id)
-        logger.info("[ModelSwitch] %s 機種切換：%s → %s", machine_no, previous, model_id)
+        logger.info("[ClientModelSwitch] %s 機種切換：%s → %s", machine_no, previous, model_id)
     except Exception as e:
-        logger.warning("[ModelSwitch] 寫入機種切換事件失敗: %s", e)
+        logger.warning("[ClientModelSwitch] 寫入機種切換事件失敗: %s", e)
 
 
 if __name__ == "__main__":
