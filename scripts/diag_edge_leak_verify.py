@@ -20,9 +20,8 @@ from typing import List, Dict, Tuple
 import cv2
 import numpy as np
 
-ROOT = Path(r"C:/Users/rh.syu/Desktop/CAPI01_AD")
+ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "reports" / "edge_leak_verify"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- 參數 ---
 TILE_SIZE = 512
@@ -334,6 +333,7 @@ def make_six_panel(roi_gray, fg_mask, diff_old, diff_new, diff_dbg,
 # ─── Main ────────────────────────────────────────
 
 def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     summary: List[str] = []
     summary.append("=" * 80)
     summary.append("Edge Leak Verify: fg_median removal impact")

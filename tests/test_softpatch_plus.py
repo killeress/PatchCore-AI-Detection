@@ -231,6 +231,7 @@ def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch):
     class FakePatchcore:
         def __init__(self, **kwargs):
             self.model = toy_model()
+            self.post_processor = kwargs["post_processor"]
             self.model.embedding_store = [torch.randn(40, 2, generator=torch.Generator().manual_seed(15))]
 
         @staticmethod
@@ -259,6 +260,7 @@ def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch):
     monkeypatch.setattr("capi_train_new._import_anomalib", lambda: (
         lambda **kw: SimpleNamespace(), FakePatchcore, FakeEngine,
         SimpleNamespace(TORCH="torch"), "same_as_test",
+        lambda: SimpleNamespace(validate_calibration=lambda: None),
     ))
     staging = tmp_path / "staging"
     (staging / "train").mkdir(parents=True)
