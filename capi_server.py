@@ -1950,6 +1950,11 @@ class CAPIServer:
         self._async_executor_lock = threading.Lock()
         self._async_executor_shutdown = False
 
+        # 機種切換獨立依序處理，避免 DB 鎖或 Heatmap 儲存阻塞 Client 回覆。
+        self._model_switch_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="model-switch-save",
+        )
+
         # 多機種 config 字典 (machine_id → CAPIConfig)；由 _load_model_configs 填入
         self.configs_by_machine: Dict[str, "CAPIConfig"] = {}
         self.fallback_config: Optional["CAPIConfig"] = None
@@ -2763,6 +2768,10 @@ class CAPIServer:
             logger.info("Background save tasks completed")
         else:
             logger.info("Background save executor already stopped")
+
+        model_switch_executor = getattr(self, "_model_switch_executor", None)
+        if model_switch_executor is not None:
+            model_switch_executor.shutdown(wait=True, cancel_futures=False)
             
         if self._server_socket:
             try:
@@ -2807,6 +2816,22 @@ class CAPIServer:
         if should_save_sync:
             logger.warning("Async save executor is stopped; saving result synchronously")
             self._save_results_async(*args, **kwargs)
+
+    def _queue_client_model_switch(self, parsed):
+        """Snapshot the report and persist switches in order without waiting for DB I/O."""
+        if not parsed:
+            return
+        report = {key: parsed.get(key) for key in ("machine_no", "model_id")}
+        switched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            self._model_switch_executor.submit(
+                track_client_model_switch,
+                self.db, server_status.last_model_by_machine, server_status.lock,
+                report, switched_at=switched_at,
+            )
+        except RuntimeError as exc:
+            # Shutdown must never fall back to synchronous DB writes before a reply.
+            logger.warning("[ClientModelSwitch] 無法排入機種切換追蹤: %s", exc)
 
     def _handle_client(self, client_socket: socket.socket, client_addr: tuple):
         """處理客戶端連線（長連線模式）
@@ -2954,7 +2979,7 @@ class CAPIServer:
                                 "time": datetime.now().strftime("%H:%M:%S"),
                                 "duration": "0.00s"
                             }
-                        track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)
+                        self._queue_client_model_switch(parsed)
                         _send_response(client_socket, response, request_context, kind="hy")
                         request_count += 1
                         self._queue_save_results_async(
@@ -3012,7 +3037,7 @@ class CAPIServer:
                             "duration": f"{processing_seconds:.2f}s"
                         }
 
-                    track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)
+                    self._queue_client_model_switch(parsed)
                     # 🚀 先發送回覆（不等 Heatmap 儲存）
                     _send_response(client_socket, response, request_context)
                     request_count += 1
@@ -3082,7 +3107,7 @@ class CAPIServer:
                         response = build_dual_protocol_response(parsed, error_msg, [], request_config)
                     else:
                         response = build_dual_protocol_response(None, error_msg, [], None)
-                    track_client_model_switch(self.db, server_status.last_model_by_machine, server_status.lock, parsed)
+                    self._queue_client_model_switch(parsed)
                     try:
                         _send_response(client_socket, response, request_context, kind="internal_error")
                     except Exception:
