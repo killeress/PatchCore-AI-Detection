@@ -30,6 +30,9 @@
 <body>
     <a class="skip-link" href="#line-overview">跳至線體總覽</a>
 
+    <section class="dashboard-banner" aria-label="智慧製造 AI 視覺檢測示意圖">
+    </section>
+
     <header class="topbar">
         <div class="brand-block">
             <h1 id="dashboard-title">寧波廠區 CAPI AI 中控看板</h1>
@@ -73,9 +76,6 @@
     </header>
 
     <main>
-        <section class="dashboard-banner" aria-label="智慧製造 AI 視覺檢測示意圖">
-        </section>
-
         <div id="process-tabs" class="process-tabs" role="group" aria-label="製程類別" hidden>
             <span class="process-tabs-label">製程類別</span>
             <div class="process-tab-list">
@@ -162,9 +162,9 @@
                         <span data-field="pc-name">—</span>
                     </div>
                     <div class="line-title-row">
+                        <span class="line-watch-badge" data-field="watch-badge" hidden>★</span>
                         <h3 data-field="line-name">—</h3>
                         <span class="line-switch-badges" data-field="switch-badges"></span>
-                        <span class="line-watch-badge" data-field="watch-badge" hidden>★ 重點關注</span>
                     </div>
                 </div>
                 <span class="status-pill" data-field="status">連線中</span>
