@@ -599,7 +599,8 @@ main {
     background: rgba(207, 63, 80, 0.065);
 }
 
-.overview-line {
+.overview-line,
+.overview-line-name {
     display: flex;
     align-items: center;
     gap: 10px;

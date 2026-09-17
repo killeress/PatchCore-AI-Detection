@@ -653,6 +653,7 @@
                 圖片檢測結果詳情
             </h3>
 
+            {% from "_aoi_point_label.html" import aoi_point_label %}
             {% for img in detail.images %}
             {% set wf = img.get("white_frame_result") %}
             {% set display_tiles = img.tiles | rejectattr("is_white_frame_followup") | list %}
@@ -756,8 +757,8 @@
                             {% set is_scratch = t.get("scratch_filtered") %}
                             {% set t_zone = t.get("zone", "") %}
                             <tr>
-                                <td style="color: #64748B;">
-                                    {% if t.get("is_aoi_coord") %}🎯{% endif %}{% if is_scratch %}🧽{% endif %}#{{ t.tile_id }}
+                                <td style="color: #64748B;" data-tile-id="{{ t.tile_id }}">
+                                    {% if is_scratch %}🧽{% endif %}{% if t.get("is_aoi_coord") %}🎯 {{ aoi_point_label(t) }}{% else %}#{{ t.tile_id }}{% endif %}
                                 </td>
                                 <td>
                                     {% if t_zone == "edge" %}
@@ -841,9 +842,9 @@
                     {% if thm_url %}
                     <div class="image-box">
                         <div class="image-box-label"{% if is_scratch %} style="color: #0D9488;"{% endif %}>
-                            {% if is_scratch %}🧽 {% endif %}區域 #{{ t.tile_id }}
+                            {% if is_scratch %}🧽 {% endif %}{% if t.get("is_aoi_coord") %}🎯 {{ aoi_point_label(t) }}{% else %}區域 #{{ t.tile_id }}{% endif %}
                         </div>
-                        <img src="/heatmaps/{{ thm_url }}" alt="tile{{ t.tile_id }} heatmap"
+                        <img src="/heatmaps/{{ thm_url }}" alt="{% if t.get('is_aoi_coord') %}{{ aoi_point_label(t) }} 熱力圖{% else %}tile{{ t.tile_id }} heatmap{% endif %}" data-tile-id="{{ t.tile_id }}"
                             onclick="openLightbox(this.src)">
                     </div>
                     {% endif %}
