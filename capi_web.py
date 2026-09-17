@@ -4664,6 +4664,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             return
         self._decorate_record_image_prefix_labels(detail, self._station_adapter())
         self._decorate_record_preprocess_info(detail)
+        self._decorate_record_aoi_point_numbers(detail, self._station_adapter())
 
         template = self.jinja_env.get_template("record_detail.html")
         html = template.render(
@@ -4912,6 +4913,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             return
         self._decorate_record_image_prefix_labels(detail, self._station_adapter())
         self._decorate_record_preprocess_info(detail)
+        self._decorate_record_aoi_point_numbers(detail, self._station_adapter())
 
         template = self.jinja_env.get_template("record_detail_v3.html")
         html = template.render(
@@ -4934,6 +4936,51 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             image.get("image_name") or image.get("image_path") or ""
             for image in detail.get("images") or []
         )
+
+    @staticmethod
+    def _decorate_record_aoi_point_numbers(detail: dict, station_adapter=None) -> None:
+        """Match displayed AOI points to report rows, independently of tile IDs/order."""
+        raw_coords = detail.get("aoi_machine_coords") or {}
+        try:
+            coords_by_prefix = json.loads(raw_coords) if isinstance(raw_coords, str) else raw_coords
+        except (ValueError, TypeError):
+            coords_by_prefix = {}
+        if not isinstance(coords_by_prefix, dict):
+            coords_by_prefix = {}
+        adapter = station_adapter or create_station_adapter("capi")
+        for image in detail.get("images") or []:
+            name = image.get("image_name") or image.get("image_path") or ""
+            prefix = adapter.report_prefix(name)
+            if prefix not in coords_by_prefix:
+                prefix = adapter.training_image_prefix(name)
+            used = set()
+            # Duplicate report points are assigned in creation order, not score order.
+            for tile in sorted(image.get("tiles") or [], key=lambda t: t.get("tile_id", -1)):
+                tile["aoi_point_number"] = None
+                if not tile.get("is_aoi_coord"):
+                    continue
+                point_prefix = "WHITEFRA" if tile.get("is_white_frame_followup") else prefix
+                coords = coords_by_prefix.get(point_prefix) or []
+                matches = []
+                for number, coord in enumerate(coords, 1):
+                    if not isinstance(coord, dict) or (point_prefix, number) in used:
+                        continue
+                    use_image = coord.get("coordinate_space", "product") == "image" and coord.get("product_x", -1) < 0
+                    space = "image" if use_image else "product"
+                    x = coord.get(f"{space}_x", coord.get("source_x", -1) if use_image else -1)
+                    y = coord.get(f"{space}_y", coord.get("source_y", -1) if use_image else -1)
+                    if x is None or y is None or x < 0 or y < 0:
+                        continue
+                    if (x, y) == (tile.get(f"aoi_{space}_x"), tile.get(f"aoi_{space}_y")):
+                        matches.append((number, coord))
+                if matches:
+                    number, _ = next(
+                        ((n, c) for n, c in matches
+                         if c.get("defect_code") == tile.get("aoi_defect_code")),
+                        matches[0],
+                    )
+                    tile["aoi_point_number"] = number
+                    used.add((point_prefix, number))
 
     @staticmethod
     def _decorate_record_preprocess_info(detail: dict) -> None:
