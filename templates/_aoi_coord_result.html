@@ -1,4 +1,5 @@
 {% if aoi_tiles %}
+{% from "_aoi_point_label.html" import aoi_point_label %}
 <div style="margin-top: 24px; padding-top: 16px; border-top: 2px solid #10b981;">
     <h4 style="color: #10b981; margin-bottom: 12px; font-family: 'Fira Code', monospace; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
         🎯 {{ aoi_section_title | default('AOI 機檢座標推論') }}
@@ -7,7 +8,7 @@
     <div style="overflow-x:auto;"><table class="data-table list-table" style="width:100%;">
         <thead>
             <tr>
-                <th>區域</th>
+                <th>AOI 點位</th>
                 <th>異常代碼</th>
                 <th>AOI 座標</th>
                 <th>圖片座標</th>
@@ -25,7 +26,7 @@
             {% set aoi_is_scratch = t.get("scratch_filtered") %}
             {% set aoi_scr_score = t.get("scratch_score", 0) or 0 %}
             <tr>
-                <td style="color: #10b981;">🎯 #{{ t.tile_id }}</td>
+                <td style="color: #10b981;" data-tile-id="{{ t.tile_id }}">🎯 {{ aoi_point_label(t) }}</td>
                 <td><span style="color: #10b981; font-weight: 600;">{{ t.get("aoi_defect_code", "") }}</span></td>
                 <td>
                     {% if t.get("aoi_product_x", -1) >= 0 and t.get("aoi_product_y", -1) >= 0 %}
@@ -94,7 +95,7 @@
         <div class="image-box" style="flex:0 0 auto;width:650px;max-width:100%;border: 2px solid rgba(16, 185, 129, 0.3); border-radius: 8px;">
             <h4
                 style="margin-bottom:8px;color:#10b981;font-size:0.85rem;font-family:'Fira Code',monospace;">
-                🎯 #{{ t.tile_id }} — {{ t.get("aoi_defect_code", "") }}
+                🎯 {{ aoi_point_label(t) }} — {{ t.get("aoi_defect_code", "") }}
                 {% if t.get("aoi_product_x", -1) >= 0 %}
                 <span style="color: #F59E0B;">AOI({{ t.aoi_product_x }},{{ t.aoi_product_y }})</span>
                 {% endif %}
@@ -132,7 +133,7 @@
                 </button>
                 {% endif %}
             </h4>
-            <img src="/heatmaps/{{ thm_url }}" alt="aoi tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
+            <img src="/heatmaps/{{ thm_url }}" alt="{{ aoi_point_label(t) }} 熱力圖" data-tile-id="{{ t.tile_id }}" onclick="openLightbox(this.src)">
         </div>
         {% endif %}
         {% endif %}

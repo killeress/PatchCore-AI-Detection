@@ -1,0 +1,3 @@
+{%- macro aoi_point_label(tile) -%}
+AOI 點位 {% if tile.get('aoi_point_number') %}#{{ tile.aoi_point_number }}{% else %}未對應{% endif %}
+{%- endmacro -%}
