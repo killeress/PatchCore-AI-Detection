@@ -268,9 +268,9 @@ def test_frontend_halted_state_wiring():
     assert "lineActivity.available" in app_js  # 舊版線體缺欄位時不判停線
     assert '[data-state="halted"] .status-pill' in styles
     assert '.line-card[data-state="halted"]::before' in styles
-    assert 'tr[data-state="halted"]' in styles
+    assert 'tr[data-state="halted"]' not in styles  # 停線列不再使用背景色，僅狀態徽章
     assert '[data-theme="dark"] [data-state="halted"]' in styles
-    assert 'tr[data-production="true"][data-state="halted"]' in styles
+    assert 'tr[data-production="true"][data-state="halted"]' not in styles  # 上線＋停線不疊色
 
 
 def test_frontend_watch_badge_survives_halted():

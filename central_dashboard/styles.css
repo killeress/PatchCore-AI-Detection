@@ -366,9 +366,10 @@ main {
 .dashboard-banner {
     position: relative;
     isolation: isolate;
+    width: min(1880px, calc(100% - clamp(40px, 8vw, 116px)));
     min-height: clamp(220px, 22vw, 320px);
     overflow: hidden;
-    margin-bottom: 24px;
+    margin: 24px auto;
     background-color: #eaf5fc;
     background-image: url("./banner.png");
     background-position: center;
@@ -598,16 +599,8 @@ main {
     background: rgba(207, 63, 80, 0.065);
 }
 
-.overview-table tbody tr[data-state="halted"] {
-    background: rgba(182, 106, 0, 0.045);
-}
-
-.overview-table tbody tr[data-production="true"][data-state="halted"],
-.overview-table tbody tr[data-production="true"][data-state="halted"]:hover {
-    background: rgba(182, 106, 0, 0.085);
-}
-
-.overview-line {
+.overview-line,
+.overview-line-name {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -635,17 +628,24 @@ main {
 .line-watch-badge {
     display: inline-flex;
     align-items: center;
-    padding: 4px 7px;
-    color: var(--amber);
-    background: rgba(182, 106, 0, 0.09);
-    border: 1px solid rgba(182, 106, 0, 0.28);
-    border-radius: 999px;
-    font-size: 0.65rem;
+    color: var(--red);
+    font-size: 1rem;
     font-weight: 900;
+    line-height: 1;
     white-space: nowrap;
 }
 
-.overview-watch-badge[hidden],
+/* 總覽表：星號槽位固定保留，隱藏時改為佔位（visibility），讓各列線體名對齊 */
+.overview-watch-badge {
+    flex: none;
+    justify-content: center;
+    width: 1rem;
+}
+
+.overview-watch-badge[hidden] {
+    visibility: hidden;
+}
+
 .line-watch-badge[hidden] {
     display: none;
 }
@@ -665,7 +665,7 @@ main {
     background: rgba(0, 143, 186, 0.09);
     border: 1px solid rgba(0, 143, 186, 0.28);
     border-radius: 999px;
-    font-size: 0.65rem;
+    font-size: 0.75rem;
     font-weight: 900;
     white-space: nowrap;
 }
@@ -675,19 +675,6 @@ main {
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-}
-
-.overview-factory {
-    min-width: 50px;
-    padding: 4px 7px;
-    color: var(--primary);
-    background: var(--surface-blue);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    font-size: 0.62rem;
-    font-weight: 900;
-    letter-spacing: 0.06em;
-    text-align: center;
 }
 
 .overview-ip {
@@ -1452,10 +1439,6 @@ main {
 
 :root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-state="warning"],
 :root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-health="warning"] {
-    background: rgba(255, 180, 84, 0.11);
-}
-
-:root[data-theme="dark"] .overview-table tbody tr[data-production="true"][data-state="halted"] {
     background: rgba(255, 180, 84, 0.11);
 }
 
