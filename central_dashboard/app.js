@@ -29,6 +29,10 @@
 
     async function initialize() {
         initializeTheme();
+        // 關掉瀏覽器的捲動位置還原，避免刷新後被拉回頂端（干擾下方跳過 banner 的動作）
+        if ("scrollRestoration" in window.history) {
+            window.history.scrollRestoration = "manual";
+        }
         const directFileMode = window.location.protocol === "file:";
         const helpLink = document.getElementById("dashboard-help-link");
         if (helpLink) helpLink.hidden = directFileMode;
@@ -63,6 +67,7 @@
             showConfigError("尚未設定任何啟用中的線體。");
             updateSummary();
             startClock();
+            skipDashboardBanner();
             return;
         }
 
@@ -82,10 +87,29 @@
         }
         initializeProcessTabs();
         updateSummary();
+        skipDashboardBanner();
 
         startClock();
         countdownTimer = window.setInterval(updateRefreshStatus, 1000);
         refreshAllLines();
+    }
+
+    function skipDashboardBanner() {
+        // 內容渲染完成後再跳過頂部 banner：讓標題列對齊視窗頂（帶 # 錨點時保留瀏覽器跳轉）
+        if (!window.location.hash) {
+            const topbar = document.querySelector(".topbar");
+            if (topbar) {
+                // 空設定時內容較短，仍需保留一個視窗高度，才能完整捲過 banner。
+                const main = document.querySelector("main");
+                if (main) {
+                    main.style.minHeight = `calc(100vh - ${topbar.offsetHeight}px)`;
+                }
+                window.scrollTo({
+                    top: topbar.getBoundingClientRect().top + window.scrollY,
+                    behavior: "instant"
+                });
+            }
+        }
     }
 
     function normalizeConfig(rawConfig) {
@@ -232,12 +256,18 @@
         lineCell.className = "overview-line-cell";
         const lineIdentity = document.createElement("div");
         lineIdentity.className = "overview-line";
-        const factory = document.createElement("span");
-        factory.className = "overview-factory";
-        factory.textContent = line.factory || "未設定廠別";
+        const lineNameGroup = document.createElement("span");
+        lineNameGroup.className = "overview-line-name";
+        const watchBadge = document.createElement("span");
+        watchBadge.className = "overview-watch-badge";
+        watchBadge.dataset.field = "overview-watch";
+        watchBadge.textContent = "★";
+        watchBadge.hidden = true;
+        lineNameGroup.appendChild(watchBadge);
         const lineName = document.createElement("strong");
         lineName.textContent = line.line || "未設定線體";
-        lineIdentity.append(factory, lineName);
+        lineNameGroup.appendChild(lineName);
+        lineIdentity.appendChild(lineNameGroup);
         if (line.isProduction === true) {
             const badge = document.createElement("span");
             badge.className = "overview-production-badge";
@@ -249,12 +279,6 @@
         switchBadges.className = "overview-switch-badges";
         switchBadges.dataset.field = "overview-switch-badges";
         lineIdentity.appendChild(switchBadges);
-        const watchBadge = document.createElement("span");
-        watchBadge.className = "overview-watch-badge";
-        watchBadge.dataset.field = "overview-watch";
-        watchBadge.textContent = "★ 重點關注";
-        watchBadge.hidden = true;
-        lineIdentity.appendChild(watchBadge);
         lineCell.appendChild(lineIdentity);
 
         const ipCell = document.createElement("td");

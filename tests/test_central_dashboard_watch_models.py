@@ -239,23 +239,25 @@ def test_frontend_watch_badge_wiring():
     assert "function matchedWatchModel(state)" in app_js
     assert 'state.status !== "online"' in app_js
     assert "function updateWatchBadge(badge, state)" in app_js
-    assert 'watchBadge.textContent = "★ 重點關注";' in app_js
+    assert 'watchBadge.textContent = "★";' in app_js
     assert '[data-field="overview-watch"]' in app_js
     assert '[data-field="watch-badge"]' in app_js
     assert "正在生產關注機種：" in app_js
 
-    assert 'data-field="watch-badge" hidden>★ 重點關注</span>' in index_html
+    assert 'data-field="watch-badge" hidden>★</span>' in index_html
     assert 'class="line-title-row"' in index_html
 
     assert ".overview-watch-badge," in styles_css
     badge_css = styles_css.split(".overview-watch-badge,", 1)[1][:400]
-    assert "color: var(--amber);" in badge_css
-    assert "background: rgba(182, 106, 0, 0.09);" in badge_css
-    assert "border: 1px solid rgba(182, 106, 0, 0.28);" in badge_css
-    assert "padding: 4px 7px;" in badge_css
+    badge_rule = badge_css.split("}")[0]
+    assert "color: var(--red);" in badge_css
+    assert "background:" not in badge_rule  # 純紅色星號，無膠囊底色與邊框
+    assert "border:" not in badge_rule
     assert "#f6c945" not in badge_css
     assert "margin-top" not in badge_css
-    assert ".overview-watch-badge[hidden]," in styles_css
+    assert ".overview-watch-badge[hidden] {" in styles_css
+    assert "visibility: hidden;" in styles_css  # 總覽表星號隱藏時佔位，線體名對齊
+    assert ".line-watch-badge[hidden]" in styles_css  # 卡片星號隱藏即移除
     assert ".line-title-row {" in styles_css
 
 
