@@ -1,0 +1,59 @@
+<style>
+    .capi-gpu-notice {
+        flex-shrink: 0;
+        margin: 10px;
+        padding: 12px 16px;
+        border: 1px solid #f59e0b;
+        border-left-width: 5px;
+        border-radius: 10px;
+        background: #fffbeb;
+        color: #78350f;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+    }
+    .capi-gpu-notice[hidden] { display: none !important; }
+    .capi-gpu-notice[data-severity="critical"] {
+        border-color: #ef4444;
+        background: #fff1f2;
+        color: #9f1239;
+    }
+    .capi-gpu-notice-title { font-size: 16px; font-weight: 700; }
+    .capi-gpu-notice-message, .capi-gpu-notice details { font-size: 13px; }
+    .capi-gpu-notice details { margin-top: 5px; }
+    .capi-gpu-notice summary { cursor: pointer; }
+    .capi-gpu-notice pre { margin: 5px 0 0; white-space: pre-wrap; font: inherit; }
+    .status-indicator.warning, .statusDot.warning {
+        background: #d97706;
+        box-shadow: 0 0 6px rgba(217, 119, 6, 0.4);
+    }
+    #statusValue.warning { color: #b45309; }
+</style>
+
+<div id="capi-gpu-notice" class="capi-gpu-notice" role="alert" aria-atomic="true" hidden>
+    <div id="capi-gpu-notice-title" class="capi-gpu-notice-title"></div>
+    <div id="capi-gpu-notice-message" class="capi-gpu-notice-message"></div>
+    <details id="capi-gpu-notice-details" hidden>
+        <summary>診斷資訊</summary>
+        <pre id="capi-gpu-notice-detail"></pre>
+    </details>
+</div>
+
+<script>
+    window.renderGpuHealth = function (health) {
+        const notice = document.getElementById('capi-gpu-notice');
+        if (!health || health.active !== true) {
+            notice.hidden = true;
+            return;
+        }
+        notice.dataset.severity = health.severity === 'critical' ? 'critical' : 'warning';
+        document.getElementById('capi-gpu-notice-title').textContent = health.title || 'GPU 狀態異常';
+        document.getElementById('capi-gpu-notice-message').textContent = health.message || '';
+        const detail = [health.detail];
+        if (health.detected_at) detail.push('首次錯誤：' + health.detected_at);
+        if (health.checked_at) detail.push('硬體檢查：' + health.checked_at);
+        const text = detail.filter(Boolean).join('\n');
+        document.getElementById('capi-gpu-notice-details').hidden = !text;
+        document.getElementById('capi-gpu-notice-detail').textContent = text;
+        notice.hidden = false;
+    };
+</script>

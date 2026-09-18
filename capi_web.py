@@ -424,18 +424,23 @@ def _read_gpu_status() -> Dict[str, Any]:
             check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except (OSError, subprocess.SubprocessError):
-        return {"available": False}
+    except FileNotFoundError:
+        return {"available": False, "error_code": "tool_missing", "error": "找不到 nvidia-smi，無法確認 GPU 狀態。"}
+    except subprocess.TimeoutExpired:
+        return {"available": False, "error_code": "query_timeout", "error": "GPU 狀態查詢超過 3 秒未回應。"}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"available": False, "error_code": "query_error", "error": str(exc)[:400]}
 
     if completed.returncode != 0 or not completed.stdout.strip():
-        return {"available": False}
+        detail = " ".join((str(getattr(completed, "stderr", "") or "") + " " + completed.stdout).split())
+        return {"available": False, "error_code": "driver_unavailable", "error": detail[:400] or "NVIDIA 驅動未回傳 GPU 資料。"}
 
     try:
         row = next(csv.reader(completed.stdout.splitlines()))
     except (StopIteration, csv.Error):
-        return {"available": False}
-    if len(row) < 5:
-        return {"available": False}
+        return {"available": False, "error_code": "invalid_output", "error": "GPU 狀態回應無法解析。"}
+    if len(row) != 5 or not row[0].strip():
+        return {"available": False, "error_code": "invalid_output", "error": "GPU 狀態回應格式不完整。"}
 
     vram_used_mib = _metric_float(row[2])
     vram_total_mib = _metric_float(row[3])
@@ -447,6 +452,66 @@ def _read_gpu_status() -> Dict[str, Any]:
         "vram_total_gb": round(vram_total_mib / 1024.0, 2) if vram_total_mib is not None else None,
         "temperature_c": _metric_float(row[4]),
     }
+
+
+def _inference_devices(server_instance: Any, fallback_inferencer: Any = None) -> Tuple[str, List[str]]:
+    """Read loaded devices without calling CUDA from the dashboard polling thread."""
+    config = getattr(server_instance, "inference_config", None)
+    requested = str(config.get("device", "auto") or "auto").lower() if isinstance(config, dict) else ""
+    inferencers = [getattr(server_instance, "inferencer", None)]
+    cached = getattr(server_instance, "inferencers", None)
+    if isinstance(cached, dict):
+        inferencers.extend(cached.copy().values())
+    if not any(inferencer is not None for inferencer in inferencers):
+        inferencers = [fallback_inferencer]
+    devices = set()
+    for inferencer in inferencers:
+        if inferencer is None:
+            continue
+        device = str(getattr(inferencer, "device", "") or "").lower()
+        if device and device != "auto":
+            devices.add(device)
+        if not requested:
+            requested = str(getattr(inferencer, "requested_device", "") or "").lower()
+    return requested, sorted(devices)
+
+
+def _build_gpu_health(gpu: Dict[str, Any], requested: str, devices: List[str], gpu_error: Any = None) -> Dict[str, Any]:
+    """Distinguish driver failure, CPU fallback and an intentionally selected CPU."""
+    health = {
+        "active": False, "state": "unknown", "severity": "none",
+        "title": "", "message": "", "detail": "",
+        "requested_device": requested, "inference_devices": devices,
+    }
+    expects_gpu = requested in {"auto", "gpu", "cuda"} or requested.startswith("cuda:")
+    uses_gpu = any(d == "gpu" or d.startswith("cuda") for d in devices)
+    cpu_fallback = expects_gpu and "cpu" in devices
+    if isinstance(gpu_error, dict) and gpu_error.get("message"):
+        health.update(
+            active=True, state="cuda_error", severity="critical", title="GPU 推論異常",
+            message="本次 AI 服務發生致命 CUDA 錯誤。請保留日誌並檢查 GPU；確認恢復後重新啟動 AI 服務。",
+            detail=str(gpu_error["message"])[:400], detected_at=gpu_error.get("detected_at"),
+        )
+    elif gpu.get("available") is False and (expects_gpu or uses_gpu):
+        unavailable = gpu.get("error_code") == "driver_unavailable"
+        health.update(
+            active=True, state="unavailable" if unavailable else "unknown",
+            severity="critical" if unavailable else "warning",
+            title="GPU 無法存取" if unavailable else "GPU 狀態無法確認",
+            message="請通知維護人員檢查 GPU 與 NVIDIA 驅動，並保留故障日誌。",
+            detail=str(gpu.get("error") or "未取得 GPU 狀態。")[:400],
+        )
+    elif expects_gpu or uses_gpu:
+        health["state"] = "healthy" if gpu.get("available") is True else "unknown"
+    elif requested == "cpu":
+        health["state"] = "cpu"
+
+    if cpu_fallback:
+        health["active"] = True
+        if health["severity"] != "critical":
+            health.update(state="cpu_fallback", severity="warning", title="推論已降級 CPU")
+        health["message"] = (health["message"] + " 目前有模型使用 CPU，推論可能明顯變慢；GPU 恢復後仍須重新啟動 AI 服務以重新載入模型。").strip()
+    return health
 
 
 def _read_memory_status() -> Dict[str, Any]:
@@ -523,6 +588,7 @@ def _read_disk_status(path: Any) -> Dict[str, Any]:
 
 def _collect_hardware_status(disk_path: Any) -> Dict[str, Any]:
     return {
+        "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "gpu": _read_gpu_status(),
         "memory": _read_memory_status(),
         "disk": _read_disk_status(disk_path),
@@ -5384,6 +5450,19 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             else:
                 disk_path = getattr(self, "heatmap_base_dir", None) or Path.cwd()
             status["hardware"] = _get_cached_hardware_status(disk_path)
+            requested, devices = _inference_devices(
+                self._capi_server_instance, getattr(self, "inferencer", None)
+            )
+            server = status["server"]
+            server["requested_device"] = requested
+            server["inference_devices"] = devices
+            gpu = status["hardware"].get("gpu", {})
+            if devices:
+                server["device"] = " / ".join(d.upper() for d in devices)
+                if devices in (["cuda"], ["cuda:0"], ["gpu"]) and gpu.get("name"):
+                    server["device"] = f"GPU ({gpu['name']})"
+            status["gpu_health"] = _build_gpu_health(gpu, requested, devices, server.get("gpu_error"))
+            status["gpu_health"]["checked_at"] = status["hardware"].get("checked_at")
 
             self._send_json(status, headers=cors_headers)
         except Exception as e:

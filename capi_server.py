@@ -103,6 +103,7 @@ class ServerStatusTracker:
         self.threshold_mapping = {}  # {prefix: threshold}
         self.is_new_architecture = False  # active config 是否為 v2 新架構（決定 dashboard/settings UX）
         self.device = "CPU"
+        self.gpu_error = None
         
         # 連線與推論狀態
         self.active_connections = 0
@@ -135,6 +136,7 @@ class ServerStatusTracker:
                     "uptime": uptime_str,
                     "model_version": self.model_version,
                     "device": self.device,
+                    "gpu_error": dict(self.gpu_error) if self.gpu_error else None,
                     "threshold": self.threshold,
                     "threshold_mapping": dict(self.threshold_mapping),
                     "is_new_architecture": self.is_new_architecture,
@@ -152,6 +154,24 @@ class ServerStatusTracker:
                 },
                 "latest_event": self.last_judgment_result,
             }
+
+    def record_gpu_error(self, exc: Exception) -> None:
+        """Keep the first fatal CUDA fault for this process, even if NVML still responds."""
+        message = " ".join(str(exc).split())
+        fatal_markers = (
+            "unspecified launch failure", "illegal memory access", "device-side assert",
+            "cuda error: unknown error", "cuda initialization: cuda unknown error",
+            "cuda_error_launch_failed", "cuda_error_illegal_address", "cuda_error_assert",
+            "cuda_error_context_is_destroyed", "gpu has fallen off the bus",
+        )
+        if not any(marker in message.lower() for marker in fatal_markers):
+            return
+        with self.lock:
+            if self.gpu_error is None:
+                self.gpu_error = {
+                    "message": f"{type(exc).__name__}: {message}"[:400],
+                    "detected_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
 
 # 全域狀態單例
 server_status = ServerStatusTracker()
@@ -3183,6 +3203,7 @@ class CAPIServer:
                         with server_status.lock:
                             server_status.active_inferences = max(0, server_status.active_inferences - 1)
                     logger.error(f"[{client_addr}] Unexpected error: {e}", exc_info=True)
+                    server_status.record_gpu_error(e)
                     error_msg = f"ERR:INTERNAL_ERROR ({type(e).__name__})"
                     if parsed:
                         response = build_dual_protocol_response(parsed, error_msg, [], request_config)
@@ -3600,6 +3621,7 @@ class CAPIServer:
 
             except Exception as e:
                 logger.error(f"Inference error: {e}", exc_info=True)
+                server_status.record_gpu_error(e)
                 return f"ERR:INFERENCE_FAILED ({type(e).__name__}: {str(e)[:100]})", "[]", [], False, None, {}, False, "", None
 
 

@@ -82,6 +82,7 @@ CODE_FILES = [
     "templates/base.html",
     "templates/dashboard.html",
     "templates/dashboard_v3.html",
+    "templates/_gpu_notice.html",
     "templates/debug_inference.html",
     "templates/_white_frame_result.html",
     "templates/_side_white_result.html",
