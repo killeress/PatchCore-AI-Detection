@@ -1,0 +1,39 @@
+.edge-ng-badge {
+    display: inline-block; padding: 2px 7px; border-radius: 5px;
+    background: rgba(239, 68, 68, .12); color: var(--edge-ng-color, #b91c1c); font-size: 12px;
+}
+.edge-ng-table-reason { margin-top: 3px; color: var(--edge-ng-color, #b91c1c); font-size: 12px; }
+.edge-ng-table-reason .edge-ng-toggle { display: block; }
+.edge-ng-toggle {
+    padding: 2px 0; border: 0; background: transparent; color: var(--edge-ng-link, #2563eb);
+    font: inherit; font-size: 12px; text-decoration: underline; text-underline-offset: 3px;
+    cursor: pointer; white-space: nowrap;
+}
+.edge-ng-reason-bar {
+    clear: both;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    gap: 6px 12px; padding: 7px 10px; background: rgba(239, 68, 68, .09);
+    border-top: 1px solid var(--border, #e2e8f0); color: var(--edge-ng-color, #b91c1c); font-size: 12px;
+}
+.edge-ng-evidence {
+    padding: 12px; background: var(--bg, #f8fafc); color: var(--text, #1f2937);
+    border-top: 1px solid var(--border, #e2e8f0); font-size: 12px; text-align: left;
+}
+.edge-ng-evidence[hidden] { display: none; }
+.edge-ng-evidence-title { font-weight: 600; margin-bottom: 7px; }
+.edge-ng-flow { color: var(--text-muted, #64748b); margin-bottom: 10px; overflow-wrap: anywhere; }
+.edge-ng-measures { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 10px; }
+.edge-ng-measures span, .edge-ng-measures small { display: block; color: var(--text-muted, #64748b); font-size: 12px; }
+.edge-ng-measures strong { display: block; margin: 3px 0; font-size: 15px; }
+.edge-ng-secondary, .edge-ng-source { color: var(--text-muted, #64748b); }
+.edge-ng-source { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--border, #e2e8f0); }
+.edge-ng-image-box > .image-box-label { position: static; display: block; margin: 8px; }
+@media (max-width: 540px) {
+    .edge-ng-measures { grid-template-columns: 1fr; }
+}
+@media (pointer: coarse) {
+    .edge-ng-toggle { min-height: 44px; }
+}
+
+.edge-ng-table-reason.decision-ok, .edge-ng-reason-bar.decision-ok { color: #0d9488; }
+.edge-ng-reason-bar.decision-ok { background: rgba(13, 148, 136, .09); }

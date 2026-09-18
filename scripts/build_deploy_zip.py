@@ -38,6 +38,7 @@ CODE_FILES = [
     "capi_edge_cv.py",
     "capi_heatmap.py",
     "capi_heatmap_diagnostics.py",
+    "capi_tile_diagnostics.py",
     "capi_image_orientation.py",
     "capi_image_naming.py",
     "capi_image_preprocess_lab.py",
@@ -90,6 +91,9 @@ CODE_FILES = [
     "templates/record_detail.html",
     "templates/record_detail_v3.html",
     "templates/_inference_log.html",
+    "templates/_edge_ng_evidence.html",
+    "static/css/edge-ng-evidence.css",
+    "static/js/edge-ng-evidence.js",
     "static/css/inference-log.css",
     "static/js/inference-log.js",
     "templates/retrain_pool.html",
@@ -192,6 +196,8 @@ CODEONLY_EXCLUDED_PREFIXES = (
 CODEONLY_REQUIRED_STATIC_FILES = {
     "static/css/inference-log.css",
     "static/js/inference-log.js",
+    "static/css/edge-ng-evidence.css",
+    "static/js/edge-ng-evidence.js",
 }
 
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===

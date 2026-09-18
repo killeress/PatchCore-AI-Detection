@@ -189,6 +189,10 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert "capi_edge_cv.py" in names
         assert "capi_heatmap.py" in names
         assert "capi_heatmap_diagnostics.py" in names
+        assert "capi_tile_diagnostics.py" in names
+        assert "templates/_edge_ng_evidence.html" in names
+        assert "static/css/edge-ng-evidence.css" in names
+        assert "static/js/edge-ng-evidence.js" in names
         assert "capi_grid_canonicalization.py" in names
         assert "capi_image_orientation.py" in names
         assert "capi_image_preprocess_lab.py" in names
@@ -235,6 +239,7 @@ def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(
         assert not any(name.startswith("templates/imgs/") for name in names)
         assert {name for name in names if name.startswith("static/")} == {
             "static/js/inference-log.js", "static/css/inference-log.css",
+            "static/js/edge-ng-evidence.js", "static/css/edge-ng-evidence.css",
         }
         assert "templates/_inference_log.html" in names
 

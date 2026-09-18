@@ -36,6 +36,7 @@ import threading
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import json
+from capi_tile_diagnostics import tile_decision_context
 import time
 import re
 import logging
@@ -1583,6 +1584,11 @@ def results_to_db_data(
                 "scratch_score": tile.scratch_score,
                 "scratch_filtered": tile.scratch_filtered,
                 "zone": getattr(tile, "zone", "") or "",
+                "dust_detail_text": str(getattr(tile, "dust_detail_text", "") or ""),
+                "decision_context": json.dumps(tile_decision_context(tile), ensure_ascii=False),
+                "edge_light_leak_result": json.dumps(
+                    getattr(tile, "edge_light_leak_result", None), ensure_ascii=False,
+                ) if getattr(tile, "edge_light_leak_result", None) is not None else "",
             })
 
         # CV 邊緣缺陷 — 獨立儲存 (不放入 tiles)
@@ -1621,7 +1627,8 @@ def results_to_db_data(
                     "pc_roi_shift_dx": int(getattr(edge, 'pc_roi_shift_dx', 0)),
                     "pc_roi_shift_dy": int(getattr(edge, 'pc_roi_shift_dy', 0)),
                     "pc_roi_fallback_reason": str(getattr(edge, 'pc_roi_fallback_reason', '')),
-                    # OMIT dust detail (Phase 6 UI 顯示用，沿用既有 EdgeDefect 欄位，不入 DB)
+                    # 保存判定分支與灰塵複核依據
+                    "decision_context": json.dumps({"version": 1, **(getattr(edge, "decision_context", None) or {})}, ensure_ascii=False),
                     "dust_detail_text": str(getattr(edge, 'dust_detail_text', '')),
                 })
 

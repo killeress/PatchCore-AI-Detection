@@ -1,5 +1,6 @@
 {% if aoi_tiles %}
 {% from "_aoi_point_label.html" import aoi_point_label %}
+{% from "_edge_ng_evidence.html" import reason_link, tile_evidence %}
 <div style="margin-top: 24px; padding-top: 16px; border-top: 2px solid #10b981;">
     <h4 style="color: #10b981; margin-bottom: 12px; font-family: 'Fira Code', monospace; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
         🎯 {{ aoi_section_title | default('AOI 機檢座標推論') }}
@@ -56,6 +57,8 @@
                     {% if aoi_is_scratch %}
                     <span style="color: #0D9488; font-weight: 600;">🧽 Scratch 救回 OK</span>
                     <span style="color: #0D9488; font-size: 0.8rem;"> (score={{ aoi_scr_score | round(3) }})</span>
+                    {% elif t.get('decision_evidence') and t.decision_evidence.status == 'OK' %}
+                    <span style="color: #0D9488; font-weight: 600;">最終 OK</span>
                     {% elif t.get("is_anomaly") %}
                     <span style="color: #EF4444; font-weight: 600;">AI 也判 NG</span>
                     {% else %}
@@ -70,6 +73,7 @@
                     {% if aoi_scr_score >= 0.001 and not aoi_is_scratch %}
                     <span style="color: var(--text-muted); font-size: 0.8rem;"> | SCR:{{ aoi_scr_score | round(3) }}</span>
                     {% endif %}
+                    {{ reason_link(t) }}
                 </td>
                 <td>
                     {% if t.get("ng_validation_sample_id") %}
@@ -133,11 +137,18 @@
                 </button>
                 {% endif %}
             </h4>
+            {% call tile_evidence(t) %}
             <img src="/heatmaps/{{ thm_url }}" alt="{{ aoi_point_label(t) }} 熱力圖" data-tile-id="{{ t.tile_id }}" onclick="openLightbox(this.src)">
+            {% endcall %}
         </div>
         {% endif %}
         {% endif %}
         {% endfor %}
     </div>
+    {% for t in aoi_tiles %}
+    {% if t.get('decision_evidence') and (not t.heatmap_path or not heatmap_base_dir or not hm_relative(t.heatmap_path, heatmap_base_dir)) %}
+    {% call tile_evidence(t) %}{% endcall %}
+    {% endif %}
+    {% endfor %}
 </div>
 {% endif %}
