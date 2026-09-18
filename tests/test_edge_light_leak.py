@@ -16,7 +16,6 @@ def _light_leak_config() -> EdgeInspectionConfig:
     config.light_leak_edge_distance = 20
     config.light_leak_aoi_radius = 35
     config.light_leak_threshold = 4.0
-    config.light_leak_dark_threshold = 4.0
     config.light_leak_min_length = 24
     config.light_leak_boundary_offset = 5
     config.light_leak_band_width = 10
@@ -76,7 +75,7 @@ def test_edge_light_leak_detects_continuous_bright_band_on_all_four_sides(side):
 
 
 @pytest.mark.parametrize("side", ["top", "bottom", "left", "right"])
-def test_edge_light_leak_detects_continuous_dark_drop_on_all_four_sides(side):
+def test_edge_light_leak_ignores_continuous_dark_drop_on_all_four_sides(side):
     image, dust, polygon, aoi, _ = _synthetic_panel(side, dark=True)
 
     result = inspect_aoi_edge_light_leak(
@@ -91,12 +90,12 @@ def test_edge_light_leak_detects_continuous_dark_drop_on_all_four_sides(side):
     )
 
     assert result["applicable"] is True
-    assert result["detected"] is True
+    assert result["detected"] is False
     assert result["side"] == side
-    assert result["anomaly_type"] == "DARK_DROP"
-    assert result["continuous_length"] >= 24
-    assert result["max_delta"] >= 9.0
-    assert result["dust_overlap"] == 0.0
+    assert result["anomaly_type"] == "BRIGHT_LEAK"
+    assert result["continuous_length"] == 0
+    assert result["reason"] == "below_threshold"
+    assert all(candidate["anomaly_type"] == "BRIGHT_LEAK" for candidate in result["candidates"])
 
 
 def test_edge_light_leak_keeps_normal_edge_ok():
@@ -139,14 +138,12 @@ def test_edge_light_leak_does_not_rescue_band_covered_by_dust():
     assert result["reason"] == "dust_overlap"
 
 
-@pytest.mark.parametrize(
-    ("dark", "anomaly_type"),
-    [(False, "BRIGHT_LEAK"), (True, "DARK_DROP")],
-)
-def test_formal_dust_postprocess_rescues_aoi_edge_light_leak(dark, anomaly_type):
+@pytest.mark.parametrize("dark", [False, True])
+@pytest.mark.parametrize("two_stage", [False, True])
+def test_formal_dust_postprocess_rescues_only_bright_edge_light_leak(dark, two_stage):
     image, dust, polygon, aoi, _ = _synthetic_panel("bottom", dark=dark)
     config = CAPIConfig()
-    config.dust_two_stage_enabled = False
+    config.dust_two_stage_enabled = two_stage
     edge_config = _light_leak_config()
 
     inferencer = object.__new__(CAPIInferencer)
@@ -197,6 +194,12 @@ def test_formal_dust_postprocess_rescues_aoi_edge_light_leak(dark, anomaly_type)
     inferencer.generate_dust_iou_debug_image = (
         lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8)
     )
+    inferencer.check_dust_two_stage = lambda *args, **kwargs: (
+        False, None, [], "TWO_STAGE: 0real+0dust -> DUST"
+    )
+    inferencer.generate_two_stage_debug_image = (
+        lambda *args, **kwargs: np.zeros((8, 8, 3), dtype=np.uint8)
+    )
 
     inferencer._apply_omit_dust_postprocess(
         [result],
@@ -207,24 +210,22 @@ def test_formal_dust_postprocess_rescues_aoi_edge_light_leak(dark, anomaly_type)
         product_resolution=(image.shape[1], image.shape[0]),
     )
 
-    assert tile.is_suspected_dust_or_scratch is False
-    assert tile.edge_light_leak_result["detected"] is True
+    assert tile.is_suspected_dust_or_scratch is dark
+    assert tile.edge_light_leak_result["detected"] is (not dark)
     assert tile.edge_light_leak_result["side"] == "bottom"
-    assert tile.edge_light_leak_result["anomaly_type"] == anomaly_type
-    assert tile.anomaly_peak_source == "aoi_edge_light_leak"
-    assert f"EDGE_LIGHT_LEAK_RESCUE: {anomaly_type} BOTTOM" in tile.dust_detail_text
+    assert tile.edge_light_leak_result["anomaly_type"] == "BRIGHT_LEAK"
+    assert bool(tile.edge_light_leak_result.get("rescue_applied")) is (not dark)
+    if dark:
+        assert tile.anomaly_peak_source != "aoi_edge_light_leak"
+        assert "EDGE_LIGHT_LEAK_RESCUE" not in tile.dust_detail_text
+        assert tile.dust_detail_text.endswith("-> DUST")
+    else:
+        assert tile.anomaly_peak_source == "aoi_edge_light_leak"
+        assert "EDGE_LIGHT_LEAK_RESCUE: BRIGHT_LEAK BOTTOM" in tile.dust_detail_text
 
 
-@pytest.mark.parametrize(
-    ("dark", "anomaly_type", "anomaly_type_zh"),
-    [
-        (False, "BRIGHT_LEAK", "邊緣亮帶"),
-        (True, "DARK_DROP", "邊緣暗段"),
-    ],
-)
-def test_debug_dust_pipeline_reports_edge_light_leak_rescue(
-    dark, anomaly_type, anomaly_type_zh
-):
+@pytest.mark.parametrize("dark", [False, True])
+def test_debug_dust_pipeline_rescues_only_bright_edge_light_leak(dark):
     from capi_web import CAPIWebHandler
 
     image, dust, polygon, aoi, _ = _synthetic_panel("bottom", dark=dark)
@@ -282,12 +283,16 @@ def test_debug_dust_pipeline_reports_edge_light_leak_rescue(
         raw_bounds=(0, 0, image.shape[1], image.shape[0]),
     )
 
-    assert payload["final_judgment"] == "NG"
-    assert payload["dust_filter_result"] == "EDGE_LIGHT_LEAK_RESCUE"
-    assert payload["edge_light_leak"]["detected"] is True
+    assert payload["final_judgment"] == ("OK" if dark else "NG")
+    if dark:
+        assert payload["dust_filter_result"] != "EDGE_LIGHT_LEAK_RESCUE"
+        assert tile.is_suspected_dust_or_scratch is True
+    else:
+        assert payload["dust_filter_result"] == "EDGE_LIGHT_LEAK_RESCUE"
+    assert payload["edge_light_leak"]["detected"] is (not dark)
     assert payload["edge_light_leak"]["side_zh"] == "下邊"
-    assert payload["edge_light_leak"]["anomaly_type"] == anomaly_type
-    assert payload["edge_light_leak"]["anomaly_type_zh"] == anomaly_type_zh
+    assert payload["edge_light_leak"]["anomaly_type"] == "BRIGHT_LEAK"
+    assert payload["edge_light_leak"]["anomaly_type_zh"] == "邊緣亮帶"
     assert tile.edge_light_leak_debug_image is not None
 
 
@@ -300,7 +305,7 @@ def test_edge_light_leak_settings_and_debug_ui_are_exposed():
     assert "邊緣漏光檢測" in settings
     assert settings.index("邊緣漏光檢測") < settings.index("CV 邊緣檢測設定")
     assert "cv_edge_light_leak_enabled" in settings
-    assert "cv_edge_light_leak_dark_threshold" in settings
+    assert "p.param_name !== 'cv_edge_light_leak_dark_threshold'" in settings
     assert "cv_edge_light_leak_max_dust_overlap" in settings
     assert database.index("cv_edge_light_leak_enabled") < database.index("cv_edge_enabled")
     assert "邊緣漏光救援判定" in debug
@@ -311,7 +316,8 @@ def test_edge_light_leak_settings_and_debug_ui_are_exposed():
     assert "edge-leak-edge-distance" in debug
     assert "edge-leak-aoi-radius" in debug
     assert "edge-leak-bright-threshold" in debug
-    assert "edge-leak-dark-threshold" in debug
+    assert "edge-leak-dark-threshold" not in debug
+    assert "暗段門檻" not in debug
     assert "edge-leak-min-length" in debug
     assert "edge-leak-boundary-offset" in debug
     assert "edge-leak-band-width" in debug
@@ -346,14 +352,14 @@ def test_debug_edge_light_leak_overrides_do_not_mutate_formal_config():
     assert debug.light_leak_edge_distance == 90
     assert debug.light_leak_aoi_radius == 60
     assert debug.light_leak_threshold == pytest.approx(5.0)
-    assert debug.light_leak_dark_threshold == pytest.approx(6.0)
+    assert not hasattr(debug, "light_leak_dark_threshold")
     assert debug.light_leak_min_length == 35
     assert debug.light_leak_boundary_offset == 12
     assert debug.light_leak_band_width == 40
     assert debug.light_leak_reference_gap == 30
     assert debug.light_leak_max_dust_overlap == pytest.approx(0.15)
     assert formal.light_leak_enabled is True
-    assert formal.light_leak_dark_threshold == pytest.approx(4.0)
+    assert formal.light_leak_threshold == pytest.approx(4.0)
 
 
 def test_debug_edge_light_leak_overrides_validate_ranges():
@@ -445,7 +451,7 @@ def test_edge_light_leak_config_loads_independently_from_cv_main_switch():
     assert config.enabled is False
     assert config.light_leak_enabled is True
     assert config.light_leak_threshold == pytest.approx(5.5)
-    assert config.light_leak_dark_threshold == pytest.approx(6.5)
+    assert not hasattr(config, "light_leak_dark_threshold")
     assert config.light_leak_min_length == 42
     assert config.light_leak_max_dust_overlap == pytest.approx(0.15)
 
@@ -465,5 +471,5 @@ def test_edge_light_leak_database_defaults_are_created(tmp_path):
 
     assert enabled["decoded_value"] is False
     assert threshold["decoded_value"] == pytest.approx(4.0)
-    assert dark_threshold["decoded_value"] == pytest.approx(4.0)
+    assert dark_threshold is None
     assert dust_overlap["decoded_value"] == pytest.approx(0.2)

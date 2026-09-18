@@ -2103,7 +2103,7 @@
     const CV_EDGE_PARAMS = [
         'cv_edge_light_leak_enabled', 'cv_edge_light_leak_edge_distance',
         'cv_edge_light_leak_aoi_radius', 'cv_edge_light_leak_threshold',
-        'cv_edge_light_leak_dark_threshold',
+        'cv_edge_light_leak_dark_threshold', // Legacy DB key: classified here but hidden below.
         'cv_edge_light_leak_min_length', 'cv_edge_light_leak_boundary_offset',
         'cv_edge_light_leak_band_width', 'cv_edge_light_leak_reference_gap',
         'cv_edge_light_leak_max_dust_overlap',
@@ -3443,7 +3443,7 @@
         );
 
         // Group CV Edge Parameters
-        const lightLeakParams = cvEdgeParams.filter(p => p.param_name.startsWith('cv_edge_light_leak_'));
+        const lightLeakParams = cvEdgeParams.filter(p => p.param_name.startsWith('cv_edge_light_leak_') && p.param_name !== 'cv_edge_light_leak_dark_threshold');
         const lightLeakEnabled = lightLeakParams.find(p => p.param_name === 'cv_edge_light_leak_enabled');
         const edgeEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_enabled');
         const dustFilterEnabled = cvEdgeParams.find(p => p.param_name === 'cv_edge_dust_filter_enabled');
