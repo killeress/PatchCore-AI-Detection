@@ -263,12 +263,17 @@ def test_server_switches_to_exact_bundle_and_records_match(tmp_path, monkeypatch
     server._is_bundle_loaded = Mock(return_value=False)
     server._build_inferencer_for_bundle = Mock(return_value=(server.fallback_config, object()))
     server._adopt_active_bundle_runtime = Mock()
+    server._log_gpu_memory_status = Mock()
     activate = Mock()
     monkeypatch.setattr("capi_model_registry.activate_bundle", activate)
 
     assert server._ensure_auto_model_switch_for_request({"model_id": "GN156HRAAPF0S"}) is server.fallback_config
     assert server._build_inferencer_for_bundle.call_args.args[0]["id"] == exact_id
     assert activate.call_args.args == (db, exact_id)
+    assert [call.args[0] for call in server._log_gpu_memory_status.call_args_list] == [
+        f"before-model-switch target_id={exact_id}",
+        f"after-model-switch target_id={exact_id}",
+    ]
     history = db.list_auto_model_switch_history()[0]
     assert history["target_bundle_id"] == exact_id
     assert history["status"] == "success"

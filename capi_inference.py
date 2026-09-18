@@ -583,6 +583,7 @@ class CAPIInferencer:
         if self.scratch_filter is not None:
             return self.scratch_filter
 
+        self._log_cuda_memory("before-scratch-load", synchronize=False)
         try:
             clf = ScratchClassifier(
                 bundle_path=bundle,
@@ -595,6 +596,8 @@ class CAPIInferencer:
             self._scratch_load_failed = True
             self._scratch_filter_signature = signature
             return None
+        finally:
+            self._log_cuda_memory("after-scratch-load-attempt", synchronize=False)
         self.scratch_filter = ScratchFilter(clf, safety_multiplier=current_safety)
         self._scratch_filter_signature = signature
         logger.info("ScratchClassifier filter ready (safety=%.2f, threshold=%.6f)",
@@ -612,20 +615,24 @@ class CAPIInferencer:
         return device
 
     @staticmethod
-    def _log_cuda_memory(stage: str) -> None:
+    def _log_cuda_memory(stage: str, *, synchronize: bool = True) -> None:
         """記錄 PyTorch allocator 與整張 GPU 的顯存快照。"""
-        if not torch.cuda.is_available():
-            return
-
         try:
-            torch.cuda.synchronize()
+            # Background diagnostics must not create a CUDA context on CPU-only
+            # or training-only servers, or wait for outstanding GPU work.
+            if not synchronize and not torch.cuda.is_initialized():
+                return
+            if not torch.cuda.is_available():
+                return
+            if synchronize:
+                torch.cuda.synchronize()
             mib = 1024 * 1024
             free_bytes, total_bytes = torch.cuda.mem_get_info()
             logger.info(
                 "[CUDA-MEM] %s | "
                 "allocated=%.1f MiB reserved=%.1f MiB "
                 "peak_allocated=%.1f MiB peak_reserved=%.1f MiB "
-                "device_used=%.1f MiB device_free=%.1f MiB",
+                "device_used=%.1f MiB device_free=%.1f MiB pid=%s",
                 stage,
                 torch.cuda.memory_allocated() / mib,
                 torch.cuda.memory_reserved() / mib,
@@ -633,6 +640,7 @@ class CAPIInferencer:
                 torch.cuda.max_memory_reserved() / mib,
                 (total_bytes - free_bytes) / mib,
                 free_bytes / mib,
+                os.getpid(),
             )
         except Exception as exc:
             logger.warning("[CUDA-MEM] %s unavailable: %s", stage, exc)

@@ -104,6 +104,7 @@ CODE_FILES = [
     "templates/help.html",
     "docs/sop_center.zh-TW.md",
     "docs/scratch_center.zh-TW.md",
+    "docs/gpu_memory_diagnostics.zh-TW.md",
     "docs/softpatch_plus_mode.zh-TW.md",
     "docs/softpatch_plus_feature_cleaning_experiments.zh-TW.md",
     "templates/models.html",
@@ -213,6 +214,8 @@ sop:
 # 0 = 不限制（舊行為）
 inference:
   gpu_memory_fraction: 0.40
+  # 顯存診斷：每 300 秒一行，0 關閉週期記錄；舊設定省略亦預設 300 秒。
+  cuda_memory_log_interval_seconds: 300
 
 # 多機種 model 配置列表（之後啟用新 bundle 時，從模型庫頁面自動新增）
 model_configs:

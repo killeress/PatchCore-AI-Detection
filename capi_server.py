@@ -1873,6 +1873,8 @@ class CAPIServer:
         self._web_thread = None
         self._cleanup_stop_event = threading.Event()
         self._cleanup_thread: Optional[threading.Thread] = None
+        self._cuda_memory_stop_event = threading.Event()
+        self._cuda_memory_thread: Optional[threading.Thread] = None
 
         # 推論器 (延遲載入)
         self.inferencer: Optional[CAPIInferencer] = None
@@ -2217,6 +2219,7 @@ class CAPIServer:
 
             try:
                 with self._gpu_lock:
+                    self._log_gpu_memory_status(f"before-model-switch target_id={target_id}")
                     cfg, inferencer = self._build_inferencer_for_bundle(target_bundle)
                     from capi_model_registry import activate_bundle
                     activate_bundle(
@@ -2225,7 +2228,9 @@ class CAPIServer:
                         server_config_path=Path(self.server_config_path),
                     )
                     self._adopt_active_bundle_runtime(cfg, inferencer)
+                    self._log_gpu_memory_status(f"after-model-switch target_id={target_id}")
             except Exception as e:
+                self._log_gpu_memory_status(f"failed-model-switch target_id={target_id}")
                 message = f"{message_prefix}，切換失敗: {e}"
                 self._record_auto_model_switch_history(
                     decision,
@@ -2606,6 +2611,7 @@ class CAPIServer:
 
         # 啟動清理排程（thread 啟動前必須先讓 lifecycle 進入 running）
         self._start_cleanup_scheduler()
+        self._start_cuda_memory_monitor()
 
         with server_status.lock:
             server_status.is_running = True
@@ -2661,6 +2667,66 @@ class CAPIServer:
                 break
 
         logger.info("Server stopped")
+
+    def _log_gpu_memory_status(self, stage: str) -> None:
+        """Sample process memory and cached model counts without synchronizing CUDA."""
+        try:
+            # Copy registries because model switching may run during a periodic
+            # sample. Counts are a best-effort snapshot, not an inference barrier.
+            inferencers = list(getattr(self, "inferencers", {}).copy().values())
+            inferencers.append(getattr(self, "inferencer", None))
+            unique = {id(inf): inf for inf in inferencers if inf is not None}
+            model_ids = set()
+            scratch_count = 0
+            for inf in unique.values():
+                for attr in ("_model_cache_v2", "_inferencers"):
+                    model_ids.update(
+                        id(model) for model in getattr(inf, attr, {}).copy().values()
+                        if model is not None
+                    )
+                model = getattr(inf, "inferencer", None)
+                if model is not None:
+                    model_ids.add(id(model))
+                scratch_count += int(getattr(inf, "scratch_filter", None) is not None)
+            cfg = getattr(self, "fallback_config", None)
+            CAPIInferencer._log_cuda_memory(
+                f"{stage} machine={getattr(cfg, 'machine_id', '-')} "
+                f"inferencers={len(unique)} patchcore_models={len(model_ids)} "
+                f"scratch_models={scratch_count}",
+                synchronize=False,
+            )
+        except Exception as exc:
+            logger.warning("[CUDA-MEM] %s status unavailable: %s", stage, exc)
+
+    def _start_cuda_memory_monitor(self):
+        """Write one small diagnostic line every five minutes, including while idle."""
+        raw_interval = self.server_config.get("inference", {}).get(
+            "cuda_memory_log_interval_seconds", 300
+        )
+        try:
+            interval = int(raw_interval)
+            if interval < 0:
+                raise ValueError("negative interval")
+        except (TypeError, ValueError, OverflowError):
+            logger.warning("Invalid cuda_memory_log_interval_seconds=%r; using 300", raw_interval)
+            interval = 300
+        if interval == 0:
+            return None
+        if self._cuda_memory_thread is not None and self._cuda_memory_thread.is_alive():
+            return self._cuda_memory_thread
+        self._cuda_memory_stop_event.clear()
+
+        def monitor():
+            while not self._cuda_memory_stop_event.wait(interval):
+                if not self._running:
+                    break
+                self._log_gpu_memory_status("periodic")
+
+        self._cuda_memory_thread = threading.Thread(
+            target=monitor, name="cuda-memory-monitor", daemon=True,
+        )
+        self._cuda_memory_thread.start()
+        return self._cuda_memory_thread
 
     def _start_cleanup_scheduler(self):
         cleanup_cfg = self.server_config.get("cleanup", {})
@@ -2745,6 +2811,14 @@ class CAPIServer:
         self._stop_requested = True
         self._running = False
         self._cleanup_stop_event.set()
+        cuda_stop_event = getattr(self, "_cuda_memory_stop_event", None)
+        if cuda_stop_event is not None:
+            cuda_stop_event.set()
+        cuda_thread = getattr(self, "_cuda_memory_thread", None)
+        if cuda_thread is not None and cuda_thread is not threading.current_thread():
+            cuda_thread.join(timeout=1.0)
+            if not cuda_thread.is_alive():
+                self._cuda_memory_thread = None
         try:
             from capi_mark_shadow import stop_mark_shadow
 
