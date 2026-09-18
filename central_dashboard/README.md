@@ -81,7 +81,9 @@ Access-Control-Allow-Origin: *
 - `hardware.disk`（資料庫所在磁碟空間）
 - `latest_event`（含 `glass_id`、`model_id`、`machine_no`、`judgment`、`time`、`duration`；`model_id` 為最近一筆回報的機種代號，重啟服務後需下一筆投片才會出現）
 
-硬體資訊會在各 CAPI PC 端快取 30 秒。即使既有本機頁面更頻繁呼叫 `/api/status`，也不會每次都重新執行硬體查詢。GPU 資料由 NVIDIA 驅動的 `nvidia-smi` 提供；未安裝 NVIDIA 驅動或查詢失敗時，GPU/VRAM 欄位顯示 `—`，其他狀態仍可正常顯示。
+硬體資訊會在各 CAPI PC 端快取 30 秒。即使既有本機頁面更頻繁呼叫 `/api/status`，也不會每次都重新執行硬體查詢。GPU 資料由 NVIDIA 驅動的 `nvidia-smi` 提供。支援 `gpu_health` 的線體端會區分 GPU 無法存取、查詢逾時／工具缺失、致命 CUDA 錯誤與 CPU 降級，於目前告警、總覽異常欄與卡片 GPU 欄顯示提醒；手動指定 CPU 的模式不會因缺少 NVIDIA GPU 而誤報。舊版線體未提供此欄位時沿用原本的顯示方式。
+
+GPU 恢復回應不代表既有 AI 程序已恢復：CPU 降級提醒會持續到模型實際使用 GPU；本次程序記錄的致命 CUDA 錯誤則保留到 AI 服務重新啟動。此功能只提示異常，不會自行重啟機台或變更推論模式。詳見 [GPU 異常提醒](../docs/gpu_health_alert.zh-TW.md)。
 
 ## `/api/status` 新增資料格式
 

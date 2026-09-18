@@ -460,6 +460,9 @@
             if (!state.data.running) {
                 state.status = "warning";
                 state.error = "API 可連線，但服務回報未運行。";
+            } else if (state.data.gpuHealth.active) {
+                state.status = "warning";
+                state.error = state.data.gpuHealth.title;
             } else if (
                 state.data.lineActivity.available &&
                 state.data.lineActivity.isHalted
@@ -487,6 +490,7 @@
         const latestEvent = asObject(raw.latest_event);
         const hardware = asObject(raw.hardware || server.hardware);
         const gpu = asObject(hardware.gpu);
+        const gpuHealth = asObject(raw.gpu_health);
         const memory = asObject(hardware.memory || hardware.ram);
         const disk = asObject(hardware.disk);
         const update = asObject(raw.update);
@@ -541,6 +545,12 @@
                 ramUsedPercent: optionalNumber(memory.used_percent),
                 diskFreeGb: optionalNumber(disk.free_gb),
                 diskTotalGb: optionalNumber(disk.total_gb)
+            },
+            gpuHealth: {
+                active: gpuHealth.active === true,
+                severity: gpuHealth.severity === "critical" ? "critical" : "warning",
+                title: textValue(gpuHealth.title),
+                message: textValue(gpuHealth.message)
             },
             lineActivity: {
                 available: raw.line_activity !== undefined && raw.line_activity !== null,
@@ -696,7 +706,7 @@
         setField(card, "model-version", data.modelVersion || "—");
         setField(card, "device", data.device || "—");
         setField(card, "vram", formatVram(data.hardware));
-        setField(card, "gpu-health", formatGpuHealth(data.hardware));
+        setField(card, "gpu-health", data.gpuHealth.active ? data.gpuHealth.title : formatGpuHealth(data.hardware));
         setField(card, "ram", formatMemory(data.hardware));
         setField(card, "disk", formatDisk(data.hardware));
         setField(
@@ -1116,6 +1126,13 @@
     function getHardwareAlerts(data) {
         const alerts = [];
         const hardware = data.hardware || {};
+        if (data.gpuHealth && data.gpuHealth.active) {
+            alerts.push({
+                severity: data.gpuHealth.severity,
+                summary: data.gpuHealth.title,
+                message: `${data.gpuHealth.title}：${data.gpuHealth.message}`
+            });
+        }
 
         if (hardware.diskFreeGb !== null && hardware.diskTotalGb > 0) {
             const freePercent = (hardware.diskFreeGb / hardware.diskTotalGb) * 100;
@@ -1221,7 +1238,7 @@
                     severity: "critical",
                     message: `${label}：${state.error || statusText(state.status)}`
                 });
-            } else if (state.status === "warning") {
+            } else if (state.status === "warning" && !(state.data && state.data.running && state.data.gpuHealth.active)) {
                 alerts.push({
                     severity: "warning",
                     message: `${label}：${state.error || statusText(state.status)}`

@@ -745,6 +745,7 @@
     </div>
 
     {% include "_update_notice.html" %}
+    {% include "_gpu_notice.html" %}
 
     <!-- ═══════════════════ MAIN ═══════════════════ -->
     <div id="mainContent">
@@ -879,8 +880,6 @@
                 const data = await res.json();
                 _lastOkData = data;
                 updateDashboard(data);
-                // 成功後清除錯誤狀態
-                document.getElementById('sysDot').className = 'statusDot online';
             } catch (e) {
                 console.error('Polling failed:', e);
                 // 僅更新頭部狀態點，不清空已顯示的數據（和舊版 dashboard.html 行為一致）
@@ -891,11 +890,17 @@
         }
 
         function updateDashboard(data) {
+            window.renderGpuHealth(data.gpu_health);
             // ── System Status ──
             const dot = document.getElementById('sysDot');
             const txt = document.getElementById('sysText');
             const sv = document.getElementById('statusValue');
-            if (data.server.running) {
+            if (data.server.running && data.gpu_health && data.gpu_health.active) {
+                const severity = data.gpu_health.severity === 'critical' ? 'offline' : 'warning';
+                dot.className = 'statusDot ' + severity;
+                txt.textContent = data.gpu_health.title;
+                sv.className = severity;
+            } else if (data.server.running) {
                 dot.className = 'statusDot online';
                 txt.textContent = '連線正常';
                 sv.className = 'online';

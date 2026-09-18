@@ -327,6 +327,7 @@
 {% endblock %}
 
 {% block content %}
+{% include "_gpu_notice.html" %}
 <div class="dashboard-container">
 
     <!-- System Status Panel -->
@@ -482,10 +483,15 @@
     }
 
     function updateDashboard(data) {
+        window.renderGpuHealth(data.gpu_health);
         // 1. System Status
         const ind = document.getElementById('ui-sys-status');
         const txt = document.getElementById('ui-sys-text');
-        if (data.server.running) {
+        if (data.server.running && data.gpu_health && data.gpu_health.active) {
+            ind.className = 'status-indicator ' + (data.gpu_health.severity === 'critical' ? 'offline' : 'warning');
+            txt.textContent = data.gpu_health.title;
+            txt.style.color = data.gpu_health.severity === 'critical' ? 'var(--ng)' : '#fbbf24';
+        } else if (data.server.running) {
             ind.className = 'status-indicator online';
             txt.textContent = '連線正常';
             txt.style.color = 'var(--ok)';

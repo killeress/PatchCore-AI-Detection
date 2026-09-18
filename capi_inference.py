@@ -517,6 +517,7 @@ class CAPIInferencer:
         }
         
         # 決定運算裝置
+        self.requested_device = device
         self.device = self._get_device(device)
         
         # 載入 MARK 模板

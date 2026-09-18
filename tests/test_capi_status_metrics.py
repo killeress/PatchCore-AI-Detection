@@ -32,6 +32,12 @@ class _Database:
     def get_active_model_bundle(self):
         return None
 
+    def get_recent_request_count(self, window_minutes):
+        return 280
+
+    def get_active_model_switches(self, window_minutes):
+        return []
+
 
 def test_gpu_status_parses_nvidia_smi_output(monkeypatch):
     class _Completed:
