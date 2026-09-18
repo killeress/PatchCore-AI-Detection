@@ -216,13 +216,15 @@ def canonicalize_panel_grid(
     )
     to_camera = cv2.getPerspectiveTransform(canonical_corners, polygon)
     height, width = image.shape[:2]
+    # The rounded polygon mask can include samples just beyond the canonical
+    # plane. Extend its edge values so interpolation cannot introduce black
+    # seams along slanted edges/corners. Pixels outside the mask stay unchanged.
     restored = cv2.warpPerspective(
         canonical,
         to_camera,
         (width, height),
         flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
+        borderMode=cv2.BORDER_REPLICATE,
     )
 
     mask = np.zeros((height, width), dtype=np.uint8)
