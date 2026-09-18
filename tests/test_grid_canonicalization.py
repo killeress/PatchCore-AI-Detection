@@ -56,6 +56,29 @@ def test_grid_canonicalization_keeps_camera_shape_and_outside_polygon():
     assert np.array_equal(result.image[:, :18], image[:, :18])
 
 
+@pytest.mark.parametrize("samples_per_cell", [1, 3])
+@pytest.mark.parametrize("color", [100, (40, 100, 180)])
+@pytest.mark.parametrize("polygon", [
+    [[20.4, 18.7], [138.8, 10.2], [145.3, 86.6], [25.1, 92.4]],
+    [[20.4, 10.2], [138.8, 18.7], [135.3, 92.4], [15.1, 86.6]],
+])
+def test_grid_preserves_uniform_brightness_at_slanted_edges_and_corners(
+    samples_per_cell, color, polygon,
+):
+    # Rounded polygon masks include fractional pixels beyond the canonical
+    # plane. They must not blend synthetic black padding into any edge/corner.
+    shape = (104, 164) if isinstance(color, int) else (104, 164, 3)
+    image = np.empty(shape, dtype=np.uint8)
+    image[...] = color
+
+    result = canonicalize_panel_grid(
+        image, polygon, product_resolution=(40, 26),
+        samples_per_cell=samples_per_cell,
+    )
+
+    np.testing.assert_array_equal(result.image, image)
+
+
 def test_one_sample_per_cell_suppresses_phase_shift_but_keeps_cell_scale_defect():
     height, width = 80, 120
     base_a = np.indices((height, width)).sum(axis=0) % 2 * 180 + 30
