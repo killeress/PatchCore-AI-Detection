@@ -494,7 +494,6 @@ class EdgeInspectionConfig:
     light_leak_edge_distance: int = 80
     light_leak_aoi_radius: int = 50
     light_leak_threshold: float = 4.0
-    light_leak_dark_threshold: float = 4.0
     light_leak_min_length: int = 30
     light_leak_boundary_offset: int = 10
     light_leak_band_width: int = 35
@@ -554,7 +553,6 @@ class EdgeInspectionConfig:
             light_leak_edge_distance=int(get("cv_edge_light_leak_edge_distance", 80)),
             light_leak_aoi_radius=int(get("cv_edge_light_leak_aoi_radius", 50)),
             light_leak_threshold=float(get("cv_edge_light_leak_threshold", 4.0)),
-            light_leak_dark_threshold=float(get("cv_edge_light_leak_dark_threshold", 4.0)),
             light_leak_min_length=int(get("cv_edge_light_leak_min_length", 30)),
             light_leak_boundary_offset=int(get("cv_edge_light_leak_boundary_offset", 10)),
             light_leak_band_width=int(get("cv_edge_light_leak_band_width", 35)),
@@ -700,7 +698,7 @@ def inspect_aoi_edge_light_leak(
     config: EdgeInspectionConfig,
     generate_debug: bool = False,
 ) -> Dict[str, Any]:
-    """檢查 AOI 附近是否有連續的四邊亮帶或暗段。
+    """檢查 AOI 附近是否有連續的四邊亮帶（泛白）。
 
     Tile 先依 panel polygon 轉回產品座標，讓上／下／左／右共用同一組
     band 參數。此檢查只提供灰塵流程後的救援證據，不改 PatchCore 分數。
@@ -722,7 +720,6 @@ def inspect_aoi_edge_light_leak(
         "candidates": [],
         "debug_image": None,
         "threshold": float(config.light_leak_threshold),
-        "dark_threshold": float(config.light_leak_dark_threshold),
         "min_length": int(config.light_leak_min_length),
         "max_dust_overlap": float(config.light_leak_max_dust_overlap),
         "aoi_radius": int(config.light_leak_aoi_radius),
@@ -838,7 +835,6 @@ def inspect_aoi_edge_light_leak(
 
     radius = max(1, int(config.light_leak_aoi_radius))
     threshold = max(0.0, float(config.light_leak_threshold))
-    dark_threshold = max(0.0, float(config.light_leak_dark_threshold))
     min_length = max(1, int(config.light_leak_min_length))
     boundary_offset = max(0, int(config.light_leak_boundary_offset))
     band_width = max(1, int(config.light_leak_band_width))
@@ -958,9 +954,9 @@ def inspect_aoi_edge_light_leak(
             cv2.rectangle(debug_canvas, (ex1, ey1), (ex2 - 1, ey2 - 1), (0, 255, 255), 2)
             cv2.rectangle(debug_canvas, (rx1, ry1), (rx2 - 1, ry2 - 1), (255, 160, 0), 2)
 
+        # 正常邊緣暗化不再救回 NG；只檢查相對內側參考帶變亮的泛白。
         polarity_profiles = (
             ("BRIGHT_LEAK", "邊緣亮帶", smooth_signed_delta, threshold),
-            ("DARK_DROP", "邊緣暗段", -smooth_signed_delta, dark_threshold),
         )
         for anomaly_type, anomaly_type_zh, delta_profile, active_threshold in polarity_profiles:
             active = valid_profile & (delta_profile >= active_threshold)
@@ -1032,13 +1028,11 @@ def inspect_aoi_edge_light_leak(
 
             if debug_canvas is not None and run_length > 0:
                 if detected:
-                    color = (0, 255, 0) if anomaly_type == "BRIGHT_LEAK" else (255, 0, 255)
+                    color = (0, 255, 0)
                 else:
                     color = (0, 128, 255)
                 cv2.rectangle(debug_canvas, (cx1, cy1), (cx2 - 1, cy2 - 1), color, 3)
                 label_y = max(20, ey1 - 6)
-                if anomaly_type == "DARK_DROP":
-                    label_y += 20
                 cv2.putText(
                     debug_canvas,
                     f"{side} {anomaly_type} d={max_delta:.1f} len={run_length} dust={dust_overlap:.2f}",

@@ -1571,7 +1571,7 @@
                     <span class="debug-badge">DEBUG ONLY</span>
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
-                    直接調整亮帶／暗段參數並重現 AOI 灰塵後救援；欄位初始值來自正式設定，修改只影響本次測試。
+                    直接調整亮帶（泛白）參數並重現 AOI 灰塵後救援；欄位初始值來自正式設定，修改只影響本次測試。
                 </p>
             </div>
         </div>
@@ -1627,10 +1627,6 @@
                 <div class="coord-group">
                     <label for="edge-leak-bright-threshold">亮帶灰階差門檻</label>
                     <input type="number" id="edge-leak-bright-threshold" value="{{ default_edge_light_leak_threshold }}" min="0" max="255" step="0.1">
-                </div>
-                <div class="coord-group">
-                    <label for="edge-leak-dark-threshold">暗段灰階差門檻</label>
-                    <input type="number" id="edge-leak-dark-threshold" value="{{ default_edge_light_leak_dark_threshold }}" min="0" max="255" step="0.1">
                 </div>
                 <div class="coord-group">
                     <label for="edge-leak-min-length">最小連續長度</label>
@@ -3793,7 +3789,6 @@
             cv_edge_light_leak_edge_distance: intValue('edge-leak-edge-distance'),
             cv_edge_light_leak_aoi_radius: intValue('edge-leak-aoi-radius'),
             cv_edge_light_leak_threshold: floatValue('edge-leak-bright-threshold'),
-            cv_edge_light_leak_dark_threshold: floatValue('edge-leak-dark-threshold'),
             cv_edge_light_leak_min_length: intValue('edge-leak-min-length'),
             cv_edge_light_leak_boundary_offset: intValue('edge-leak-boundary-offset'),
             cv_edge_light_leak_band_width: intValue('edge-leak-band-width'),
@@ -3913,7 +3908,7 @@
             <div class="coord-diagnostic-alert ${detected ? 'warning' : ''}">
                 <strong>${detected ? '規則命中：' : '規則結果：'}</strong>${escapeHtml(edge.reason_zh || reasonLabels[edge.reason] || edge.reason || '—')}
                 <div class="coord-diagnostic-note" style="margin-top:4px;">
-                    亮帶門檻 ${coordDiagNumber(edge.threshold, 2)} ｜ 暗段門檻 ${coordDiagNumber(edge.dark_threshold, 2)} ｜ 最小長度 ${coordDiagNumber(edge.min_length, 0)} px ｜ 最大灰塵覆蓋 ${coordDiagPercent(edge.max_dust_overlap)}
+                    亮帶門檻 ${coordDiagNumber(edge.threshold, 2)} ｜ 最小長度 ${coordDiagNumber(edge.min_length, 0)} px ｜ 最大灰塵覆蓋 ${coordDiagPercent(edge.max_dust_overlap)}
                 </div>
             </div>
             ${rows ? `
@@ -3930,7 +3925,7 @@
         const images = [
             [data.overview_url, '🗺️ 全圖與 AOI 定位'],
             [data.crop_url, '🖼️ 原圖 Tile'],
-            [data.edge_light_leak_url, '💡 黃=邊緣帶／藍=參考帶／綠=亮帶／紫=暗段'],
+            [data.edge_light_leak_url, '💡 黃=邊緣帶／藍=參考帶／綠=亮帶'],
             [data.omit_url, '🫧 OMIT Crop'],
         ];
         grid.innerHTML = images.filter(([url]) => url).map(([url, title]) => `
@@ -4308,7 +4303,7 @@
                 <div class="coord-diagnostic-alert ${edgeLeak.detected ? 'warning' : ''}">
                     <strong>${edgeLeak.detected ? '已救回 NG：' : '檢查結果：'}</strong>${escapeHtml(edgeLeakStatus)}
                     <div class="coord-diagnostic-note" style="margin-top:4px;">
-                        亮帶門檻 ${coordDiagNumber(edgeLeak.threshold, 2)} ｜ 暗段門檻 ${coordDiagNumber(edgeLeak.dark_threshold, 2)} ｜ 最小連續長度 ${coordDiagNumber(edgeLeak.min_length, 0)} px ｜ 最大灰塵覆蓋 ${coordDiagPercent(edgeLeak.max_dust_overlap)}
+                        亮帶門檻 ${coordDiagNumber(edgeLeak.threshold, 2)} ｜ 最小連續長度 ${coordDiagNumber(edgeLeak.min_length, 0)} px ｜ 最大灰塵覆蓋 ${coordDiagPercent(edgeLeak.max_dust_overlap)}
                     </div>
                 </div>
                 ${edgeLeakRows ? `
@@ -4485,7 +4480,7 @@
         if (data.edge_light_leak_url) {
             imagesHtml += `
                 <div class="img-card">
-                    <h4>💡 邊緣漏光檢查（黃=邊緣帶／藍=參考帶／綠=亮帶命中／紫=暗段命中）</h4>
+                    <h4>💡 邊緣漏光檢查（黃=邊緣帶／藍=參考帶／綠=亮帶命中）</h4>
                     <img src="${data.edge_light_leak_url}?t=${t}" alt="Edge light leak diagnostic" onclick="openLightbox(this.src)">
                 </div>
             `;

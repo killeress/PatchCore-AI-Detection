@@ -8575,7 +8575,6 @@ class CAPIInferencer:
         }
         anomaly_type_zh = {
             "BRIGHT_LEAK": "邊緣亮帶",
-            "DARK_DROP": "邊緣暗段",
         }
         reason_zh = {
             "disabled": "功能未啟用",
@@ -8584,7 +8583,7 @@ class CAPIInferencer:
             "aoi_not_near_edge": "AOI 不在設定的邊緣距離內",
             "below_threshold": "邊緣與內側亮度差未達門檻",
             "short_run": "亮度異常連續長度不足",
-            "dust_overlap": "候選亮帶或暗段與 OMIT 灰塵重疊過高",
+            "dust_overlap": "候選亮帶與 OMIT 灰塵重疊過高",
             "detected": "找到低灰塵重疊的連續邊緣亮度異常",
             "bands_outside_product": "檢查帶超出產品範圍",
             "inspection_error": "檢查發生錯誤",

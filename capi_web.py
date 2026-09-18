@@ -121,9 +121,6 @@ def _build_edge_light_leak_debug_config(
         "cv_edge_light_leak_threshold": (
             "light_leak_threshold", float, 0.0, 255.0, "亮帶灰階差門檻"
         ),
-        "cv_edge_light_leak_dark_threshold": (
-            "light_leak_dark_threshold", float, 0.0, 255.0, "暗段灰階差門檻"
-        ),
         "cv_edge_light_leak_min_length": (
             "light_leak_min_length", int, 1, 100000, "最小連續長度"
         ),
@@ -6512,7 +6509,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             default_edge_light_leak_edge_distance=get_val('cv_edge_light_leak_edge_distance', 80),
             default_edge_light_leak_aoi_radius=get_val('cv_edge_light_leak_aoi_radius', 50),
             default_edge_light_leak_threshold=get_val('cv_edge_light_leak_threshold', 4.0),
-            default_edge_light_leak_dark_threshold=get_val('cv_edge_light_leak_dark_threshold', 4.0),
             default_edge_light_leak_min_length=get_val('cv_edge_light_leak_min_length', 30),
             default_edge_light_leak_boundary_offset=get_val('cv_edge_light_leak_boundary_offset', 10),
             default_edge_light_leak_band_width=get_val('cv_edge_light_leak_band_width', 35),
