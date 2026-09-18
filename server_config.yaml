@@ -32,6 +32,9 @@ server:
 #                      時，server 會回退載入此 yaml (舊架構 capi_3f.yaml)
 inference:
   gpu_memory_fraction: 0
+  # 每 300 秒記錄一行顯存摘要，沿用 logging 輪替；0 關閉週期記錄。
+  # 僅觀察，不強制 GPU 同步或清理快取；舊設定檔省略此項亦預設 300 秒。
+  cuda_memory_log_interval_seconds: 300
   config_path: /root/Code/CAPI_AD/model/GN160JCEL250S-20260430_111505/machine_config.yaml
 
 # ------------------------------------------------------------

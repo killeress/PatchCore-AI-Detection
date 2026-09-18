@@ -42,15 +42,22 @@ def test_get_scratch_filter_disabled_returns_none():
     assert inferencer._get_scratch_filter() is None
 
 
-def test_get_scratch_filter_caches_on_success():
+def test_get_scratch_filter_caches_on_success(monkeypatch):
     cfg = CAPIConfig()
     cfg.scratch_classifier_enabled = True
     inferencer = CAPIInferencer(config=cfg, model_path="")
+    memory_stages = []
+    monkeypatch.setattr(inferencer, "_log_cuda_memory",
+                        lambda stage, **kwargs: memory_stages.append((stage, kwargs)))
     with patch("capi_inference.ScratchClassifier", return_value=_FakeClassifier()) as mock_cls:
         sf1 = inferencer._get_scratch_filter()
         sf2 = inferencer._get_scratch_filter()
         assert sf1 is sf2
         assert mock_cls.call_count == 1    # cached
+    assert memory_stages == [
+        ("before-scratch-load", {"synchronize": False}),
+        ("after-scratch-load-attempt", {"synchronize": False}),
+    ]
 
 
 def test_get_scratch_filter_reloads_when_bundle_path_changes():

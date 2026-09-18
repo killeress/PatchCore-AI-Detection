@@ -19,13 +19,17 @@ def test_start_marks_server_running_before_cleanup_scheduler_starts():
 
     def start_cleanup_scheduler():
         observed_running_states.append(server._running)
+
+    def start_cuda_memory_monitor():
+        observed_running_states.append(server._running)
         server._running = False
 
     server._start_cleanup_scheduler = start_cleanup_scheduler
+    server._start_cuda_memory_monitor = start_cuda_memory_monitor
 
     CAPIServer.start(server)
 
-    assert observed_running_states == [True]
+    assert observed_running_states == [True, True]
 
 
 def test_start_aborts_when_stop_arrives_during_startup():
@@ -57,6 +61,9 @@ def test_cleanup_scheduler_thread_stops_with_server():
         _running=True,
         _cleanup_stop_event=threading.Event(),
         _cleanup_thread=None,
+        _cuda_memory_stop_event=threading.Event(),
+        _cuda_memory_thread=None,
+        _log_gpu_memory_status=lambda _stage: None,
         _async_executor_lock=threading.Lock(),
         _async_executor_shutdown=True,
         _model_switch_executor=ThreadPoolExecutor(max_workers=1),
@@ -67,6 +74,9 @@ def test_cleanup_scheduler_thread_stops_with_server():
 
     assert cleanup_thread is server._cleanup_thread
     assert cleanup_thread.is_alive()
+    cuda_thread = CAPIServer._start_cuda_memory_monitor(server)
+    assert cuda_thread.is_alive()
+    assert CAPIServer._start_cuda_memory_monitor(server) is cuda_thread
 
     switch_saved = threading.Event()
     server._model_switch_executor.submit(switch_saved.set)
@@ -74,5 +84,7 @@ def test_cleanup_scheduler_thread_stops_with_server():
 
     assert not cleanup_thread.is_alive()
     assert server._cleanup_thread is None
+    assert not cuda_thread.is_alive()
+    assert server._cuda_memory_thread is None
     assert switch_saved.is_set()
     assert all(not thread.is_alive() for thread in server._model_switch_executor._threads)

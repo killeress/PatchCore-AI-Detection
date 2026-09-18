@@ -1,16 +1,21 @@
 import logging
+import os
 from types import SimpleNamespace
 
 import anomalib.deploy
+import pytest
 
 import capi_inference
 from capi_inference import CAPIInferencer
 
 
-def test_log_cuda_memory_reports_allocator_and_device_values(monkeypatch, caplog):
+@pytest.mark.parametrize("synchronize", [True, False])
+def test_log_cuda_memory_reports_allocator_and_device_values(monkeypatch, caplog, synchronize):
     mib = 1024 * 1024
+    sync_calls = []
+    monkeypatch.setattr(capi_inference.torch.cuda, "is_initialized", lambda: True)
     monkeypatch.setattr(capi_inference.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(capi_inference.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(capi_inference.torch.cuda, "synchronize", lambda: sync_calls.append(True))
     monkeypatch.setattr(capi_inference.torch.cuda, "mem_get_info", lambda: (4 * mib, 16 * mib))
     monkeypatch.setattr(capi_inference.torch.cuda, "memory_allocated", lambda: 2 * mib)
     monkeypatch.setattr(capi_inference.torch.cuda, "memory_reserved", lambda: 3 * mib)
@@ -18,7 +23,7 @@ def test_log_cuda_memory_reports_allocator_and_device_values(monkeypatch, caplog
     monkeypatch.setattr(capi_inference.torch.cuda, "max_memory_reserved", lambda: 7 * mib)
 
     with caplog.at_level(logging.INFO, logger="capi.inference"):
-        CAPIInferencer._log_cuda_memory("after-warmup model=test.pt")
+        CAPIInferencer._log_cuda_memory("after-warmup model=test.pt", synchronize=synchronize)
 
     message = caplog.records[-1].getMessage()
     assert "[CUDA-MEM] after-warmup model=test.pt" in message
@@ -28,6 +33,32 @@ def test_log_cuda_memory_reports_allocator_and_device_values(monkeypatch, caplog
     assert "peak_reserved=7.0 MiB" in message
     assert "device_used=12.0 MiB" in message
     assert "device_free=4.0 MiB" in message
+    assert f"pid={os.getpid()}" in message
+    assert sync_calls == ([True] if synchronize else [])
+
+
+def test_background_logging_does_not_initialize_cuda(monkeypatch, caplog):
+    monkeypatch.setattr(capi_inference.torch.cuda, "is_initialized", lambda: False)
+
+    def unexpected_call():
+        pytest.fail("background logging must not query or initialize unused CUDA")
+
+    monkeypatch.setattr(capi_inference.torch.cuda, "is_available", unexpected_call)
+    monkeypatch.setattr(capi_inference.torch.cuda, "mem_get_info", unexpected_call)
+    CAPIInferencer._log_cuda_memory("periodic", synchronize=False)
+    assert not caplog.records
+
+
+def test_background_logging_failure_is_nonfatal(monkeypatch, caplog):
+    monkeypatch.setattr(capi_inference.torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(capi_inference.torch.cuda, "is_available", lambda: True)
+
+    def unavailable():
+        raise RuntimeError("device unavailable")
+
+    monkeypatch.setattr(capi_inference.torch.cuda, "mem_get_info", unavailable)
+    CAPIInferencer._log_cuda_memory("periodic", synchronize=False)
+    assert "periodic unavailable: device unavailable" in caplog.text
 
 
 def test_clear_cuda_cache_reports_released_reserved_memory(monkeypatch, caplog):
