@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from capi_edge_cv import clamp_median_kernel, compute_fg_aware_diff
+from capi_tile_diagnostics import edge_ng_evidence
 from typing import List, Dict, Optional, Tuple, Any
 import time
 
@@ -856,6 +857,15 @@ class HeatmapManager:
 
         is_below_threshold = score < score_threshold
         is_aoi_track_only = bool(getattr(tile_info, 'is_aoi_coord_below_threshold', False)) if tile_info else False
+        edge_evidence = edge_ng_evidence({
+            "is_anomaly": not is_below_threshold and not is_aoi_track_only,
+            "is_dust": is_dust,
+            "is_bomb": is_bomb,
+            "scratch_filtered": getattr(tile_info, 'scratch_filtered', False),
+            "is_exclude_zone": getattr(tile_info, 'is_in_exclude_zone', False),
+            "edge_light_leak_result": getattr(tile_info, 'edge_light_leak_result', None),
+            "dust_detail_text": dust_detail,
+        })
 
         if is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
@@ -874,6 +884,9 @@ class HeatmapManager:
         elif is_below_threshold:
             verdict = f"AI OK | Score < THR ({score_threshold:.4f})"
             verdict_color = (0, 255, 255)
+        elif edge_evidence:
+            verdict = f"NG (Edge: {edge_evidence['anomaly_type']} {edge_evidence['side'].upper()})"
+            verdict_color = (0, 0, 255)
         else:
             verdict = "NG (Detected)"
             verdict_color = (0, 0, 255)
@@ -889,7 +902,14 @@ class HeatmapManager:
         cv2.putText(header, header_text, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, verdict_color, 2)
 
-        if dust_detail:
+        if edge_evidence:
+            detail_line = (
+                f"DUST -> EDGE_LIGHT_LEAK_RESCUE -> NG | "
+                f"delta={edge_evidence['max_delta']} "
+                f"length={edge_evidence['continuous_length']} "
+                f"dust={edge_evidence['dust_overlap']}"
+            )
+        elif dust_detail:
             detail_line = str(dust_detail)[:120].replace('\u2192', '->').replace('\u2190', '<-')
             for metric_token in ("COV", "IOU"):
                 detail_line = detail_line.replace(f'>={metric_token}_THR', f'>={iou_threshold:.3f}')

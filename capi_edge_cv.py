@@ -403,6 +403,7 @@ class EdgeDefect:
     is_bomb: bool = False
     bomb_defect_code: str = ""
     is_cv_ok: bool = False  # CV 檢查後未偵測到缺陷，僅作記錄用
+    decision_context: Optional[dict] = None
     threshold_used: int = 0       # 使用的閾值 (用於 heatmap header 顯示)
     min_area_used: int = 0        # 使用的最小面積 (用於 heatmap header 顯示)
     min_max_diff_used: int = 0    # 使用的 min_max_diff 下限 (用於 CV OK 原因推斷，0=未啟用)
@@ -1513,6 +1514,12 @@ class CVEdgeInspector:
                     center=(int(offset_x + cx), int(offset_y + cy)),
                     max_diff=max_diff,
                     solidity=solidity,
+                    decision_context={"rules": [{"kind": "component",
+                        "area": int(area), "min_area": int(cfg.min_area),
+                        "max_diff": int(max_diff), "threshold": int(cfg.threshold),
+                        "solidity": float(solidity),
+                        "min_solidity": float(self.config.aoi_solidity_min) if side == "aoi_edge" else 0,
+                        "min_max_diff": int(self.config.aoi_min_max_diff) if side == "aoi_edge" else 0}]},
                 ))
 
         defects.extend(line_defects)
@@ -1599,6 +1606,9 @@ class CVEdgeInspector:
                 center=(int(offset_x + (x_start + x_end) / 2),
                         int(offset_y + (y_min + y_max) / 2)),
                 max_diff=max_diff,
+                decision_context={"rules": [{"kind": "thin_line",
+                    "length": int(len(ys)), "width": int(line_w),
+                    "min_length": int(min_len), "max_width": int(max_w)}]},
                 solidity=1.0,
             ))
             print(f"  🔲 _detect_thin_lines: 垂直線 ({offset_x + x_start},{offset_y + y_min}) "
@@ -1629,6 +1639,9 @@ class CVEdgeInspector:
                 center=(int(offset_x + (x_min + x_max) / 2),
                         int(offset_y + (y_start + y_end) / 2)),
                 max_diff=max_diff,
+                decision_context={"rules": [{"kind": "thin_line",
+                    "length": int(len(xs)), "width": int(line_h),
+                    "min_length": int(min_len), "max_width": int(max_w)}]},
                 solidity=1.0,
             ))
             print(f"  🔲 _detect_thin_lines: 水平線 ({offset_x + x_min},{offset_y + y_start}) "

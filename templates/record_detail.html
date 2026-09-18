@@ -3,7 +3,10 @@
 {% block title %}記錄 #{{ detail.id }}{% endblock %}
 
 {% block extra_css %}
+<link rel="stylesheet" href="/static/css/edge-ng-evidence.css">
+<script src="/static/js/edge-ng-evidence.js" defer></script>
 <style>
+    body { --edge-ng-color: #fca5a5; --edge-ng-link: #93c5fd; }
     .detail-section {
         margin-top: 32px;
     }
@@ -256,6 +259,7 @@
 {% endblock %}
 
 {% block content %}
+{% from "_edge_ng_evidence.html" import badge as edge_ng_badge, reason_link, tile_evidence %}
 <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
         <h2 style="margin:0">推論記錄 #{{ detail.id }}
@@ -491,6 +495,7 @@
             <span class="badge" style="background:rgba(148,163,184,0.16);color:#94A3B8;">白框觀察</span>
             {% else %}
             <span class="badge {{ img_badge }}">{{ img_status }}</span>
+            {{ edge_ng_badge(img) }}
             {% endif %}
             {% if not wf and detail.image_dir and img.image_name %}
             <a href="/debug?path={{ (detail.image_dir ~ '/' ~ img.image_name) | urlencode }}"
@@ -570,6 +575,7 @@
                         {% else %}
                         {{ t_info }}
                         {% endif %}
+                        {{ reason_link(t) }}
                     </td>
                 </tr>
                 {% endfor %}
@@ -601,13 +607,20 @@
                 <h4
                     style="margin-bottom:8px;color:{% if is_scratch %}#0D9488{% else %}var(--text-muted){% endif %};font-size:0.85rem;font-family:'Fira Code',monospace;">
                     {% if is_scratch %}🧽 {% endif %}區域 #{{ t.tile_id }} 熱力圖</h4>
+                {% call tile_evidence(t) %}
                 <img src="/heatmaps/{{ thm_url }}" alt="tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
+                {% endcall %}
             </div>
             {% endif %}
             {% endif %}
             {% endfor %}
         </div>
 
+        {% for t in grid_tiles %}
+        {% if t.get('decision_evidence') and (not t.heatmap_path or not heatmap_base_dir or not hm_relative(t.heatmap_path, heatmap_base_dir)) %}
+        {% call tile_evidence(t) %}{% endcall %}
+        {% endif %}
+        {% endfor %}
         {# ====== AOI 機檢座標區域 (獨立區塊) ====== #}
         {% set aoi_tiles = img.tiles | selectattr("is_aoi_coord") | rejectattr("is_white_frame_followup") | list %}
         {% include "_aoi_coord_result.html" %}
@@ -615,7 +628,7 @@
         {% if img.edge_defects %}
         <div style="margin-top: 16px; padding-top: 12px; border-top: 2px solid #0891B2;">
             <h4 style="color: #0891B2; margin-bottom: 8px; font-family: 'Fira Code', monospace; font-size: 0.9rem;">CV
-                邊緣檢測 <span style="font-size: 0.75rem; color: var(--text-muted);">(傳統 CV — 非 PatchCore)</span></h4>
+                邊緣檢測 <span style="font-size: 0.75rem; color: var(--text-muted);">(依 CV / PatchCore / 混合模式設定)</span></h4>
             <table>
                 <thead>
                     <tr>
@@ -696,6 +709,7 @@
                             {% if ed_mode == 'patchcore' %}
                             <div style="margin-top:3px;font-size:0.62rem;color:#8b5cf6;font-family:'Fira Code',monospace;">[PatchCore]</div>
                             {% endif %}
+                            {{ reason_link(ed, "cv-evidence") }}
                         </td>
                         <td><span
                                 style="padding: 2px 8px; border-radius: 4px; background: #CFFAFE; color: #0E7490; font-weight: 600;">{{
@@ -839,9 +853,14 @@
                         <span style="color: #EF4444; font-size: 0.75rem;">(NG)</span>
                         {% endif %}
                     </h4>
+                    {% call tile_evidence(ed, "cv-evidence") %}
                     <img src="/heatmaps/{{ ehm_url }}" alt="edge {{ ed.side }}" onclick="openLightbox(this.src)">
+                    {% endcall %}
                 </div>
                 {% endif %}
+                {% endif %}
+                {% if ed.get('decision_evidence') and (not ed.heatmap_path or not heatmap_base_dir or not hm_relative(ed.heatmap_path, heatmap_base_dir)) %}
+                {% call tile_evidence(ed, "cv-evidence") %}{% endcall %}
                 {% endif %}
                 {% endfor %}
             </div>

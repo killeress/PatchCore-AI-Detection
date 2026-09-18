@@ -1,0 +1,56 @@
+{% macro badge(img) -%}
+{% for label in img.get('ng_reason_labels', []) %}<span class="edge-ng-badge">{{ label }}</span>{% else %}{% if img.get('has_edge_ng') %}<span class="edge-ng-badge">邊緣檢查</span>{% endif %}{% endfor %}
+{%- endmacro %}
+
+{% macro reason_link(t, prefix="edge-evidence") -%}
+{% set evidence = t.get('decision_evidence') or t.get('edge_ng_evidence') %}
+{% if evidence %}
+<div class="edge-ng-table-reason{% if evidence.status == 'OK' %} decision-ok{% endif %}">
+    <span>{{ evidence.rule_label }} · {{ evidence.title }}</span>
+    <button type="button" class="edge-ng-toggle" data-edge-evidence="{{ prefix }}-{{ t.id }}"
+            aria-controls="{{ prefix }}-{{ t.id }}" aria-expanded="false">查看依據 ▾</button>
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro tile_evidence(t, prefix="edge-evidence") -%}
+{% set evidence = t.get('decision_evidence') or t.get('edge_ng_evidence') %}
+{% if evidence %}
+<div class="edge-ng-reason-bar{% if evidence.status == 'OK' %} decision-ok{% endif %}">
+    <span>{{ '判定原因' if evidence.status == 'OK' else 'NG 原因' }}：<strong>{{ evidence.title }}</strong> <span class="edge-ng-secondary">（{{ evidence.rule_label }}）</span></span>
+    <button type="button" class="edge-ng-toggle" data-edge-evidence="{{ prefix }}-{{ t.id }}"
+            aria-controls="{{ prefix }}-{{ t.id }}" aria-expanded="false">查看依據 ▾</button>
+</div>
+{% endif %}
+{{ caller() }}
+{% if evidence %}
+<section id="{{ prefix }}-{{ t.id }}" class="edge-ng-evidence" hidden aria-label="{{ evidence.title }}判定依據">
+    {% if evidence.kind == 'general' %}
+    <div class="edge-ng-evidence-title">{{ evidence.rule_label }} → 最終 {{ evidence.status }}</div>
+    <div class="edge-ng-flow">{{ evidence.flow }}</div>
+    <div class="edge-ng-measures">
+        {% for m in evidence.metrics %}<div><span>{{ m.label }}</span><strong>{{ m.value }}</strong><small>門檻：{{ m.threshold }}</small></div>{% endfor %}
+    </div>
+    {% for note in evidence.notes %}<div class="edge-ng-secondary">{{ note }}</div>{% endfor %}
+    {% if evidence.detail %}<details class="edge-ng-source"><summary>灰塵／複核紀錄</summary><div class="edge-ng-flow">{{ evidence.detail }}</div></details>{% endif %}
+    {% else %}
+    <div class="edge-ng-evidence-title">{{ evidence.rule_label }} → 改判 NG</div>
+    <div class="edge-ng-flow">灰塵檢查 DUST{% if evidence.two_stage %} → 兩階段複核 DUST{% endif %} → {{ evidence.title }}命中 → 最終 NG</div>
+    <div class="edge-ng-measures">
+        <div><span>{{ '最大暗化灰階差' if evidence.historical else '最大亮化灰階差' }}</span>
+            <strong>{{ '%.2f' | format(evidence.max_delta) if evidence.max_delta is not none else '未記錄' }}</strong>
+            <small>門檻：{% if evidence.threshold is not none %}≥ {{ '%.2f' | format(evidence.threshold) }}{% else %}未記錄{% endif %}</small></div>
+        <div><span>連續長度（產品座標）</span>
+            <strong>{% if evidence.continuous_length is not none %}{{ evidence.continuous_length | int }} px{% else %}未記錄{% endif %}</strong>
+            <small>門檻：{% if evidence.min_length is not none %}≥ {{ evidence.min_length | int }} px{% else %}未記錄{% endif %}</small></div>
+        <div><span>候選區灰塵覆蓋率</span>
+            <strong>{% if evidence.dust_overlap is not none %}{{ '%.1f' | format(evidence.dust_overlap * 100) }}%{% else %}未記錄{% endif %}</strong>
+            <small>門檻：{% if evidence.max_dust_overlap is not none %}≤ {{ '%.1f' | format(evidence.max_dust_overlap * 100) }}%{% else %}未記錄{% endif %}</small></div>
+    </div>
+    <div class="edge-ng-secondary">圖中的 DUST 是局部灰塵結果；此 tile 後續因{{ evidence.title }}改回 NG。</div>
+    <div class="edge-ng-source">依據：{{ '原始推論 Log（歷史紀錄）' if evidence.source == 'log' else '本次推論保存的判定資料' }}。
+        {% if evidence.historical %}<br>黑邊規則現已移除；此處為停用前的歷史判定。{% endif %}</div>
+    {% endif %}
+</section>
+{% endif %}
+{%- endmacro %}

@@ -22,6 +22,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 from urllib.parse import urlparse
+from capi_tile_diagnostics import decorate_edge_ng_evidence
 
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _FACTORY_DAY_START_TIME = "07:30:00"
@@ -1198,6 +1199,11 @@ class CAPIDatabase:
             add_column_if_not_exists("model_registry", "notes", "TEXT")
             # 新架構 (C-10) per-tile model routing 紀錄："inner" / "edge" / "bright_spot"；v1 為 ""
             add_column_if_not_exists("tile_results", "zone", "TEXT DEFAULT ''")
+            add_column_if_not_exists("tile_results", "dust_detail_text", "TEXT DEFAULT ''")
+            add_column_if_not_exists("tile_results", "edge_light_leak_result", "TEXT DEFAULT ''")
+            add_column_if_not_exists("tile_results", "decision_context", "TEXT DEFAULT ''")
+            add_column_if_not_exists("edge_defect_results", "decision_context", "TEXT DEFAULT ''")
+            add_column_if_not_exists("edge_defect_results", "dust_detail_text", "TEXT DEFAULT ''")
 
             conn.executescript("""
                 CREATE INDEX IF NOT EXISTS idx_image_results_dust_record
@@ -1356,8 +1362,8 @@ class CAPIDatabase:
                                     aoi_product_x, aoi_product_y,
                                     aoi_image_x, aoi_image_y,
                                     aoi_tile_shift_dx, aoi_tile_shift_dy,
-                                    scratch_score, scratch_filtered, zone)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    scratch_score, scratch_filtered, zone, dust_detail_text, edge_light_leak_result, decision_context)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -1384,7 +1390,10 @@ class CAPIDatabase:
                                  tile_data.get("aoi_tile_shift_dy", 0),
                                  tile_data.get("scratch_score", 0.0),
                                  int(tile_data.get("scratch_filtered", 0)),
-                                 tile_data.get("zone", ""))
+                                 tile_data.get("zone", ""),
+                                 tile_data.get("dust_detail_text", ""),
+                                 tile_data.get("edge_light_leak_result", ""),
+                                 tile_data.get("decision_context", ""))
                             )
 
                         # 儲存 CV 邊緣缺陷結果
@@ -1400,8 +1409,9 @@ class CAPIDatabase:
                                     patchcore_threshold, patchcore_ok_reason,
                                     source_inspector, d_edge_px, fusion_fallback_reason,
                                     pc_roi_origin_x, pc_roi_origin_y,
-                                    pc_roi_shift_dx, pc_roi_shift_dy, pc_roi_fallback_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    pc_roi_shift_dx, pc_roi_shift_dy, pc_roi_fallback_reason,
+                                    decision_context, dust_detail_text)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -1431,7 +1441,9 @@ class CAPIDatabase:
                                  edge_data.get("pc_roi_origin_y", 0),
                                  edge_data.get("pc_roi_shift_dx", 0),
                                  edge_data.get("pc_roi_shift_dy", 0),
-                                 edge_data.get("pc_roi_fallback_reason", ""))
+                                 edge_data.get("pc_roi_fallback_reason", ""),
+                                 edge_data.get("decision_context", ""),
+                                 edge_data.get("dust_detail_text", ""))
                             )
 
                 conn.commit()
@@ -1568,8 +1580,8 @@ class CAPIDatabase:
                                     aoi_product_x, aoi_product_y,
                                     aoi_image_x, aoi_image_y,
                                     aoi_tile_shift_dx, aoi_tile_shift_dy,
-                                    scratch_score, scratch_filtered, zone)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    scratch_score, scratch_filtered, zone, dust_detail_text, edge_light_leak_result, decision_context)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  tile_data.get("tile_id", 0),
                                  tile_data.get("x", 0),
@@ -1596,7 +1608,10 @@ class CAPIDatabase:
                                  tile_data.get("aoi_tile_shift_dy", 0),
                                  tile_data.get("scratch_score", 0.0),
                                  int(tile_data.get("scratch_filtered", 0)),
-                                 tile_data.get("zone", ""))
+                                 tile_data.get("zone", ""),
+                                 tile_data.get("dust_detail_text", ""),
+                                 tile_data.get("edge_light_leak_result", ""),
+                                 tile_data.get("decision_context", ""))
                             )
 
                         for edge_data in img_data.get("edge_defects", []):
@@ -1611,8 +1626,9 @@ class CAPIDatabase:
                                     patchcore_threshold, patchcore_ok_reason,
                                     source_inspector, d_edge_px, fusion_fallback_reason,
                                     pc_roi_origin_x, pc_roi_origin_y,
-                                    pc_roi_shift_dx, pc_roi_shift_dy, pc_roi_fallback_reason)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    pc_roi_shift_dx, pc_roi_shift_dy, pc_roi_fallback_reason,
+                                    decision_context, dust_detail_text)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (image_result_id,
                                  edge_data.get("side", ""),
                                  edge_data.get("area", 0),
@@ -1642,7 +1658,9 @@ class CAPIDatabase:
                                  edge_data.get("pc_roi_origin_y", 0),
                                  edge_data.get("pc_roi_shift_dx", 0),
                                  edge_data.get("pc_roi_shift_dy", 0),
-                                 edge_data.get("pc_roi_fallback_reason", ""))
+                                 edge_data.get("pc_roi_fallback_reason", ""),
+                                 edge_data.get("decision_context", ""),
+                                 edge_data.get("dust_detail_text", ""))
                             )
 
                 conn.commit()
@@ -2154,6 +2172,7 @@ class CAPIDatabase:
                         tile["is_white_frame_followup"] = True
                     wf["white_screen_result"] = dict(source, tiles=tiles)
 
+            decorate_edge_ng_evidence(result)
             return result
         finally:
             conn.close()

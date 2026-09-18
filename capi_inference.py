@@ -274,6 +274,7 @@ class TileInfo:
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
     score_threshold: Optional[float] = None # 此 tile 推論時實際使用的門檻（v2 依 zone 不同）
+    decision_context: Optional[dict] = field(default=None, repr=False)
     raw_pred_score: float = 0.0             # 模型 normalized pred_score，未經 mask/edge margin 比率調整
     raw_model_score: Optional[float] = None # 未經 Anomalib image-score normalization 的模型距離
     model_image_min: Optional[float] = None # Anomalib image-score normalization 下界
@@ -3000,6 +3001,9 @@ class CAPIInferencer:
         tile.bright_spot_diff_threshold = diff_threshold
         tile.bright_spot_area = int(np.sum(filtered_binary > 0))
         tile.bright_spot_min_area = min_area
+        tile.decision_context = {"abs_threshold": int(abs_threshold),
+                                 "max_pixel": int(gray.max()),
+                                 "max_component_area": int(max_component_area)}
 
         # 偵測結果 log
         max_pixel_val = int(gray.max())
@@ -5902,6 +5906,8 @@ class CAPIInferencer:
                 min_area_used=int(cv_stats.get("min_area", 0)) if cv_stats else 0,
                 min_max_diff_used=int(cv_stats.get("min_max_diff", 0)) if cv_stats else 0,
             )
+            grouped.decision_context = {"rules": [rule for d in src_defects
+                for rule in (getattr(d, "decision_context", None) or {}).get("rules", [])]}
             grouped.source_inspector = "cv"
             grouped.d_edge_px = float(max(0.0, cv2.pointPolygonTest(
                 polygon_int, (float(center[0]), float(center[1])), True)))
@@ -6955,6 +6961,8 @@ class CAPIInferencer:
                         inspector_mode="cv",
                         cv_mask_offset=roi_stats.get("roi_offset", (rx1, ry1)),
                     )
+                    merged.decision_context = {"rules": [rule for d in edge_results
+                        for rule in (getattr(d, "decision_context", None) or {}).get("rules", [])]}
                     merged.cv_filtered_mask = roi_stats.get("filtered_mask")
                     result.edge_defects.append(merged)
                     detected = True
@@ -8618,6 +8626,7 @@ class CAPIInferencer:
         if not outcome.get("detected"):
             return ""
 
+        outcome["rescue_applied"] = True
         tile.is_suspected_dust_or_scratch = False
         image_center = outcome.get("candidate_image_center")
         if isinstance(image_center, (list, tuple)) and len(image_center) >= 2:
