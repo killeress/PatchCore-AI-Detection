@@ -34,6 +34,7 @@ _PATTERNS: Dict[str, List[Tuple[str, ...]]] = {
     "A": [
         ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
         ("00100", "01110", "10001", "11111", "10001", "10001", "10001"),
+        ("01110", "10001", "10001", "10001", "11111", "10001", "10001"),
     ],
     "B": [("11110", "10001", "10001", "11110", "10001", "10001", "11110")],
     "C": [("01111", "10000", "10000", "10000", "10000", "10000", "01111")],
@@ -248,6 +249,7 @@ def detect_panel_mark(
     for search_pass, roi_ratios in (
         ("primary", _ROI_RATIOS),
         ("fallback", _FALLBACK_ROI_RATIOS),
+        ("low_contrast", _ROI_RATIOS),
     ):
         with timed_inference_stage(f"mark_{search_pass}"):
             for roi_name, ratios in roi_ratios:
@@ -261,6 +263,7 @@ def detect_panel_mark(
                     height,
                     roi_name,
                     profile_index,
+                    low_contrast=search_pass == "low_contrast",
                 )
                 if candidate is not None:
                     candidate["search_pass"] = search_pass
@@ -458,24 +461,32 @@ def _detect_roi(
     full_height: int,
     roi_name: str,
     profile_index: Dict[Tuple[int, str], Tuple[np.ndarray, ...]],
+    *,
+    low_contrast: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    filtered = _dot_mask(roi, min(full_width, full_height), allow_connected_chars=True)
+    filtered = (
+        _low_contrast_stroke_mask(roi, min(full_width, full_height))
+        if low_contrast else
+        _dot_mask(roi, min(full_width, full_height), allow_connected_chars=True)
+    )
     groups = _find_mark_groups(
         filtered, offset_x, offset_y, full_width, full_height, allow_connected_chars=True,
+        connected_gap_ratio=0.05 if low_contrast else 0.10,
     )
     if not groups:
         return None
-    groups.extend(
-        _refine_mark_groups(
-            roi,
-            groups,
-            offset_x,
-            offset_y,
-            full_width,
-            full_height,
-            allow_connected_chars=True,
+    if not low_contrast:
+        groups.extend(
+            _refine_mark_groups(
+                roi,
+                groups,
+                offset_x,
+                offset_y,
+                full_width,
+                full_height,
+                allow_connected_chars=True,
+            )
         )
-    )
 
     best: Optional[Dict[str, Any]] = None
     for group in groups:
@@ -498,6 +509,32 @@ def _detect_roi(
                 best = candidate
 
     return best
+
+
+def _low_contrast_stroke_mask(roi: np.ndarray, scale_basis: int) -> np.ndarray:
+    """Recover faint continuous glyphs without letting camera borders set Otsu.
+
+    Work in float so sub-gray-level contrast survives texture suppression. Only
+    glyph-sized components survive; this mask is used after normal dot searches
+    fail, and still requires an aligned pair of character shapes.
+    """
+    smooth = cv2.GaussianBlur(
+        roi.astype(np.float32), (0, 0), sigmaX=max(1.0, scale_basis / 877.0),
+    )
+    background = cv2.GaussianBlur(
+        smooth, (0, 0), sigmaX=max(17, round(scale_basis * 0.007)),
+    )
+    binary = np.uint8(background - smooth > 1.3) * 255
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    keep = np.zeros(count, dtype=np.uint8)
+    max_blob = max(24, round(scale_basis * 0.04))
+    for idx in range(1, count):
+        _, _, width, height, area = stats[idx]
+        if (max(3, round(scale_basis * 0.002)) <= width <= max_blob
+                and max(10, round(scale_basis * 0.006)) <= height <= max_blob
+                and area >= max(20, round(scale_basis ** 2 * 0.000005))):
+            keep[idx] = 255
+    return keep[labels]
 
 
 def _dot_mask(
@@ -560,6 +597,7 @@ def _find_mark_groups(
     full_height: int,
     *,
     allow_connected_chars: bool = False,
+    connected_gap_ratio: float = 0.10,
 ) -> List[Dict[str, Any]]:
     join = max(15, int(round(min(full_width, full_height) * 0.010)))
     dilated = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (join, join)), iterations=1)
@@ -588,7 +626,8 @@ def _find_mark_groups(
         tight = mark_mask[tight_y1:tight_y2, tight_x1:tight_x2]
         comp_count = _count_small_components(tight)
         if comp_count < 10 and not (
-            allow_connected_chars and comp_count >= 2 and _is_connected_char_pair(tight)
+            allow_connected_chars and comp_count >= 2
+            and _is_connected_char_pair(tight, min_gap_ratio=connected_gap_ratio)
         ):
             continue
 
@@ -608,7 +647,7 @@ def _find_mark_groups(
     return groups
 
 
-def _is_connected_char_pair(mask: np.ndarray) -> bool:
+def _is_connected_char_pair(mask: np.ndarray, *, min_gap_ratio: float = 0.10) -> bool:
     """Require two aligned glyph shapes before accepting a low dot count."""
     parts = _split_two_chars(mask)
     if parts is None:
@@ -620,7 +659,7 @@ def _is_connected_char_pair(mask: np.ndarray) -> bool:
     if abs(boxes[0]["y"] - boxes[1]["y"]) > height * 0.20:
         return False
     gap = boxes[1]["x"] - boxes[0]["x"] - boxes[0]["width"]
-    if not height * 0.10 <= gap <= height:
+    if not height * min_gap_ratio <= gap <= height:
         return False
     return all(
         0.30 <= box["width"] / box["height"] <= 1.20
@@ -906,6 +945,21 @@ def _recognize_char(
         ):
             scores = [
                 (best_score + 0.001, char) if char == "5" else (score, char)
+                for score, char in scores
+            ]
+
+    # A low crossbar can resemble the diagonal in 0. An open lower centre,
+    # hollow upper bowl and solid crossbar distinguish A from a closed zero.
+    if scores:
+        best_score, best_char = max(scores)
+        a_score = next((score for score, char in scores if char == "A"), None)
+        if (best_char == "0" and a_score is not None
+                and best_score - a_score <= 0.04
+                and densities[0, 2] > 0.5 and densities[2, 2] < 0.2
+                and densities[4, 1:4].min() > 0.5
+                and densities[5:7, 2].max() < 0.15):
+            scores = [
+                (best_score + 0.001, char) if char == "A" else (score, char)
                 for score, char in scores
             ]
 
