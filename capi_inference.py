@@ -35,6 +35,7 @@ from typing import List, Dict, Tuple, Optional, Any
 import re
 import time
 import contextvars
+from capi_cuda_diagnostics import cuda_stage, trace_call
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -759,6 +760,7 @@ class CAPIInferencer:
                 self._clear_cuda_cache(f"model={model_path.name}")
                 self._log_cuda_memory(f"after-cache-clear model={model_path.name}")
         
+        inferencer_obj._cuda_trace_model_path = str(model_path)
         return inferencer_obj
     
     def _load_model(self) -> None:
@@ -2543,25 +2545,30 @@ class CAPIInferencer:
         results = []
 
         for start in range(0, len(tensors), batch_size):
-            batch = torch.stack(tensors[start:start + batch_size]).to(device)
-            with torch.no_grad():
-                preds = model(batch)
+            with cuda_stage("patchcore-batch",
+                            model=str(getattr(inferencer, "_cuda_trace_model_path", type(model).__name__)),
+                            batch=len(tensors[start:start + batch_size]),
+                            tensor_shape=[len(tensors[start:start + batch_size]), *tensors[start].shape]):
+                batch = torch.stack(tensors[start:start + batch_size]).to(device)
+                with torch.no_grad():
+                    preds = model(batch)
 
-            scores = preds.pred_score
-            amaps = preds.anomaly_map
+                scores = preds.pred_score
+                amaps = preds.anomaly_map
 
-            for i in range(batch.shape[0]):
-                score = float(scores[i].item()) if scores.ndim > 0 else float(scores.item())
-                amap = None
-                if amaps is not None:
-                    amap = amaps[i].squeeze().cpu().numpy()
-                results.append((score, amap))
+                for i in range(batch.shape[0]):
+                    score = float(scores[i].item()) if scores.ndim > 0 else float(scores.item())
+                    amap = None
+                    if amaps is not None:
+                        amap = amaps[i].squeeze().cpu().numpy()
+                    results.append((score, amap))
 
-            # 釋放 GPU 記憶體
-            del batch, preds, scores, amaps
+                # 釋放 GPU 記憶體
+                del batch, preds, scores, amaps
 
         return results
 
+    @trace_call("patchcore-tile")
     def predict_tile(self, tile: TileInfo, inferencer=None, edge_margin_override: Optional[int] = None, patchcore_overrides: Optional[Dict[str, Any]] = None, threshold: Optional[float] = None, raw_prediction: Optional[Tuple[float, Optional[np.ndarray]]] = None, model_id: Optional[str] = None, capture_raw_diagnostics: bool = False) -> Tuple[float, Optional[np.ndarray]]:
         """
         對單一 tile 進行推論
@@ -3032,6 +3039,7 @@ class CAPIInferencer:
 
         return score, anomaly_map
 
+    @trace_call("patchcore-image")
     def run_inference(self, result: ImageResult, progress_callback=None,
                       inferencer=None, threshold: Optional[float] = None,
                       edge_margin_override: Optional[int] = None,
@@ -3113,6 +3121,7 @@ class CAPIInferencer:
 
         return result
 
+    @trace_call("patchcore-image")
     def run_inference_v2_single_image(
         self,
         image_path: Path,
@@ -6788,6 +6797,7 @@ class CAPIInferencer:
 
         return created
 
+    @trace_call("patchcore-edge-inspection")
     def _inspect_aoi_edge_defect(
         self,
         edef,
@@ -7330,6 +7340,7 @@ class CAPIInferencer:
         
         return False, ""
 
+    @trace_call("panel")
     def process_panel(
         self,
         panel_dir: Path,
@@ -9908,12 +9919,14 @@ class CAPIInferencer:
                 try:
                     model = self._get_model_for(self.config.machine_id, model_lighting, zone)
                     log_model_training(model, model_lighting, zone, logged_models)
-                    score, anomaly_map = self.predict_tile(
-                        ti,
-                        inferencer=model,
-                        threshold=threshold,
-                        model_id=model_id or self.config.machine_id,
-                    )
+                    with cuda_stage("patchcore-image-tile", image=str(result.image_path),
+                                    screen=lighting, zone=zone):
+                        score, anomaly_map = self.predict_tile(
+                            ti,
+                            inferencer=model,
+                            threshold=threshold,
+                            model_id=model_id or self.config.machine_id,
+                        )
                     if ti.is_aoi_coord_tile and score <= 1e-9:
                         print(
                             f"    [v2 score_diag] {lighting}/{zone} Tile@({ti.x},{ti.y}) "
@@ -10068,6 +10081,7 @@ class CAPIInferencer:
         logger.info("[v2] cache 中無 key %s，不需要 reload", key)
         return False
 
+    @trace_call("patchcore-tile")
     def _predict_tile(self, model, tile_img: np.ndarray, mask: Optional[np.ndarray] = None):
         """跑 PatchCore 推論 + 應用 polygon mask（如有）。
 
