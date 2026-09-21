@@ -2173,6 +2173,11 @@
         ['G0F00000', 'G0F00000(綠畫面)'],
         ['R0F00000', 'R0F00000(紅畫面)'],
         ['W0F00000', 'W0F00000(白畫面)'],
+        {% if station_name|default('CAPI')|upper == 'AAPI' %}
+        ['U0F00000', 'U0F00000'],
+        ['WGF25250', 'WGF25250'],
+        ['W0F00010', 'W0F00010'],
+        {% endif %}
     ];
     const WITHIN_SPEC_DOT_TYPES = [
         ['black_dot', '黑點', 'black'],
@@ -4198,6 +4203,9 @@
                 dot_detection: dotDetection,
                 screens: {
                     STANDARD: standardScreen('STANDARD(標準)'),
+                    U0F00000: standardScreen('U0F00000'),
+                    WGF25250: standardScreen('WGF25250'),
+                    W0F00010: standardScreen('W0F00010'),
                     WGF50500: standardScreen('WGF50500(50灰)'),
                     G0F00000: standardScreen('G0F00000(綠畫面)'),
                     R0F00000: standardScreen('R0F00000(紅畫面)'),

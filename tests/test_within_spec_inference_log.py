@@ -30,6 +30,7 @@ def test_server_defers_visuals_only_for_capi_aoi_mode(monkeypatch, tmp_path, pro
     monkeypatch.setattr("capi_server._evaluate_within_spec_suggestion_detail", evaluate)
     result = server._evaluate_within_spec_for_inference({"glass_id": "G1"}, [], inferencer)
     assert result is not None
+    assert captured["station_adapter"] is server.station_adapter
     assert (captured["deferred_visual_jobs"] is not None) is deferred
 
 

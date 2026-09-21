@@ -101,6 +101,9 @@ def _default_within_spec_judgment_rules() -> Dict[str, Any]:
             "dot_detection": dot_detection,
             "screens": {
                 "STANDARD": standard_screen("STANDARD(標準)"),
+                "U0F00000": standard_screen("U0F00000"),
+                "WGF25250": standard_screen("WGF25250"),
+                "W0F00010": standard_screen("W0F00010"),
                 "WGF50500": standard_screen("WGF50500(50灰)"),
                 "G0F00000": standard_screen("G0F00000(綠畫面)"),
                 "R0F00000": standard_screen("R0F00000(紅畫面)"),
