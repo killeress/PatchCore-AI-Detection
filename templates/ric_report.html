@@ -5428,7 +5428,7 @@
                 const flags = [
                     candidate.is_dust ? 'Dust' : '',
                     candidate.is_exclude_zone ? '排除區' : '',
-                    candidate.is_bomb || candidate.image_is_bomb ? 'BOMB' : '',
+                    candidate.is_bomb ? 'BOMB' : '',
                 ].filter(Boolean).join('／');
                 return `<label class="mes-review-candidate${candidate.collectable ? '' : ' disabled'}"${disabledReason ? ` title="${_esc(disabledReason)}" aria-disabled="true"` : ''}>
                     ${preview}
