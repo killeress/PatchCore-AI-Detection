@@ -7976,13 +7976,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             item["source_available"] = source_path.is_file()
             if not source_path.is_file():
                 item["collectable_reason"] = "原圖不存在，無法保存 NG crop"
-            elif int(row.get("image_is_bomb") or 0) or int(row.get("is_bomb") or 0):
+            elif int(row.get("is_bomb") or 0):
                 item["collectable_reason"] = "BOMB 模擬缺陷，不納入真實 NG 驗證庫"
             else:
                 item["collectable_reason"] = ""
             item["collectable"] = bool(
                 source_path.is_file()
-                and not int(row.get("image_is_bomb") or 0)
                 and not int(row.get("is_bomb") or 0)
             )
             item["crop_url"] = (
@@ -8054,13 +8053,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             lighting = self._sample_lighting(candidate.get("image_name") or "")
             if lighting not in self._sample_lightings():
                 raise ValueError(f"光源不納入 NG 驗證庫: {lighting}")
-            if (
-                not allow_bomb
-                and (
-                    int(candidate.get("image_is_bomb") or 0)
-                    or int(candidate.get("is_bomb") or 0)
-                )
-            ):
+            # Image BOMB summarizes anomaly tiles; AI-OK tiles in that image
+            # can still be real missed defects. Use the selected tile's flag.
+            if not allow_bomb and int(candidate.get("is_bomb") or 0):
                 raise ValueError(f"炸彈候選不可加入 NG 驗證庫: tile {candidate['tile_result_id']}")
 
             source_path = self._mes_review_resolve_source(candidate.get("image_path") or "")

@@ -864,6 +864,62 @@ def test_web_review_save_does_not_require_reviewer(tmp_path):
     assert responses[0][1]["review"]["reviewer"] == ""
 
 
+@pytest.mark.parametrize("image_is_bomb", [0, 1])
+@pytest.mark.parametrize("tile_is_bomb", [0, 1])
+def test_mes_review_bomb_flag_is_per_tile_for_candidates_and_save(
+    tmp_path, image_is_bomb, tile_is_bomb,
+):
+    source_path = tmp_path / "WGF50500_134040.tif"
+    assert cv2.imwrite(str(source_path), np.zeros((1100, 1600), dtype=np.uint8))
+    db = CAPIDatabase(tmp_path / "review.db")
+    record_id, image_id, tile_id = _insert_aoi_candidates(db, str(source_path))
+    with sqlite3.connect(str(db.db_path)) as conn:
+        conn.execute(
+            "UPDATE image_results SET is_bomb = ?, image_name = ? WHERE id = ?",
+            (image_is_bomb, source_path.name, image_id),
+        )
+        conn.execute(
+            """UPDATE tile_results SET is_bomb = ?, aoi_product_x = 1786,
+               aoi_product_y = 6, zone = 'edge' WHERE id = ?""",
+            (tile_is_bomb, tile_id),
+        )
+
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler.inferencer = SimpleNamespace(
+        config=SimpleNamespace(inference_rotate_180_enabled=False)
+    )
+    handler._capi_server_instance = SimpleNamespace(
+        path_mapping={},
+        server_config={"ng_validation": {"base_dir": str(tmp_path / "ng-validation")}},
+    )
+    responses = []
+    handler._send_json = lambda data, status=200: responses.append((status, data))
+    handler._handle_mes_review_candidates_api({"record_id": [str(record_id)]})
+    candidate = responses[-1][1]["candidates"][0]
+    assert candidate["image_is_bomb"] == image_is_bomb
+    assert candidate["is_bomb"] == tile_is_bomb
+    assert candidate["collectable"] is (not tile_is_bomb)
+    assert bool(candidate["collectable_reason"]) is bool(tile_is_bomb)
+
+    handler._read_json_body = lambda: {
+        "record_id": record_id,
+        "review_type": "miss_detection",
+        "category": "score_below_threshold",
+        "mes_judgment": "NG",
+        "confirmed_ng": True,
+        "selected_tile_ids": [tile_id],
+    }
+    handler._handle_mes_review_save()
+    assert responses[-1][0] == (400 if tile_is_bomb else 200)
+    samples, total = db.list_ng_validation_samples()
+    assert total == (0 if tile_is_bomb else 1)
+    if not tile_is_bomb:
+        assert samples[0]["aoi_product_x"] == 1786
+        assert samples[0]["aoi_product_y"] == 6
+        assert Path(samples[0]["crop_path"]).is_file()
+
+
 def test_mes_review_candidates_explain_why_bomb_tile_is_disabled(tmp_path):
     source_path = tmp_path / "G0F00000_080000.tif"
     source_path.write_bytes(b"fixture")
@@ -897,6 +953,8 @@ def test_report_template_contains_manual_review_and_ng_database_ui():
     assert "mesReportTab.switchView('review')" in template
     assert 'id="mes_reviewPanel"' in template
     assert 'id="mesReviewCandidateGrid"' in template
+    assert "candidate.is_bomb ? 'BOMB' : ''" in template
+    assert "candidate.is_bomb || candidate.image_is_bomb" not in template
     assert 'id="mesReviewConfirmedNg"' in template
     assert 'id="mesNgDatabaseModal"' in template
     assert "/api/ric/mes-review/candidates" in template
