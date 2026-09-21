@@ -261,6 +261,44 @@ def test_remove_tiny_components_drops_isolated_noise():
     assert cleaned[26, 61] == 0
 
 
+@pytest.mark.parametrize("rotated", [False, True])
+@pytest.mark.parametrize(
+    "filename,expected_bbox",
+    [
+        ("W0F00000_095214.tif", (548, 3799, 134, 138)),
+        ("W0F00000_095347.tif", (554, 3789, 139, 138)),
+    ],
+)
+def test_detect_faint_ka_with_camera_border(filename, expected_bbox, rotated):
+    path = _ROOT / filename
+    if not path.exists():
+        pytest.skip(f"real mark fixture not available: {path}")
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    assert image is not None
+    x, y, width, height = expected_bbox
+    if rotated:
+        x, y = image.shape[1] - x - width, image.shape[0] - y - height
+        image = cv2.rotate(image, cv2.ROTATE_180)
+    result = detect_panel_mark(image)
+    assert result["found"] is True
+    assert result["text"] == "KA"
+    assert result["search_pass"] == "low_contrast"
+    assert result["roi"] == ("top_right" if rotated else "bottom_left")
+    assert result["orientation"] == ("normal" if rotated else "rot180")
+    for key, expected in zip(("x", "y", "width", "height"), (x, y, width, height)):
+        assert result["bbox"][key] == pytest.approx(expected, abs=5)
+
+
+def test_low_contrast_fallback_rejects_empty_textured_panel():
+    y, x = np.indices((768, 1024))
+    image = np.clip(100 + 8 * np.sin(x * 2) + 3 * np.cos(y * 2), 0, 255).astype(np.uint8)
+    image[:100] = 0
+    image[:, :60] = 0
+    image[-60:] = 0
+    image[:, -60:] = 0
+    assert detect_panel_mark(image)["found"] is False
+
+
 @pytest.mark.parametrize(
     ("filename", "expected_text", "expected_roi", "expected_orientation"),
     [
