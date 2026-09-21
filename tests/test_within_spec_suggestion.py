@@ -1350,3 +1350,73 @@ def test_within_spec_inference_note_includes_missed_aoi_dot_tiles():
 
     assert "[WITHIN_SPEC_INFERENCE]" in note
     assert "WGF50500 AOI點未檢出：數量 1 > 0 [NG]；tile 0 AOI(704,120)；結果=NG" in note
+
+
+@pytest.mark.parametrize("profile,name,expected", [
+    ("aapi", "T865PE91AK69W0F00000051331.tif", "W0F00000"),
+    ("aapi", "overview_T865PE91AK69W0F00000051331.tif", "W0F00000"),
+    ("aapi", "T865PE91AK69STANDARD051333.tif", "STANDARD"),
+    ("aapi", "T865PE91AK69U0F00000051332.tif", "U0F00000"),
+    ("aapi", "T865PE91AK69WGF25250051332.tif", "WGF25250"),
+    ("aapi", "T865PE91AK69W0F00010051332.tif", "W0F00010"),
+    ("capi", "W0F00000_001.png", "W0F00000"),
+    ("capi", "U0F00000051332.tif", "STANDARD"),
+])
+def test_within_spec_uses_station_lighting(profile, name, expected):
+    from capi_config import CAPIConfig
+    from capi_station_adapter import create_station_adapter
+    from capi_web import _within_spec_screen_code
+    screens = CAPIConfig().within_spec_judgment_rules["default"]["screens"]
+    assert _within_spec_screen_code(name, screens, create_station_adapter(profile)) == expected
+
+
+def test_aapi_white_screen_does_not_release_using_standard_threshold(tmp_path):
+    from copy import deepcopy
+    from capi_station_adapter import create_station_adapter
+    image_path = tmp_path / "T865PE91AK69W0F00000051331.png"
+    _write_black_dot_image(image_path, [(48, 48)])
+    detail = _detail(image_path)
+    detail["images"][0]["image_name"] = image_path.name
+    rules = _rules(threshold_mm=0.05)
+    screens = rules["default"]["screens"]
+    screens["STANDARD"] = deepcopy(screens["W0F00000"])
+    screens["STANDARD"]["black_dot"]["area_threshold_mm"] = 0.3
+    result = _evaluate_within_spec_suggestion_detail(
+        detail, rules, station_adapter=create_station_adapter("aapi"),
+    )
+    assert result["evaluated_tile_count"] == 1
+    assert result["panel_totals"][0]["screen"] == "W0F00000"
+    assert result["panel_totals"][0]["within"] is False
+    assert result["suggestion"] is None
+
+
+def test_aapi_screen_defaults_migrate_and_remain_independent():
+    from capi_config import CAPIConfig
+    raw = {"default": {"screens": {"W0F00000": {"black_dot": {"area_threshold_mm": 0.18}}}}}
+    rules = CAPIConfig._normalize_within_spec_judgment_rules(raw)
+    screens = rules["default"]["screens"]
+    assert screens["W0F00000"]["black_dot"]["area_threshold_mm"] == 0.18
+    for code in ("U0F00000", "WGF25250", "W0F00010"):
+        assert screens[code]["black_dot"]["area_threshold_mm"] == 0.3
+        screens[code]["black_dot"]["area_threshold_mm"] = 0.12
+    assert screens["STANDARD"]["black_dot"]["area_threshold_mm"] == 0.3
+    restored = CAPIConfig._normalize_within_spec_judgment_rules(rules)
+    assert restored["default"]["screens"]["U0F00000"]["black_dot"]["area_threshold_mm"] == 0.12
+
+
+@pytest.mark.parametrize("station", ["AAPI", "CAPI"])
+def test_aapi_screen_settings_visibility(station):
+    from jinja2 import Environment
+    template = (Path(__file__).resolve().parents[1] / "templates" / "settings.html").read_text(encoding="utf-8")
+    screen_list = template.split("const WITHIN_SPEC_STANDARD_SCREENS = [", 1)[1].split("];", 1)[0]
+    rendered = Environment().from_string(screen_list).render(station_name=station)
+    for code in ("U0F00000", "WGF25250", "W0F00010"):
+        assert (code in rendered) == (station == "AAPI")
+
+
+def test_within_spec_review_resolves_aapi_from_host(monkeypatch):
+    from capi_config import CAPIConfig
+    from capi_web import _within_spec_screen_code
+    monkeypatch.setattr("capi_web._get_host_identity", lambda: "aapi36")
+    screens = CAPIConfig().within_spec_judgment_rules["default"]["screens"]
+    assert _within_spec_screen_code("T865PE91AK69W0F00000051331.tif", screens) == "W0F00000"

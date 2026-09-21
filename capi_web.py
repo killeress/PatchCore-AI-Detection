@@ -1854,10 +1854,21 @@ def _json_safe_snapshot(value: Any) -> Any:
         return str(value)
 
 
-def _within_spec_screen_code(image_name: str, screens: Dict[str, Any]) -> Optional[str]:
+def _within_spec_screen_code(image_name: str, screens: Dict[str, Any], station_adapter=None) -> Optional[str]:
     stem = Path(str(image_name or "")).stem
     if stem.startswith("overview_"):
         stem = stem[len("overview_"):]
+    # Use the deployment station, never guess it from a filename. AAPI places
+    # the lighting after the glass ID and keeps U0F00000 distinct from STANDARD.
+    adapter = station_adapter or create_station_adapter(
+        resolve_station_profile_from_hostname(_get_host_identity(), default_if_unknown="capi")
+    )
+    lighting = adapter.image_prefix(stem)
+    if lighting in screens:
+        return lighting
+    model_lighting = adapter.model_prefix(lighting)
+    if model_lighting in screens:
+        return model_lighting
     if stem in screens:
         return stem
     for code in screens:
@@ -2700,6 +2711,7 @@ def _evaluate_within_spec_suggestion_detail(
     visual_url_prefix: str = "",
     rotate_180: bool = False,
     deferred_visual_jobs: Optional[List[Dict[str, Any]]] = None,
+    station_adapter=None,
 ) -> Dict[str, Any]:
     """Evaluate within-spec suggestion on NG tiles only and collect traceable steps."""
     import cv2
@@ -2833,8 +2845,14 @@ def _evaluate_within_spec_suggestion_detail(
     non_dot_residues: List[Dict[str, Any]] = []
     non_dot_keys = set()
 
+    station_adapter = station_adapter or create_station_adapter(
+        resolve_station_profile_from_hostname(_get_host_identity(), default_if_unknown="capi")
+    )
+    result["parameter_snapshot"]["station_profile"] = station_adapter.profile
     for image in detail.get("images") or []:
-        screen_code = _within_spec_screen_code(image.get("image_name") or image.get("image_path"), screens)
+        screen_code = _within_spec_screen_code(
+            image.get("image_name") or image.get("image_path"), screens, station_adapter,
+        )
         if not screen_code:
             add_step("略過圖片：找不到對應 screen 規則", image=image.get("image_name") or image.get("image_path") or "")
             continue
@@ -13859,6 +13877,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         visual_output_dir=visual_dir,
                         visual_url_prefix=visual_prefix,
                         rotate_180=bool(getattr(inferencer, "_rotate_detection_images_180", False)),
+                        station_adapter=getattr(inferencer, "station_adapter", None),
                     )
                     suggestion = eval_result.get("suggestion")
                     panel_totals = eval_result.get("panel_totals") or []

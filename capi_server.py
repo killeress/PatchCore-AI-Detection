@@ -3327,6 +3327,7 @@ class CAPIServer:
                 visual_url_prefix=visual_prefix,
                 rotate_180=bool(getattr(inferencer, "_rotate_detection_images_180", False)),
                 deferred_visual_jobs=deferred_visual_jobs,
+                station_adapter=station,
             )
             suggestion = eval_result.get("suggestion")
             panel_totals = eval_result.get("panel_totals") or []
