@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from capi_cuda_diagnostics import cuda_stage, trace_call
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ class ScratchFilter:
         raw = classifier.conformal_threshold * self._safety
         self.effective_threshold = min(raw, _THR_CLAMP)
 
+    @trace_call("scratch-image")
     def apply_to_image_result(self, image_result: ImageResult) -> None:
         if not image_result.anomaly_tiles:
             return
@@ -47,7 +49,9 @@ class ScratchFilter:
                 classifier_image = getattr(tile, "original_image", None)
                 if classifier_image is None:
                     classifier_image = tile.image
-                score = float(self._classifier.predict(classifier_image))
+                with cuda_stage("scratch-tile", tile=getattr(tile, "tile_id", None),
+                                input_shape=list(classifier_image.shape), batch=1):
+                    score = float(self._classifier.predict(classifier_image))
             except Exception as e:
                 logger.warning("[scratch] %s tile#%s classifier failed: %s",
                                img_name, getattr(tile, "tile_id", "?"), e)

@@ -7,6 +7,7 @@ LogReg, metadata, and calibration scores.
 from __future__ import annotations
 
 import logging
+from capi_cuda_diagnostics import cuda_stage, trace_call
 import math
 import os
 import pickle
@@ -298,6 +299,7 @@ class ScratchClassifier:
         """Return scratch probability in [0, 1]. Accepts PIL or np.ndarray (uint8 RGB)."""
         return float(self.predict_batch([image])[0])
 
+    @trace_call("scratch-batch")
     def predict_batch(self, images: list) -> np.ndarray:
         """Vectorised predict for a list of images.
 
@@ -308,7 +310,9 @@ class ScratchClassifier:
         if len(images) == 0:
             return np.zeros(0, dtype=np.float32)
         tensors = [self._transform(_to_pil(i)) for i in images]
-        batch = torch.stack(tensors).to(self._device)
-        with torch.no_grad():
-            feats = self._model(batch).cpu().numpy()
+        with cuda_stage("scratch-forward", model=self.metadata.dinov2_model,
+                        batch=len(tensors), tensor_shape=[len(tensors), *tensors[0].shape]):
+            batch = torch.stack(tensors).to(self._device)
+            with torch.no_grad():
+                feats = self._model(batch).cpu().numpy()
         return self._logreg.predict_proba(feats)[:, 1].astype(np.float32)
