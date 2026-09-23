@@ -46,6 +46,23 @@ cd /root/Code/CAPI_AD
 3. 發布 ZIP 與 `latest.json` 到 `/aidata/capi_ai/update_repo`。
 4. 確認 `8088` 更新檔案服務可讀到 `latest.json`。
 
+若安裝與發布已成功，只有第 3/4 步的 HTTP 啟動失敗，不需要重新安裝 AI。
+新版 `promote_update.sh` 可單獨恢復既有更新庫的 HTTP 服務：
+
+```bash
+./promote_update.sh --serve-only
+```
+
+此模式要求更新庫已有 `latest.json`，不重啟 AI／MARK，也不重新發布 metadata。
+HTTP 啟動預設等待 120 秒，可用 `CAPI_UPDATE_HTTP_START_TIMEOUT_SECONDS` 調整。
+本機探測避開 proxy 與 curlrc，限制單次連線／請求時間；失敗時保留最後的
+curl 錯誤及 HTTP 日誌，且只停止本次嘗試啟動的程序。
+
+Python `http.server` 啟動時會解析主機名稱；現場 DNS 解析可能超過舊版約
+10 秒的等待視窗。若程序仍存活但尚未監聽、日誌空白，可用
+`time timeout 15s python3 -c 'import socket; print(socket.getfqdn("0.0.0.0"))'`
+檢查解析耗時。此問題不代表 `/api/version` 已通過的 AI 安裝失敗。
+
 第二、三台只需各跑一次：
 
 ```bash
