@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from capi_tile_diagnostics import tile_decision_context
 import time
+import math
 import re
 import logging
 import logging.handlers
@@ -2718,6 +2719,56 @@ class CAPIServer:
         except Exception as exc:
             logger.warning("[CUDA-MEM] %s status unavailable: %s", stage, exc)
 
+    def _maybe_clear_cuda_cache_after_panel(self, *, glass_id: str) -> None:
+        """Caller holds _gpu_lock; run only after successful scoring/judgment.
+
+        Release unused allocator cache only. Never unload models, change scores,
+        reset peak counters, or initialize CUDA on a CPU-only service.
+        """
+        try:
+            policy = getattr(self, "server_config", {}).get("inference", {}).get(
+                "cuda_cache_cleanup", {}
+            )
+            enabled = policy.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError("cuda_cache_cleanup.enabled must be a boolean")
+            if not enabled:
+                return
+            min_unused = float(policy.get("min_unused_mib", 2048))
+            max_free = float(policy.get("max_device_free_mib", 2048))
+            cooldown = float(policy.get("cooldown_seconds", 60))
+            if (not all(math.isfinite(value) for value in (min_unused, max_free, cooldown))
+                    or min_unused <= 0 or max_free < 0 or cooldown < 0):
+                raise ValueError("invalid cuda_cache_cleanup thresholds or cooldown")
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            if not getattr(self, "_cuda_cache_cleanup_config_warned", False):
+                logger.warning("[CUDA-MEM] post-panel cleanup disabled by invalid config: %s", exc)
+                self._cuda_cache_cleanup_config_warned = True
+            return
+
+        try:
+            now = time.monotonic()
+            last_attempt = getattr(self, "_last_cuda_cache_cleanup_attempt", None)
+            if last_attempt is not None and now - last_attempt < cooldown:
+                return
+            import torch
+            if not torch.cuda.is_initialized() or not torch.cuda.is_available():
+                return
+            mib = 1024 * 1024
+            unused = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+            if unused < min_unused * mib:
+                return
+            free_bytes, _ = torch.cuda.mem_get_info()
+            if free_bytes > max_free * mib:
+                return
+            # Throttle attempts even when the cleanup fails or releases nothing.
+            # Shared server state covers all model IDs using this GPU lock.
+            self._last_cuda_cache_cleanup_attempt = now
+            CAPIInferencer._clear_cuda_cache(f"post-panel glass={glass_id}")
+        except Exception as exc:
+            # A completed inference must not become ERR because of maintenance.
+            logger.warning("[CUDA-MEM] post-panel cleanup glass=%s failed: %s", glass_id, exc)
+
     def _start_cuda_memory_monitor(self):
         """Write one small diagnostic line every five minutes, including while idle."""
         raw_interval = self.server_config.get("inference", {}).get(
@@ -3618,6 +3669,9 @@ class CAPIServer:
                             within_spec_info.get("reason", ""),
                         )
 
+                # All score/judgment computation is complete. Keep the GPU lock
+                # until optional cache maintenance finishes; never reacquire it.
+                self._maybe_clear_cuda_cache_after_panel(glass_id=parsed.get("glass_id", ""))
                 return ai_judgment, ng_details, results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info, within_spec_info
 
             except Exception as e:

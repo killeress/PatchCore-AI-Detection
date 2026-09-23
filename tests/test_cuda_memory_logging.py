@@ -67,6 +67,9 @@ def test_clear_cuda_cache_reports_released_reserved_memory(monkeypatch, caplog):
     empty_cache_calls = []
     monkeypatch.setattr(capi_inference.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(capi_inference.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(capi_inference.torch.cuda, "memory_allocated", lambda: 2 * mib)
+    free_values = iter((1 * mib, 7 * mib))
+    monkeypatch.setattr(capi_inference.torch.cuda, "mem_get_info", lambda: (next(free_values), 16 * mib))
     monkeypatch.setattr(capi_inference.torch.cuda, "memory_reserved", lambda: next(reserved_values))
     monkeypatch.setattr(capi_inference.torch.cuda, "empty_cache", lambda: empty_cache_calls.append(True))
 
@@ -79,11 +82,17 @@ def test_clear_cuda_cache_reports_released_reserved_memory(monkeypatch, caplog):
     assert "reserved_before=10.0 MiB" in message
     assert "reserved_after=4.0 MiB" in message
     assert "released=6.0 MiB" in message
+    assert "allocated_before=2.0 MiB allocated_after=2.0 MiB" in message
+    assert "device_free_before=1.0 MiB device_free_after=7.0 MiB" in message
+    assert "elapsed_ms=" in message
+    assert f"pid={os.getpid()}" in message
 
 
 def test_clear_cuda_cache_failure_is_logged_without_raising(monkeypatch, caplog):
     monkeypatch.setattr(capi_inference.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(capi_inference.torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(capi_inference.torch.cuda, "memory_allocated", lambda: 2)
+    monkeypatch.setattr(capi_inference.torch.cuda, "mem_get_info", lambda: (1, 16))
     monkeypatch.setattr(capi_inference.torch.cuda, "memory_reserved", lambda: 10)
 
     def fail_empty_cache():
