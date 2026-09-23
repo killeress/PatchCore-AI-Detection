@@ -1,5 +1,54 @@
 # GPU 顯存診斷
 
+## 正式投片後的條件式快取回收
+
+正式 TCP 投片的分數與判定完成後、釋放共用 GPU 鎖之前，服務會檢查
+是否需要回收未使用的 PyTorch CUDA 快取。預設啟用，舊設定檔無須新增欄位；
+更新程式並重新啟動服務後生效。
+
+預設必須同時符合以下條件才呼叫既有快取回收函式：
+
+- `reserved - allocated >= 2048 MiB`。
+- 整張 GPU 的 `device_free <= 2048 MiB`。
+- 距離上次回收嘗試至少 60 秒；首次符合條件可立即執行。
+
+冷卻時間由伺服器共用，不因切換機種／模型而重新計算。回收失敗或未釋放
+任何空間也適用冷卻時間，避免每片反覆嘗試。未達門檻不強制同步；CPU／
+尚未初始化 CUDA 時直接略過。推論失敗、沒有結果或前置檢查提早返回時
+不執行此維護。此機制只接在正式 TCP 投片流程，獨立 CLI、Web 重跑與
+背景診斷不新增自動回收。
+
+可在 `server_config.yaml` 設定：
+
+```yaml
+inference:
+  cuda_cache_cleanup:
+    enabled: true
+    min_unused_mib: 2048
+    max_device_free_mib: 2048
+    cooldown_seconds: 60
+```
+
+`enabled: false` 可停用；`cooldown_seconds: 0` 表示取消冷卻時間。
+`min_unused_mib` 須大於零，其餘數值須為有限非負數。格式錯誤時略過回收、
+記錄一次設定警告，保留正常推論流程。以上門檻是保守起始值，需依現場
+顯存餘裕及延遲調整，不是顯存占用上限。
+
+觸發時記錄 `[CUDA-MEM] cache-clear post-panel glass=...`，包含回收前後的
+allocated、reserved、device free、實際 reserved 下降量、耗時與 PID。
+請比較同一 PID，不能將重啟後下降當成原程序成功回收。既有每片
+`[CUDA-SUMMARY]` 在 `process_panel` 結束時產生，早於此回收動作；回收結果
+以 `cache-clear post-panel` 紀錄為準，不重設 peak 統計。
+
+這項變更只回收未使用快取，不卸載模型、不修改 memory bank、KNN、精度、
+分數、anomaly map 或 threshold，預期不影響模型分數及準確度。回收失敗
+只記錄警告，不將已完成的判定改成錯誤。測試以模擬 CUDA 驗證門檻、鎖、
+冷卻與回傳結果保持不變；實際釋放量、GPU 分數重播與耗時仍需現場驗證。
+
+此機制不能釋放仍被活躍 Tensor 使用的記憶體，也不會消除下一次 KNN
+計算的暫存高峰；同步與後續重新配置可能增加延遲。因此不逐 tile 清快取，
+也不要求將模型常駐顯存降到零。
+
 ## 逐片與運算階段追蹤
 
 顯存異常追蹤 **預設開啟**，部署新版並重新啟動 AI 服務即可取樣，

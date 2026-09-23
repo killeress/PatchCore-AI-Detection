@@ -650,23 +650,36 @@ class CAPIInferencer:
     @staticmethod
     def _clear_cuda_cache(stage: str) -> None:
         """釋放未使用的 PyTorch CUDA cache，並記錄實際釋放量。"""
-        if not torch.cuda.is_available():
-            return
-
         try:
+            if not torch.cuda.is_available():
+                return
+            started = time.monotonic()
             torch.cuda.synchronize()
             mib = 1024 * 1024
+            allocated_before = torch.cuda.memory_allocated()
             reserved_before = torch.cuda.memory_reserved()
+            free_before, _ = torch.cuda.mem_get_info()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            allocated_after = torch.cuda.memory_allocated()
             reserved_after = torch.cuda.memory_reserved()
+            free_after, _ = torch.cuda.mem_get_info()
             logger.info(
                 "[CUDA-MEM] cache-clear %s | "
-                "reserved_before=%.1f MiB reserved_after=%.1f MiB released=%.1f MiB",
+                "reserved_before=%.1f MiB reserved_after=%.1f MiB released=%.1f MiB "
+                "allocated_before=%.1f MiB allocated_after=%.1f MiB "
+                "device_free_before=%.1f MiB device_free_after=%.1f MiB "
+                "elapsed_ms=%.1f pid=%s",
                 stage,
                 reserved_before / mib,
                 reserved_after / mib,
                 max(0, reserved_before - reserved_after) / mib,
+                allocated_before / mib,
+                allocated_after / mib,
+                free_before / mib,
+                free_after / mib,
+                (time.monotonic() - started) * 1000,
+                os.getpid(),
             )
         except Exception as exc:
             logger.warning("[CUDA-MEM] cache-clear %s failed: %s", stage, exc)

@@ -35,6 +35,13 @@ inference:
   # 每 300 秒記錄一行顯存摘要，沿用 logging 輪替；0 關閉週期記錄。
   # 僅觀察，不強制 GPU 同步或清理快取；舊設定檔省略此項亦預設 300 秒。
   cuda_memory_log_interval_seconds: 300
+  # 正式投片完成後，在 GPU 鎖內條件式回收未使用快取；不修改模型或分數。
+  # 下列兩個顯存條件須同時成立；舊設定檔省略此區塊亦採用這些預設值。
+  cuda_cache_cleanup:
+    enabled: true
+    min_unused_mib: 2048
+    max_device_free_mib: 2048
+    cooldown_seconds: 60
   config_path: /root/Code/CAPI_AD/model/GN160JCEL250S-20260430_111505/machine_config.yaml
 
 # ------------------------------------------------------------
