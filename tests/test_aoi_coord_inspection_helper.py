@@ -183,7 +183,7 @@ def test_aoi_coord_inspection_skips_whitefra_for_dedicated_detector(
     assert len(result.tiles) == 1
 
 
-def test_parse_aoi_report_maps_hm_u_prefix_to_standard(new_arch_inferencer, tmp_path):
+def test_parse_aoi_report_keeps_u0f_and_standard_separate(new_arch_inferencer, tmp_path):
     panel_dir = tmp_path / "yuantu" / "GZ0790KA0017S" / "panel"
     report_dir = tmp_path / "Report" / "GZ0790KA0017S" / "panel"
     panel_dir.mkdir(parents=True)
@@ -198,15 +198,17 @@ def test_parse_aoi_report_maps_hm_u_prefix_to_standard(new_arch_inferencer, tmp_
 
     (report_dir / "083755.TXT").write_text(
         "header\n"
-        "@;OK;NGPCDK20035200136U0F00000;\n",
+        "@;OK;NGPCDK20035200136U0F00000PCDK20070000200STANDARD;\n",
         encoding="utf-8",
     )
 
     parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
 
-    assert set(parsed) == {"STANDARD"}
+    assert set(parsed) == {"U0F00000", "STANDARD"}
+    assert parsed["U0F00000"][0].image_prefix == "U0F00000"
+    assert (parsed["U0F00000"][0].product_x, parsed["U0F00000"][0].product_y) == (352, 136)
     assert parsed["STANDARD"][0].image_prefix == "STANDARD"
-    assert (parsed["STANDARD"][0].product_x, parsed["STANDARD"][0].product_y) == (352, 136)
+    assert (parsed["STANDARD"][0].product_x, parsed["STANDARD"][0].product_y) == (700, 200)
 
 
 def test_parse_aoi_report_accepts_multiline_ng_format(new_arch_inferencer, tmp_path):
@@ -233,11 +235,11 @@ def test_parse_aoi_report_accepts_multiline_ng_format(new_arch_inferencer, tmp_p
 
     parsed = new_arch_inferencer._parse_aoi_report_txt(panel_dir)
 
-    assert set(parsed) == {"STANDARD"}
-    defect = parsed["STANDARD"][0]
+    assert set(parsed) == {"U0F00000"}
+    defect = parsed["U0F00000"][0]
     assert defect.defect_code == "PCDK2"
     assert (defect.product_x, defect.product_y) == (924, 908)
-    assert defect.image_prefix == "STANDARD"
+    assert defect.image_prefix == "U0F00000"
 
 
 def test_parse_aoi_report_accepts_multiline_ok_without_coords(new_arch_inferencer, tmp_path):
@@ -502,7 +504,7 @@ def test_v2_image_cache_preserves_six_screen_tiles_and_response(new_arch_inferen
     inf.config.grid_tiling_enabled = False
     inf.config.inference_rotate_180_enabled = rotate
     inf.config.enable_panel_polygon = True
-    prefixes = ["W0F00000", "STANDARD", "G0F00000", "R0F00000", "WGF50500"]
+    prefixes = ["W0F00000", "U0F00000", "G0F00000", "R0F00000", "WGF50500"]
     inf.config.model_mapping = {p: {"inner": "inner.pt", "edge": "edge.pt"} for p in prefixes}
     inf.config.threshold_mapping = {p: {"inner": 0.4, "edge": 0.6} for p in prefixes}
     report = {}
@@ -510,8 +512,7 @@ def test_v2_image_cache_preserves_six_screen_tiles_and_response(new_arch_inferen
         source = np.zeros((1536, 2048), np.uint8)
         source[200:1300, 250:1750] = 130 + i * 10
         source[500:508, 700:708] = 230
-        name = "U0F00000" if prefix == "STANDARD" else prefix
-        assert cv2.imwrite(str(tmp_path / f"{name}_001.tif"), source)
+        assert cv2.imwrite(str(tmp_path / f"{prefix}_001.tif"), source)
         report[prefix] = [
             AOIReportDefect("PCDK2", 20, 20, prefix),
             AOIReportDefect("PCDK2", 960, 600, prefix),

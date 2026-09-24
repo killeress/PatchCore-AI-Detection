@@ -2139,6 +2139,8 @@
         'image_abnormal_detection_enabled',
         'image_abnormal_standard_mean_lower',
         'image_abnormal_standard_mean_upper',
+        'image_abnormal_u0f00000_mean_lower',
+        'image_abnormal_u0f00000_mean_upper',
         'image_abnormal_wgf50500_mean_lower',
         'image_abnormal_wgf50500_mean_upper',
         'image_abnormal_w0f00010_mean_lower',
@@ -2169,12 +2171,12 @@
     };
     const WITHIN_SPEC_STANDARD_SCREENS = [
         ['STANDARD', 'STANDARD(標準)'],
+        ['U0F00000', 'U0F00000'],
         ['WGF50500', 'WGF50500(50灰)'],
         ['G0F00000', 'G0F00000(綠畫面)'],
         ['R0F00000', 'R0F00000(紅畫面)'],
         ['W0F00000', 'W0F00000(白畫面)'],
         {% if station_name|default('CAPI')|upper == 'AAPI' %}
-        ['U0F00000', 'U0F00000'],
         ['WGF25250', 'WGF25250'],
         ['W0F00010', 'W0F00010'],
         {% endif %}
@@ -4054,6 +4056,9 @@
         const isEnabled = String(readDisplay(enabledParam)).toLowerCase() === 'true';
         const screens = [
             ['STANDARD', '標準畫面', 'image_abnormal_standard_mean_lower', 'image_abnormal_standard_mean_upper'],
+            {% if station_name|default('CAPI')|upper == 'CAPI' %}
+            ['U0F00000', 'U0F00000 畫面', 'image_abnormal_u0f00000_mean_lower', 'image_abnormal_u0f00000_mean_upper'],
+            {% endif %}
             ['WGF50500', '50 灰畫面', 'image_abnormal_wgf50500_mean_lower', 'image_abnormal_wgf50500_mean_upper'],
             ['W0F00010', 'W0F00010 畫面', 'image_abnormal_w0f00010_mean_lower', 'image_abnormal_w0f00010_mean_upper'],
             ['G0F00000', '綠畫面', 'image_abnormal_g0f00000_mean_lower', 'image_abnormal_g0f00000_mean_upper'],
@@ -4722,6 +4727,8 @@
         'image_abnormal_detection_enabled': '啟用畫異預檢',
         'image_abnormal_standard_mean_lower': 'STANDARD 產品區平均亮度下限',
         'image_abnormal_standard_mean_upper': 'STANDARD 產品區平均亮度上限',
+        'image_abnormal_u0f00000_mean_lower': 'U0F00000 產品區平均亮度下限',
+        'image_abnormal_u0f00000_mean_upper': 'U0F00000 產品區平均亮度上限',
         'image_abnormal_wgf50500_mean_lower': 'WGF50500 產品區平均亮度下限',
         'image_abnormal_wgf50500_mean_upper': 'WGF50500 產品區平均亮度上限',
         'image_abnormal_w0f00010_mean_lower': 'W0F00010 產品區平均亮度下限',

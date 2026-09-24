@@ -28,7 +28,7 @@ def payload(tile_id=1):
 
 
 @pytest.mark.parametrize("profile,image_name,expected", [
-    ("capi", "U0F00000_082933.tif", "STANDARD"),
+    ("capi", "U0F00000_082933.tif", "U0F00000"),
     ("aapi", "SAMPLEU0F00000082933.tif", "U0F00000"),
     ("aapi", "SAMPLEWindows_BG082933.tif", "STANDARD"),
     ("aapi", "SAMPLEW0F00010082933.tif", "W0F00010"),

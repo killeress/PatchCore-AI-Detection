@@ -46,7 +46,7 @@ def test_point_numbers_use_coordinates_not_tile_ids_and_preserve_missing_rows():
               dict(product_x=50, product_y=60)]
     tiles = [_tile(24, 50, 60), _tile(20, 10, 20), _tile(25, 99, 99),
              dict(tile_id=0, is_aoi_coord=False)]
-    detail = _detail(coords, tiles, name="U0F00000083755.tif", prefix="STANDARD")
+    detail = _detail(coords, tiles, name="U0F00000083755.tif", prefix="U0F00000")
     CAPIWebHandler._decorate_record_aoi_point_numbers(detail)
     assert [t["aoi_point_number"] for t in tiles] == [3, 1, None, None]
 

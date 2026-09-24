@@ -622,7 +622,7 @@ class TestTilePoolCRUD:
             image_results_data=[bomb_images[0]],
             **{**common, "glass_id": "P003", "request_time": "2026-08-13 10:02:00"},
         )
-        standard_image = {
+        u0f_image = {
             **bomb_images[0],
             "image_path": "/images/P004/U0F00000_100000.tif",
             "image_name": "U0F00000_100000.tif",
@@ -630,7 +630,11 @@ class TestTilePoolCRUD:
         db.save_inference_record(
             model_id="MODEL-A",
             client_bomb_info='{"image_prefix":"U0F00000","defect_type":"point","coordinates":[[1,2]]}',
-            image_results_data=[standard_image],
+            image_results_data=[u0f_image, {
+                **u0f_image,
+                "image_path": "/images/P004/STANDARD_100000.tif",
+                "image_name": "STANDARD_100000.tif",
+            }],
             **{**common, "glass_id": "P004", "request_time": "2026-08-13 10:03:00"},
         )
 
@@ -650,7 +654,11 @@ class TestTilePoolCRUD:
             machine_id="MODEL-A",
             lightings=("STANDARD",),
         )
-        assert [row["image_name"] for row in standard_rows] == ["U0F00000_100000.tif"]
+        assert [row["image_name"] for row in standard_rows] == ["STANDARD_100000.tif"]
+        u0f_rows = db.list_training_bomb_candidates(
+            machine_id="MODEL-A", lightings=("U0F00000",),
+        )
+        assert [row["image_name"] for row in u0f_rows] == ["U0F00000_100000.tif"]
 
         with _conn(db) as conn:
             conn.execute(

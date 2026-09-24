@@ -10,6 +10,21 @@ import yaml
 from capi_config import CAPIConfig
 
 
+def test_u0f_image_abnormal_thresholds_inherit_then_remain_independent():
+    cfg = CAPIConfig.from_dict({
+        "image_abnormal_standard_mean_lower": 40,
+        "image_abnormal_standard_mean_upper": 80,
+    })
+    assert (cfg.image_abnormal_u0f00000_mean_lower, cfg.image_abnormal_u0f00000_mean_upper) == (40, 80)
+    cfg.apply_db_overrides([
+        {"param_name": "image_abnormal_u0f00000_mean_lower", "decoded_value": 50},
+        {"param_name": "image_abnormal_u0f00000_mean_upper", "decoded_value": 90},
+    ])
+    restored = CAPIConfig.from_dict(cfg.to_dict())
+    assert (restored.image_abnormal_u0f00000_mean_lower, restored.image_abnormal_u0f00000_mean_upper) == (50, 90)
+    assert (restored.image_abnormal_standard_mean_lower, restored.image_abnormal_standard_mean_upper) == (40, 80)
+
+
 def test_capi_config_legacy_yaml_default_machine_id():
     cfg_data = {
         "model_path": "model.pt",

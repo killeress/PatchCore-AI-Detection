@@ -373,7 +373,7 @@ def test_qjpg_aoi_center_real_region_matches_field_product_coordinate():
     )
 
 
-def test_qjpg_response_keeps_source_prefix_for_hm_standard_image():
+def test_qjpg_response_keeps_source_prefix_for_hm_u0f_image():
     result = _image_result("U0F00000092908.tif")
     tile = _tile(1, 600, 450)
     result.tiles = [tile]
@@ -725,6 +725,37 @@ def test_aapi_image_abnormal_keeps_w0f00010_and_wgf50500_independent(monkeypatch
     assert result["upper"] == 82
     assert result["image_name"] == w0f00010.name
     assert read_paths.count(w0f00010.name) == 1
+
+
+def test_capi_image_abnormal_u0f_uses_its_own_threshold(monkeypatch):
+    monkeypatch.setattr("capi_server.cv2.imread", lambda *_: np.full((4, 4), 80, np.uint8))
+    monkeypatch.setattr("capi_server.detect_panel_geometry", lambda *_: (None, None))
+    cfg = CAPIConfig(
+        image_abnormal_detection_enabled=True,
+        image_abnormal_standard_mean_lower=70, image_abnormal_standard_mean_upper=90,
+        image_abnormal_u0f00000_mean_lower=40, image_abnormal_u0f00000_mean_upper=60,
+    )
+    paths = [Path("U0F00000085943.tif"), Path("STANDARD_085944.tif")]
+    assert check_image_abnormal_precheck(Path("unused"), cfg, paths, report_prefixes=["STANDARD"]) is None
+    result = check_image_abnormal_precheck(Path("unused"), cfg, paths, report_prefixes=["U0F00000"])
+    assert result["screen"] == "U0F00000"
+    assert result["image_name"] == paths[0].name
+    assert (result["lower"], result["upper"]) == (40, 60)
+
+
+def test_capi_brightness_split_does_not_enable_aapi_u0f_precheck(monkeypatch):
+    def unexpected_read(*_args):
+        pytest.fail("AAPI U0F was not part of the existing brightness precheck")
+
+    monkeypatch.setattr("capi_server.cv2.imread", unexpected_read)
+    adapter = AAPIStationAdapter()
+    result = check_image_abnormal_precheck(
+        Path("unused"), CAPIConfig(image_abnormal_detection_enabled=True),
+        [Path("GLASSU0F00000085943.tif")], report_prefixes=["U0F00000"],
+        image_prefix_resolver=adapter.image_prefix,
+        screen_alias_resolver=adapter.model_prefix, station_profile="aapi",
+    )
+    assert result is None
 
 
 def test_qjpg_response_ok_i_omits_within_spec_points_and_missing_mark_is_00():
