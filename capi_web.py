@@ -3881,6 +3881,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._handle_api_stats(query)
             elif path == "/api/status":
                 self._handle_api_status()
+            elif path == "/api/shift_report":
+                self._handle_api_shift_report(query)
             elif path == "/api/version":
                 self._handle_api_version()
             elif path == "/api/update/status":
@@ -5493,6 +5495,34 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
     def _handle_api_version(self):
         """API: deployed release version."""
         self._send_json(get_version_info())
+
+    def _handle_api_shift_report(self, query: Dict[str, Any]):
+        """API: 歷史班報（指定日期＋班別的統計），供中控看板跨來源唯讀查詢。"""
+        cors_headers = {"Access-Control-Allow-Origin": "*"}
+        date_values = query.get("date") or []
+        shift_values = query.get("shift") or []
+        report_date = date_values[0] if date_values else ""
+        shift = shift_values[0] if shift_values else ""
+        try:
+            if not self.db:
+                raise ValueError("資料庫未初始化")
+            stats = self.db.get_shift_statistics_for(report_date, shift)
+        except ValueError as exc:
+            self._send_json(
+                {"error": str(exc)},
+                status=400,
+                headers=cors_headers,
+            )
+            return
+        except Exception as exc:
+            logger.error("Failed to build shift report: %s", exc)
+            self._send_json(
+                {"error": "無法產生歷史班報"},
+                status=500,
+                headers=cors_headers,
+            )
+            return
+        self._send_json(stats, headers=cors_headers)
 
     def _get_update_status_payload(self) -> Dict[str, Any]:
         """Return the sanitized update state shared by local and central dashboards."""

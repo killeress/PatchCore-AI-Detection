@@ -5,6 +5,8 @@
     const MIN_REFRESH_SECONDS = 30;
     const DEFAULT_TIMEOUT_SECONDS = 8;
     const THEME_STORAGE_KEY = "capi-dashboard-theme";
+    // 歷史班報可查詢上限：線體 OK 紀錄保留 30 天，預留 1 天清理邊界
+    const HISTORY_MAX_LOOKBACK_DAYS = 29;
     const HEALTH_THRESHOLDS = Object.freeze({
         diskFreeWarningPercent: 15,
         diskFreeCriticalPercent: 10,
@@ -24,6 +26,9 @@
     let clockTimer = null;
     let nextRefreshAt = null;
     let isRefreshing = false;
+    let activeMode = "realtime";
+    let historyInitialized = false;
+    let historyShift = "day";
 
     document.addEventListener("DOMContentLoaded", initialize);
 
@@ -61,6 +66,7 @@
         if (settingsLink) {
             settingsLink.hidden = directFileMode;
         }
+        initializeModeTabs();
 
         const activeLines = config.lines.filter((line) => line.enabled !== false);
         if (activeLines.length === 0) {
@@ -242,6 +248,367 @@
         }
         updateSummary();
         renderAlerts();
+        // 歷史班報模式下切換製程類別：結果表跟著重查
+        if (activeMode === "history") {
+            refreshHistoryReport();
+        }
+    }
+
+    // ── 歷史班報模式 ────────────────────────────────────────
+
+    function initializeModeTabs() {
+        document.body.dataset.mode = activeMode;
+        const tabs = document.getElementById("mode-tabs");
+        if (!tabs) {
+            return;
+        }
+        for (const tab of tabs.querySelectorAll("[data-mode]")) {
+            tab.addEventListener("click", () => selectMode(tab.dataset.mode));
+        }
+    }
+
+    function selectMode(mode) {
+        if (mode !== "history") {
+            mode = "realtime";
+        }
+        if (mode === activeMode) {
+            return;
+        }
+        activeMode = mode;
+        document.body.dataset.mode = mode;
+        for (const tab of document.querySelectorAll("#mode-tabs [data-mode]")) {
+            tab.setAttribute("aria-pressed", String(tab.dataset.mode === mode));
+        }
+        const historySection = document.getElementById("history-section");
+        if (historySection) {
+            historySection.hidden = mode !== "history";
+        }
+        if (mode === "history") {
+            clearTimeout(refreshTimer);
+            refreshTimer = null;
+            nextRefreshAt = null;
+            initializeHistoryMode();
+            refreshHistoryReport();
+        } else {
+            refreshAllLines();
+        }
+    }
+
+    function initializeHistoryMode() {
+        if (historyInitialized) {
+            return;
+        }
+        historyInitialized = true;
+        const dateInput = document.getElementById("history-date");
+        if (!dateInput) {
+            return;
+        }
+        const now = new Date();
+        dateInput.max = formatDateValue(now);
+        const minDate = new Date(now);
+        minDate.setDate(minDate.getDate() - HISTORY_MAX_LOOKBACK_DAYS);
+        dateInput.min = formatDateValue(minDate);
+
+        const fallback = latestCompletedShift(now);
+        dateInput.value = fallback.date;
+        selectHistoryShift(fallback.shift);
+
+        dateInput.addEventListener("change", refreshHistoryReport);
+        for (const btn of document.querySelectorAll("#history-shift-tabs [data-shift]")) {
+            btn.addEventListener("click", () => {
+                selectHistoryShift(btn.dataset.shift);
+                refreshHistoryReport();
+            });
+        }
+    }
+
+    function selectHistoryShift(shift) {
+        historyShift = shift === "night" ? "night" : "day";
+        for (const btn of document.querySelectorAll("#history-shift-tabs [data-shift]")) {
+            btn.setAttribute("aria-pressed", String(btn.dataset.shift === historyShift));
+        }
+    }
+
+    function formatDateValue(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        const day = String(date.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+    }
+
+    function latestCompletedShift(now) {
+        const minutes = now.getHours() * 60 + now.getMinutes();
+        const today = formatDateValue(now);
+        const yesterdayDate = new Date(now);
+        yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+        const yesterday = formatDateValue(yesterdayDate);
+        if (minutes >= 19 * 60 + 30) {
+            return { date: today, shift: "day" };
+        }
+        if (minutes >= 7 * 60 + 30) {
+            return { date: yesterday, shift: "night" };
+        }
+        return { date: yesterday, shift: "day" };
+    }
+
+    function isShiftSelectable(dateValue, shift, now = new Date()) {
+        if (!dateValue) {
+            return false;
+        }
+        const today = formatDateValue(now);
+        const minDate = new Date(now);
+        minDate.setDate(minDate.getDate() - HISTORY_MAX_LOOKBACK_DAYS);
+        if (dateValue < formatDateValue(minDate) || dateValue > today) {
+            return false;
+        }
+        if (dateValue === today) {
+            if (shift === "night") {
+                return false;
+            }
+            return now.getHours() * 60 + now.getMinutes() >= 19 * 60 + 30;
+        }
+        return true;
+    }
+
+    function updateHistoryShiftAvailability() {
+        const dateInput = document.getElementById("history-date");
+        if (!dateInput) {
+            return;
+        }
+        for (const btn of document.querySelectorAll("#history-shift-tabs [data-shift]")) {
+            const selectable = isShiftSelectable(dateInput.value, btn.dataset.shift);
+            btn.disabled = !selectable;
+            btn.title = selectable ? "" : "該班尚未結束，請改用即時模式查看";
+        }
+    }
+
+    function computeHistoryRange(dateValue, shift) {
+        const parts = String(dateValue || "").split("-").map(Number);
+        if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+            return null;
+        }
+        const start = new Date(parts[0], parts[1] - 1, parts[2], 7, 30);
+        const end = new Date(parts[0], parts[1] - 1, parts[2], 19, 30);
+        if (shift === "night") {
+            start.setHours(19, 30);
+            end.setDate(end.getDate() + 1);
+            end.setHours(7, 30);
+        }
+        const label = (d) =>
+            `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/` +
+            `${String(d.getDate()).padStart(2, "0")} ` +
+            `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+        return { start, end, text: `${label(start)} ~ ${label(end)}` };
+    }
+
+    async function refreshHistoryReport() {
+        const dateInput = document.getElementById("history-date");
+        const rangeElement = document.getElementById("history-range");
+        const tbody = document.getElementById("history-overview");
+        if (!dateInput || !tbody || !rangeElement) {
+            return;
+        }
+        updateHistoryShiftAvailability();
+        const dateValue = dateInput.value;
+        if (!isShiftSelectable(dateValue, historyShift)) {
+            tbody.innerHTML = "";
+            setText(rangeElement, "該班尚未結束，請改用即時模式查看");
+            return;
+        }
+        const range = computeHistoryRange(dateValue, historyShift);
+        setText(rangeElement, range ? `統計區間：${range.text}` : "");
+
+        tbody.innerHTML = "";
+        // 歷史班報列出全部線體（含停用；廠區網段過濾已在設定 API 端處理），
+        // 並跟著「製程類別」頁籤過濾 CAPI/AAPI
+        const lines = historyLinesForActiveZone();
+        if (lines.length === 0) {
+            const row = document.createElement("tr");
+            const cell = document.createElement("td");
+            cell.colSpan = 4;
+            cell.className = "history-message";
+            cell.textContent = "此製程類別尚未設定任何線體。";
+            row.appendChild(cell);
+            tbody.appendChild(row);
+            return;
+        }
+
+        const rowRefs = lines.map((line) => {
+            const row = document.createElement("tr");
+            row.dataset.lineId = line.id || "";
+            const lineCell = document.createElement("td");
+            lineCell.className = "overview-line-cell";
+            const identity = document.createElement("div");
+            identity.className = "overview-line";
+            const nameGroup = document.createElement("span");
+            nameGroup.className = "overview-line-name";
+            const lineName = document.createElement("strong");
+            lineName.textContent = line.line || "未設定線體";
+            nameGroup.appendChild(lineName);
+            identity.appendChild(nameGroup);
+            lineCell.appendChild(identity);
+            row.appendChild(lineCell);
+            tbody.appendChild(row);
+            showHistoryRowMessage(row, "查詢中…", "muted");
+            return { line, row };
+        });
+
+        await Promise.all(
+            rowRefs.map(({ line, row }) => fetchHistoryForLine(line, row, dateValue, historyShift))
+        );
+    }
+
+    function historyLinesForActiveZone() {
+        return config.lines.filter((line) => {
+            const zone = String(line.line || "").trim().toUpperCase().startsWith("AAPI")
+                ? "aapi"
+                : "capi";
+            return zone === activeProcessZone;
+        });
+    }
+
+    function appendHistoryPlaceholderCell(row, text, className) {
+        const cell = document.createElement("td");
+        const span = document.createElement("span");
+        span.className = className;
+        setText(span, text);
+        cell.appendChild(span);
+        row.appendChild(cell);
+    }
+
+    function showHistoryRowMessage(row, message, tone) {
+        // 訊息小圓章放線體名稱右邊，資料欄比照即時總覽顯示「AOI — / AI — / —」
+        const identity = row.querySelector(".overview-line");
+        for (const oldChip of row.querySelectorAll(".history-state-chip")) {
+            oldChip.remove();
+        }
+        while (row.cells.length > 1) {
+            row.deleteCell(1);
+        }
+        // 比照即時總覽：離線列淡紅底
+        row.dataset.state = tone === "error" ? "offline" : "";
+        const chip = document.createElement("span");
+        chip.className = "history-state-chip";
+        chip.dataset.tone = tone;
+        chip.textContent = message;
+        identity.appendChild(chip);
+        appendHistoryPlaceholderCell(row, "AOI —", "overview-rate overview-rate-aoi");
+        appendHistoryPlaceholderCell(row, "AI —", "overview-rate overview-rate-ai");
+        appendHistoryPlaceholderCell(row, "—", "overview-total");
+    }
+
+    function renderHistoryRowData(row, payload) {
+        const total = numberValue(payload.total);
+        const aoiNg = optionalNumber(payload.aoi_ng_count);
+        const aiNg = optionalNumber(payload.ng_count ?? payload.ai_ng_count);
+
+        while (row.cells.length > 1) {
+            row.deleteCell(1);
+        }
+        row.dataset.state = "";
+        for (const oldChip of row.querySelectorAll(".history-state-chip")) {
+            oldChip.remove();
+        }
+
+        // 比照即時總覽：AOI 琥珀、AI 青、投入等寬粗體
+        const appendRateCell = (label, ngCount, rateClass) => {
+            const cell = document.createElement("td");
+            cell.className = "overview-rate-cell";
+            const span = document.createElement("span");
+            span.className = `overview-rate ${rateClass}`;
+            const hasRate = ngCount !== null && total > 0;
+            setText(span, `${label} ${hasRate ? formatRate(ngCount, total) : "—"}`);
+            span.title = hasRate
+                ? `${label} 該班排片率：${formatRate(ngCount, total)}（NG ${formatNumber(ngCount)} / 總投入 ${formatNumber(total)}）`
+                : `${label} 該班尚無可計算資料`;
+            cell.appendChild(span);
+            row.appendChild(cell);
+        };
+
+        appendRateCell("AOI", aoiNg, "overview-rate-aoi");
+        appendRateCell("AI", aiNg, "overview-rate-ai");
+
+        const totalCell = document.createElement("td");
+        totalCell.className = "overview-total-cell";
+        const totalSpan = document.createElement("span");
+        totalSpan.className = "overview-total";
+        setText(totalSpan, formatNumber(total));
+        totalSpan.title = "該班投入 = OK + NG + ERR";
+        totalCell.appendChild(totalSpan);
+        row.appendChild(totalCell);
+    }
+
+    async function fetchHistoryForLine(line, row, dateValue, shift) {
+        const baseUrl = deriveBaseUrl(line.apiUrl);
+        if (!baseUrl) {
+            showHistoryRowMessage(row, "離線無法查詢", "error");
+            return;
+        }
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(
+            () => controller.abort(),
+            config.requestTimeoutSeconds * 1000
+        );
+        try {
+            const response = await fetch(
+                `${baseUrl}api/shift_report?date=${encodeURIComponent(dateValue)}&shift=${encodeURIComponent(shift)}`,
+                {
+                    method: "GET",
+                    headers: { "Accept": "application/json" },
+                    cache: "no-store",
+                    credentials: "omit",
+                    signal: controller.signal
+                }
+            );
+            if (response.status === 404) {
+                showHistoryRowMessage(row, "未更新，請更新線體程式", "warning");
+                return;
+            }
+            if (!response.ok) {
+                showHistoryRowMessage(row, "離線無法查詢", "error");
+                return;
+            }
+            const payload = await response.json();
+            if (!payload || typeof payload !== "object") {
+                showHistoryRowMessage(row, "離線無法查詢", "error");
+                return;
+            }
+            renderHistoryRowData(row, payload);
+        } catch (_error) {
+            // 舊版線體對不存在的路徑回 404 時不帶 CORS 標頭，瀏覽器讀不到狀態碼，
+            // 與真正離線無法區分；改探既有的 /api/status（有 CORS）：
+            // 探得到 = 線體在線但程序未更新；探不到 = 真的離線
+            const reachable = await probeLineReachable(line);
+            if (reachable) {
+                showHistoryRowMessage(row, "未更新，請更新線體程式", "warning");
+            } else {
+                showHistoryRowMessage(row, "離線無法查詢", "error");
+            }
+        } finally {
+            clearTimeout(timeoutId);
+        }
+    }
+
+    async function probeLineReachable(line) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(
+            () => controller.abort(),
+            config.requestTimeoutSeconds * 1000
+        );
+        try {
+            const response = await fetch(line.apiUrl, {
+                method: "GET",
+                headers: { "Accept": "application/json" },
+                cache: "no-store",
+                credentials: "omit",
+                signal: controller.signal
+            });
+            return response.ok;
+        } catch (_error) {
+            return false;
+        } finally {
+            clearTimeout(timeoutId);
+        }
     }
 
     function createOverviewRow(line) {
@@ -415,7 +782,7 @@
     }
 
     async function refreshAllLines() {
-        if (isRefreshing || lineStates.size === 0) {
+        if (isRefreshing || lineStates.size === 0 || activeMode !== "realtime") {
             return;
         }
 
@@ -480,6 +847,8 @@
         } finally {
             clearTimeout(timeoutId);
             renderLineCard(state);
+            // 每條線回覆後立刻重算平均排片率，不等整輪（避免被離線線體逾時拖慢）
+            renderSummaryAverages();
         }
     }
 
@@ -1224,6 +1593,53 @@
             document.getElementById("summary-offline"),
             states.filter((state) => state.status === "offline").length
         );
+        renderSummaryAverages();
+    }
+
+    function renderSummaryAverages() {
+        // 跟著「製程類別」頁籤：目前類別中「上線」且狀態「正常」線體的
+        // 當班排片率算術平均；排片率無資料（顯示 —）的線自動排除
+        const aoiElement = document.getElementById("summary-avg-aoi-rate");
+        const aiElement = document.getElementById("summary-avg-ai-rate");
+        if (!aoiElement || !aiElement) {
+            return;
+        }
+        const zoneLabel = activeProcessZone.toUpperCase();
+        const eligible = Array.from(lineStates.values()).filter(
+            (state) =>
+                state.processZone === activeProcessZone &&
+                state.line.isProduction === true &&
+                state.status === "online" &&
+                state.data
+        );
+        const renderAverage = (element, label, pickNg) => {
+            const entries = [];
+            for (const state of eligible) {
+                const ng = pickNg(state.data);
+                if (ng === null || !(state.data.total > 0)) {
+                    continue;
+                }
+                entries.push({
+                    name: state.line.line || state.line.id,
+                    rate: (ng / state.data.total) * 100
+                });
+            }
+            if (entries.length === 0) {
+                setText(element, "—");
+                element.title = `${label}：無符合條件的 ${zoneLabel} 線體（需上線、狀態正常且有當班資料）`;
+                return;
+            }
+            const mean =
+                entries.reduce((sum, entry) => sum + entry.rate, 0) / entries.length;
+            setText(element, `${formatDecimal(mean, 1)}%`);
+            element.title =
+                `${label}（${entries.length} 條線算術平均）：` +
+                entries
+                    .map((entry) => `${entry.name} ${formatDecimal(entry.rate, 1)}%`)
+                    .join("、");
+        };
+        renderAverage(aoiElement, `${zoneLabel} 平均 AOI 排片率`, (data) => data.aoiNg);
+        renderAverage(aiElement, `${zoneLabel} 平均 AI 排片率`, (data) => data.aiNg);
     }
 
     function renderAlerts() {
@@ -1277,6 +1693,11 @@
 
     function scheduleNextRefresh() {
         clearTimeout(refreshTimer);
+        if (activeMode !== "realtime") {
+            nextRefreshAt = null;
+            updateRefreshStatus();
+            return;
+        }
         nextRefreshAt = Date.now() + config.refreshIntervalSeconds * 1000;
         refreshTimer = window.setTimeout(refreshAllLines, config.refreshIntervalSeconds * 1000);
         updateRefreshStatus();
