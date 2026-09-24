@@ -110,6 +110,50 @@ def _update_threshold_mapping_text(text: str, lighting: str, zone: str, value: f
     raise ValueError(f"yaml 中找不到 threshold_mapping[{lighting}][{zone}]")
 
 
+def _upsert_unit_mapping_text(text: str, section: str, lighting: str, zone: Optional[str], value) -> str:
+    """Set one recipe entry, including a new screen, retaining unrelated YAML."""
+    node = yaml.compose(text)
+    keys = [section, lighting] + ([zone] if zone is not None else [])
+    while keys and isinstance(node, yaml.MappingNode):
+        child = next((v for k, v in node.value if k.value == keys[0]), None)
+        if child is None:
+            break
+        keys.pop(0)
+        node = child
+
+    replacement = value
+    for key in reversed(keys):
+        replacement = {key: replacement}
+    if node is None:
+        prefix = text + ("\n" if text and not text.endswith("\n") else "")
+        return prefix + yaml.safe_dump(replacement, allow_unicode=True, sort_keys=False)
+    if not keys or node.tag == "tag:yaml.org,2002:null":
+        prefix = text[:node.start_mark.index]
+        if prefix.endswith(":"):
+            prefix += " "
+        return prefix + json.dumps(replacement, ensure_ascii=False) + text[node.end_mark.index:]
+    if not isinstance(node, yaml.MappingNode):
+        raise ValueError(f"{section}[{lighting}] 必須是分區 mapping")
+    if node.flow_style:
+        current = yaml.safe_load(text[node.start_mark.index:node.end_mark.index])
+        current.update(replacement)
+        rendered = yaml.safe_dump(current, allow_unicode=True, default_flow_style=True, sort_keys=False).strip()
+        return text[:node.start_mark.index] + rendered + text[node.end_mark.index:]
+
+    # Block mappings end at the next sibling key or EOF. Keep the next
+    # sibling's indentation and all existing comments when adding an entry.
+    index = node.end_mark.index
+    if index < len(text):
+        index -= node.end_mark.column
+    rendered = yaml.safe_dump(replacement, allow_unicode=True, sort_keys=False)
+    indent = " " * node.start_mark.column
+    rendered = "".join(indent + line + "\n" for line in rendered.splitlines())
+    prefix = text[:index]
+    if prefix and not prefix.endswith("\n"):
+        prefix += "\n"
+    return prefix + rendered + text[index:]
+
+
 def invalidate_score_cache(db, scoring_bundle_id: int = None,
                             tile_ids: list = None,
                             lighting: str = None, zone: str = None) -> int:
@@ -826,8 +870,11 @@ def update_threshold(db, bundle_id: int, lighting: str, zone: str, value: float)
     )
 
     try:
-        thresholds = json.loads(thr_path.read_text(encoding="utf-8"))
-        thresholds.setdefault(lighting, {})[zone] = rounded
+        thresholds = json.loads(thr_path.read_text(encoding="utf-8")) or {}
+        zones = thresholds.get(lighting)
+        if not isinstance(zones, dict):
+            thresholds[lighting] = {z: zones for z in ZONES} if zones is not None else {}
+        thresholds[lighting][zone] = rounded
         thr_path.write_text(json.dumps(thresholds, indent=2, ensure_ascii=False), encoding="utf-8")
     except FileNotFoundError:
         pass
@@ -934,38 +981,59 @@ def install_trained_submodel(source: Path, target: Path, metrics: dict):
     root.mkdir(parents=True, exist_ok=True)
     old = (_read_manifest(root).get("unit_metrics") or {}).get(target.stem) or {}
     yaml_path = root / "machine_config.yaml"
+    lighting, zone = target.stem.rsplit("-", 1)
+    config = _load_yaml(yaml_path) if yaml_path.is_file() else {}
+    mapping = config.get("threshold_mapping") or {}
+    zone_thresholds = mapping.get(lighting)
+    previous = zone_thresholds.get(zone) if isinstance(zone_thresholds, dict) else zone_thresholds
     reset = (metrics.get("normalization_mode") == OK_MAX_NORMALIZATION
-             and old.get("normalization_mode") != OK_MAX_NORMALIZATION
+             and (old.get("normalization_mode") != OK_MAX_NORMALIZATION or previous is None)
              and yaml_path.is_file())
-    if not reset:
+    model_zones = (config.get("model_mapping") or {}).get(lighting) or {}
+    add_model = yaml_path.is_file() and not model_zones.get(zone)
+    if not reset and not add_model:
         temporary = target.with_suffix(target.suffix + ".tmp")
         shutil.copy2(source, temporary)
         os.replace(temporary, target)
         return None
 
-    lighting, zone = target.stem.rsplit("-", 1)
-    config = _load_yaml(yaml_path)
-    mapping = config.get("threshold_mapping") or {}
-    previous = mapping[lighting][zone]
+    updated_yaml = yaml_path.read_text(encoding="utf-8")
     value = OK_MAX_DEFAULT_THRESHOLD
-    updated_yaml = _update_threshold_mapping_text(
-        yaml_path.read_text(encoding="utf-8"), lighting, zone, value,
-    )
-    thresholds_path = root / "thresholds.json"
-    thresholds = (json.loads(thresholds_path.read_text(encoding="utf-8"))
-                  if thresholds_path.is_file() else mapping)
-    thresholds.setdefault(lighting, {})[zone] = value
+    thresholds = None
+    if reset:
+        if zone_thresholds is not None and not isinstance(zone_thresholds, dict):
+            # A legacy scalar applies to both zones. Preserve the other zone
+            # while moving this model to the new score scale.
+            updated_yaml = _upsert_unit_mapping_text(
+                updated_yaml, "threshold_mapping", lighting, None,
+                {z: zone_thresholds for z in ZONES},
+            )
+        updated_yaml = _upsert_unit_mapping_text(
+            updated_yaml, "threshold_mapping", lighting, zone, value,
+        )
+        thresholds_path = root / "thresholds.json"
+        thresholds = ((json.loads(thresholds_path.read_text(encoding="utf-8")) or {})
+                      if thresholds_path.is_file() else dict(mapping))
+        old_zones = thresholds.get(lighting)
+        thresholds[lighting] = (dict(old_zones) if isinstance(old_zones, dict)
+                                else {z: old_zones for z in ZONES} if old_zones is not None else {})
+        thresholds[lighting][zone] = value
+    if add_model:
+        updated_yaml = _upsert_unit_mapping_text(
+            updated_yaml, "model_mapping", lighting, zone, str(target),
+        )
     with tempfile.TemporaryDirectory(prefix=".score-scale-", dir=root.parent) as directory:
         candidate = Path(directory).resolve()
         candidate.relative_to(root.parent.resolve())
         shutil.copy2(source, candidate / target.name)
         (candidate / "machine_config.yaml").write_text(updated_yaml, encoding="utf-8")
-        (candidate / "thresholds.json").write_text(
-            json.dumps(thresholds, ensure_ascii=False, indent=2), encoding="utf-8",
-        )
+        if thresholds is not None:
+            (candidate / "thresholds.json").write_text(
+                json.dumps(thresholds, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
         with install_partial_training(root, candidate, include_recipe=True):
             pass
-    return {"previous": previous, "current": value}
+    return {"previous": previous, "current": value} if reset else None
 
 
 def get_used_tile_ids(bundle_dir: Path, lighting: str, zone: str) -> Optional[set]:
