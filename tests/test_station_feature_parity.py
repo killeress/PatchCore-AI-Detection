@@ -238,5 +238,5 @@ def test_record_labels_preserve_station_specific_u0f_mapping(station):
     assert detail["image_prefix_labels"] == (
         {"U0F00000": "U0F00000", "STANDARD": "WINDOWS_BG", "W0F00000": "W0F00000"}
         if station.profile == "aapi" else
-        {"STANDARD": "U0F00000", "W0F00000": "W0F00000"}
+        {"U0F00000": "U0F00000", "W0F00000": "W0F00000"}
     )

@@ -51,6 +51,8 @@ class TrainingDB(Protocol):
     ) -> List[dict]: ...
     def save_training_bomb_validation_samples(self, samples: List[dict]) -> int: ...
 
+# Legacy jobs without selected units keep their original five model families.
+# New jobs derive explicit units from StationAdapter and the actual source files.
 LIGHTINGS = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
 SUPPORTED_LIGHTINGS = (
     "G0F00000",
@@ -752,6 +754,14 @@ def sample_ng_tiles(
                 str(sample.get("lighting") or "").strip()
             )
             lighting = str(resolve_model_prefix(source_lighting)).strip().upper()
+            # Legacy STANDARD caches may contain U0F crops. Require the stored
+            # family to agree with the source before reusing a validation crop.
+            image_name = sample.get("image_name")
+            if image_name:
+                image_lighting = resolve_model_prefix(resolve_image_prefix(image_name))
+                if str(image_lighting).strip().upper() != lighting:
+                    result_stats["invalid_skipped"] += 1
+                    continue
             zone = str(sample.get("zone") or "").strip().lower()
             if lighting not in cached_by_lighting or zone not in ZONES:
                 continue

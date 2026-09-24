@@ -12,7 +12,7 @@ import numpy as np
 import cv2
 from capi_image_orientation import read_detection_image
 from capi_image_preprocess_lab import apply_preprocess_method, normalize_preprocess_pipeline
-from capi_image_naming import canonical_image_prefix
+from capi_image_naming import CAPI_LIGHTING_PREFIXES, canonical_image_prefix
 
 
 logger = logging.getLogger("capi.preprocess")
@@ -220,8 +220,8 @@ class PanelPreprocessResult:
     processed_image: Optional[np.ndarray] = field(default=None, repr=False)
 
 
-LIGHTING_PREFIXES = ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD")
-BOUNDARY_REFERENCE_PRIORITY = ("W0F00000", "STANDARD", "G0F00000", "R0F00000", "WGF50500")
+LIGHTING_PREFIXES = CAPI_LIGHTING_PREFIXES
+BOUNDARY_REFERENCE_PRIORITY = ("W0F00000", "STANDARD", "U0F00000", "G0F00000", "R0F00000", "WGF50500")
 BOUNDARY_GRAY_BAND_SHIFT_PARAMS = {
     "low_threshold": 105,
     "high_threshold": 110,
@@ -437,9 +437,9 @@ def filter_panel_lighting_files(
     prefix_resolver: Optional[Callable[[str], str]] = None,
     allowed_prefixes: Optional[Iterable[str]] = None,
 ) -> Dict[str, Path]:
-    """從 panel folder 過濾出 5 個有效 lighting 圖。
+    """從 panel folder 過濾出支援的獨立 lighting 圖。
 
-    只保留檔名以 5 個 lighting prefix 開頭的圖；其他（S* 側拍 / B0F 黑屏 /
+    只保留支援的 lighting prefix 圖；其他（S* 側拍 / B0F 黑屏 /
     PINIGBI / OMIT / Optics.log）自然被忽略。
 
     Returns: {"G0F00000": Path, ...}，缺哪個 lighting 就少哪個 key。
@@ -1488,9 +1488,9 @@ def preprocess_panel_folder(
     allowed_prefixes: Optional[Iterable[str]] = None,
     boundary_reference_priority: Optional[Iterable[str]] = None,
 ) -> Dict[str, "PanelPreprocessResult"]:
-    """處理整個 panel folder 的 5 lighting 圖。
+    """處理整個 panel folder 的獨立 lighting 圖。
 
-    流程：filter 出目標 lighting → 依 W0F/STD/G0F/R0F/WGF 優先序選
+    流程：filter 出目標 lighting → 依各站台的光源優先序選
           reference polygon → 所有目標 lighting 套同一個 reference。
           boundary_reference_files 可提供只抓邊、不加入回傳結果的候選圖。
     """

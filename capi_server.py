@@ -604,6 +604,7 @@ _REPORT_SCREEN_PREFIXES = ("W0F00010",) + CANONICAL_IMAGE_PREFIXES
 
 _IMAGE_ABNORMAL_SCREEN_FIELDS = (
     ("STANDARD", "image_abnormal_standard_mean_lower", "image_abnormal_standard_mean_upper"),
+    ("U0F00000", "image_abnormal_u0f00000_mean_lower", "image_abnormal_u0f00000_mean_upper"),
     ("WGF50500", "image_abnormal_wgf50500_mean_lower", "image_abnormal_wgf50500_mean_upper"),
     ("W0F00010", "image_abnormal_w0f00010_mean_lower", "image_abnormal_w0f00010_mean_upper"),
     ("G0F00000", "image_abnormal_g0f00000_mean_lower", "image_abnormal_g0f00000_mean_upper"),
@@ -827,6 +828,10 @@ def check_image_abnormal_precheck(
         return None
 
     limits = _image_abnormal_limits(config)
+    if station_profile == "aapi":
+        # This split preserves CAPI's existing U0F brightness check; it must
+        # not enable a new screen check on existing AAPI deployments.
+        limits.pop("U0F00000", None)
     requested_screens = {}
     for source_prefix in report_prefixes or []:
         screen = (
@@ -1336,6 +1341,47 @@ def resolve_unc_path(unc_path: str, path_mapping: Dict[str, str]) -> str:
 
     # 如果沒有匹配的映射，嘗試直接使用 (可能已經是 Linux 路徑)
     return unc_path.replace("\\", "/")
+
+
+def resolve_panel_image_directory(
+    requested_dir: str, path_mapping: Dict[str, str],
+) -> Tuple[str, Path]:
+    """Prefer the requested folder; only a missing YYYYMMDD/panel may use day + 1.
+
+    Return the selected client path as well as its mapped filesystem path so
+    inference, saved records and background image reads use the same directory.
+    """
+    panel_dir = Path(resolve_unc_path(requested_dir, path_mapping))
+    if panel_dir.exists():
+        return requested_dir, panel_dir
+
+    match = re.search(r"(?:^|[\\/])([0-9]{8})[\\/][^\\/]+[\\/]*$", requested_dir)
+    if match is None:
+        return requested_dir, panel_dir
+    try:
+        next_date = datetime.strptime(match.group(1), "%Y%m%d") + timedelta(days=1)
+    except (ValueError, OverflowError):
+        return requested_dir, panel_dir
+
+    next_dir = (
+        requested_dir[:match.start(1)]
+        + next_date.strftime("%Y%m%d")
+        + requested_dir[match.end(1):]
+    )
+    next_panel_dir = Path(resolve_unc_path(next_dir, path_mapping))
+    # A mapping must not turn the fallback into a different machine/model/panel.
+    if (
+        next_panel_dir.parent.parent == panel_dir.parent.parent
+        and next_panel_dir.name == panel_dir.name
+        and next_panel_dir != panel_dir
+        and next_panel_dir.is_dir()
+    ):
+        logger.warning(
+            "[IMAGE_DATE_FALLBACK] Requested=%s Resolved=%s (date +1 day)",
+            panel_dir, next_panel_dir,
+        )
+        return next_dir, next_panel_dir
+    return requested_dir, panel_dir
 
 
 # ── AI 判定彙總 ──────────────────────────────────────
@@ -3483,9 +3529,12 @@ class CAPIServer:
             or create_station_adapter("capi")
         )
 
-        # 轉換路徑
-        image_dir = resolve_unc_path(parsed["image_dir"], self.path_mapping)
-        panel_dir = Path(image_dir)
+        # 原日期不存在才找隔一天；同步實際路徑供 DB 與背景檢查使用。
+        # 原始通訊內容仍由 client_request_text 保留。
+        parsed["image_dir"], panel_dir = resolve_panel_image_directory(
+            parsed["image_dir"], self.path_mapping,
+        )
+        image_dir = str(panel_dir)
 
         if not panel_dir.exists():
             return f"ERR:DIR_NOT_FOUND ({image_dir})", "[]", [], False, None, {}, False, "", None

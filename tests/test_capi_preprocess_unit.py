@@ -88,6 +88,7 @@ def test_filter_panel_lighting_files_supports_hm_names():
             "B0F00000083756.tif",
             "PINIGBI0083748.tif",
             "U0F00000083755.tif",
+            "STANDARD_083756.tif",
             "WGF50500083752.tif",
             "G0F00000083754.tif",
             "R0F00000083753.tif",
@@ -97,8 +98,9 @@ def test_filter_panel_lighting_files_supports_hm_names():
 
         result = filter_panel_lighting_files(base)
 
-        assert set(result.keys()) == {"G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"}
-        assert result["STANDARD"].name == "U0F00000083755.tif"
+        assert set(result.keys()) == {"G0F00000", "R0F00000", "W0F00000", "WGF50500", "U0F00000", "STANDARD"}
+        assert result["U0F00000"].name == "U0F00000083755.tif"
+        assert result["STANDARD"].name == "STANDARD_083756.tif"
 
 
 def test_detect_panel_polygon_simple_rect():
