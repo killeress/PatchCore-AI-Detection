@@ -66,6 +66,10 @@ def partial_run(tmp_path, monkeypatch):
     units = ["W0F00000-inner", "W0F00000-edge", "G0F00000-inner"]
     thresholds = {"W0F00000": {"inner": 0.55, "edge": 0.75}, "G0F00000": {"inner": 0.35}}
     recipe = {"machine_id": "M", "threshold_mapping": thresholds, "image_preprocess_pipeline": []}
+    recipe["model_mapping"] = {}
+    for unit in units:
+        lighting, zone = unit.rsplit("-", 1)
+        recipe["model_mapping"].setdefault(lighting, {})[zone] = str(root / f"{unit}.pt")
     (root / "machine_config.yaml").write_text(yaml.safe_dump(recipe), encoding="utf-8")
     write_json(root / "thresholds.json", thresholds)
     manifest = {"machine_id": "M", "trained_with_job_id": "original", "unit_metrics": {},
@@ -119,7 +123,7 @@ def partial_run(tmp_path, monkeypatch):
         assert kw["cfg"].precision == "float32"
         assert kw["cfg"].image_size == (256, 256)
         assert kw["cfg"].tile_stride == 128
-        assert kw["baseline_threshold"] == thresholds[kw["lighting"]][kw["zone"]]
+        assert kw["baseline_threshold"] == thresholds.get(kw["lighting"], {}).get(kw["zone"], .35)
         assert kw["fail_on_validation_error"]
         model = kw["output_pt_path"]
         model.write_bytes((kw["job_id"] + ":" + unit).encode())
@@ -189,6 +193,70 @@ def test_partial_new_score_scale_updates_selected_thresholds_together(partial_ru
     assert json.loads((env.root / "thresholds.json").read_text(encoding="utf-8")) == expected
     assert (env.root / f"{env.units[-1]}.pt").read_bytes() == env.before[f"{env.units[-1]}.pt"]
     assert env.server.inferencers["M"].reload_submodel.call_count == 2
+
+
+@pytest.mark.parametrize("failure", [None, "training", "install", "completion_record"])
+def test_partial_adds_independent_u0f_to_legacy_standard_bundle(partial_run, monkeypatch, failure):
+    import os
+    from capi_inference import CAPIInferencer
+
+    env = partial_run
+    # The old bundle has STANDARD only; U0F is selected for fresh training.
+    recipe_path = env.root / "machine_config.yaml"
+    recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    recipe["model_mapping"]["STANDARD"] = {"inner": str(env.root / "STANDARD-inner.pt")}
+    recipe["threshold_mapping"]["STANDARD"] = {"inner": .82}
+    (env.root / "STANDARD-inner.pt").write_bytes(b"standard-model")
+    recipe_path.write_text(yaml.safe_dump(recipe), encoding="utf-8")
+    write_json(env.root / "thresholds.json", recipe["threshold_mapping"])
+    env.units[:2] = ["U0F00000-inner", "U0F00000-edge"]
+    env.score_migration = True
+    env.failure = failure
+    engine = CAPIInferencer.__new__(CAPIInferencer)
+    engine.config = SimpleNamespace(model_mapping=recipe["model_mapping"], threshold_mapping=recipe["threshold_mapping"])
+    engine.base_dir = env.root.parent
+    engine._model_cache_v2 = {}
+    env.server.inferencers["M"] = engine
+
+    if failure == "install":
+        original = os.replace
+        def fail_manifest_once(src, dst):
+            if Path(dst) == env.root / "manifest.json":
+                monkeypatch.setattr(os, "replace", original)
+                raise OSError("install failed")
+            return original(src, dst)
+        monkeypatch.setattr(os, "replace", fail_manifest_once)
+    elif failure == "completion_record":
+        original = env.db.update_training_job_state
+        def fail_completion(job_id, state, **fields):
+            if state == "completed":
+                raise RuntimeError("completion failed")
+            original(job_id, state, **fields)
+        env.db.update_training_job_state = fail_completion
+
+    result = env.run()
+    if failure:
+        assert result["state"] == "failed"
+        assert file_contents(env.root) == env.before
+        assert "U0F00000" not in engine.config.model_mapping
+        return
+
+    assert result["state"] == "completed"
+    actual = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    assert actual["threshold_mapping"] == {**recipe["threshold_mapping"], "U0F00000": {"inner": .5, "edge": .5}}
+    assert json.loads((env.root / "thresholds.json").read_text(encoding="utf-8")) == actual["threshold_mapping"]
+    assert actual["model_mapping"]["U0F00000"] == {
+        zone: str(env.root / f"U0F00000-{zone}.pt") for zone in ("inner", "edge")
+    }
+    assert engine.config.model_mapping == actual["model_mapping"]
+    assert engine.config.threshold_mapping == actual["threshold_mapping"]
+    for name, content in env.before.items():
+        if name.endswith(".pt"):
+            assert (env.root / name).read_bytes() == content
+    manifest = json.loads((env.root / "manifest.json").read_text(encoding="utf-8"))
+    assert all(unit in manifest["model_files"] for unit in env.units[:2])
+    assert all(unit in manifest["training_units"] for unit in env.units[:2])
+    assert manifest["success_units"] == len(manifest["model_files"])
 
 
 @pytest.mark.parametrize("failure", ["training", "cancel", "install"])
@@ -279,6 +347,28 @@ def test_partial_evaluation_errors_propagate_instead_of_publishing_model(tmp_pat
         evaluate_model(tmp_path / "candidate.pt", [], [], {}, tmp_path, "W0F00000-inner", lambda _: None,
                        frozen_inputs=frozen, job_id="partial", fail_on_error=True)
     assert not (tmp_path / "validation_reports/partial/W0F00000-inner/report.json").exists()
+
+
+@pytest.mark.parametrize("score_migration", [False, True])
+def test_partial_preserves_concurrent_threshold_json_edits(partial_run, monkeypatch, score_migration):
+    import capi_train_new as training
+    env = partial_run
+    env.score_migration = score_migration
+    train = training.train_single_submodel
+    path = env.root / "thresholds.json"
+    changed = b'{"operator_edit": true}'
+
+    def edit_thresholds(**kwargs):
+        result = train(**kwargs)
+        if len(env.calls) == 2:
+            path.write_bytes(changed)
+        return result
+
+    monkeypatch.setattr(training, "train_single_submodel", edit_thresholds)
+    assert env.run()["state"] == ("failed" if score_migration else "completed")
+    assert path.read_bytes() == changed
+    if score_migration:
+        assert file_contents(env.root) == {**env.before, "thresholds.json": changed}
 
 
 def handler(server, path, payload=None):

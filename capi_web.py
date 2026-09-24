@@ -17523,7 +17523,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         import traceback as _traceback
         import tempfile
         from capi_train_new import TrainingConfig, apply_user_training_params, train_single_submodel, _auroc_grade
-        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest, invalidate_score_cache, install_partial_training
+        from capi_model_registry import append_submodel_history, _read_manifest, _write_manifest, invalidate_score_cache, install_partial_training, _upsert_unit_mapping_text
         from capi_training_validation import run_manifest_path, seal_reports, write_json, recipe_fingerprint
 
         db = server_inst.database
@@ -17564,7 +17564,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             import yaml
             recipe = yaml.safe_load((candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")) or {}
             original_recipe_text = (candidate_dir / "machine_config.yaml").read_text(encoding="utf-8")
+            original_recipe_fingerprint = recipe_fingerprint(bundle_dir)
+            original_thresholds_bytes = None
+            if (bundle_dir / "thresholds.json").is_file():
+                original_thresholds_bytes = (bundle_dir / "thresholds.json").read_bytes()
+                shutil.copy2(bundle_dir / "thresholds.json", candidate_dir / "thresholds.json")
             reset_score_thresholds = False
+            added_model_mapping = False
             baseline_thresholds = recipe.get("threshold_mapping") or {}
             _write_manifest(candidate_dir, manifest)
             original_job_id = manifest.get("trained_with_job_id") or bundle.get("job_id")
@@ -17668,6 +17674,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
                 metrics = result["metrics"]
                 reset_score_thresholds |= bool(metrics.get("normalization_threshold_reset"))
+                # A newly independent screen may not exist in the old bundle.
+                # Register only the freshly trained PT; never reuse STANDARD.
+                if not ((recipe.get("model_mapping") or {}).get(lighting) or {}).get(zone):
+                    recipe_path = candidate_dir / "machine_config.yaml"
+                    recipe_path.write_text(_upsert_unit_mapping_text(
+                        recipe_path.read_text(encoding="utf-8"), "model_mapping", lighting, zone,
+                        str(bundle_dir / output_pt.name),
+                    ), encoding="utf-8")
+                    added_model_mapping = True
                 metrics["used_tile_ids"] = result["used_tile_ids"]
                 new_auroc = metrics.get("auroc")
                 new_tile_count = result["tile_count"]
@@ -17699,6 +17714,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     "path": output_pt.name,
                     "size_bytes": result["size_bytes"],
                 }
+                if added_model_mapping:
+                    refreshed_manifest["training_units"] = list(refreshed_manifest["model_files"])
+                    refreshed_manifest["success_units"] = len(refreshed_manifest["model_files"])
                 auroc_values = [
                     m.get("auroc") for m in refreshed_manifest.get("unit_metrics", {}).values()
                     if m.get("auroc") is not None
@@ -17736,6 +17754,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 panel_count=len(job.get("panel_paths") or []),
                 panel_glass_ids=[Path(p).name for p in job.get("panel_paths") or []],
                 success_units=len(selected_labels),
+                training_units=selected_labels,
             )
             run_manifest["patchcore_params"] = {
                 **patchcore_params,
@@ -17749,15 +17768,22 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             if cfg.validation_config:
                 seal_reports(candidate_dir, run_manifest["unit_metrics"])
             write_json(run_manifest_path(candidate_dir, job_id), run_manifest)
+            if not reset_score_thresholds:
+                (candidate_dir / "thresholds.json").unlink(missing_ok=True)
             if runtime["cancel_event"].is_set():
                 raise RuntimeError("training cancelled by user")
             with server_inst._gpu_lock:
                 if (_read_manifest(bundle_dir) != manifest or
-                        recipe_fingerprint(bundle_dir) != recipe_fingerprint(candidate_dir)):
+                        recipe_fingerprint(bundle_dir) != original_recipe_fingerprint):
                     raise RuntimeError("原模型或前處理設定在重訓期間已變更，請重新建立局部重訓任務")
-                if reset_score_thresholds and (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8") != original_recipe_text:
+                if (reset_score_thresholds or added_model_mapping) and (bundle_dir / "machine_config.yaml").read_text(encoding="utf-8") != original_recipe_text:
                     raise RuntimeError("正規化尺度更新期間門檻已變更，請重新建立局部重訓任務")
-                with install_partial_training(bundle_dir, candidate_dir, include_recipe=reset_score_thresholds):
+                if reset_score_thresholds:
+                    thresholds_path = bundle_dir / "thresholds.json"
+                    current_thresholds_bytes = thresholds_path.read_bytes() if thresholds_path.is_file() else None
+                    if current_thresholds_bytes != original_thresholds_bytes:
+                        raise RuntimeError("重訓期間 thresholds.json 已變更，請重新建立局部重訓任務")
+                with install_partial_training(bundle_dir, candidate_dir, include_recipe=reset_score_thresholds or added_model_mapping):
                     for lighting, zone in selected_units:
                         cleared = invalidate_score_cache(db, scoring_bundle_id=bundle_id, lighting=lighting, zone=zone)
                         log(f"{lighting}-{zone}: 清除 {cleared} 筆 score cache")
@@ -19709,6 +19735,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "path": output_pt.name,
                 "size_bytes": result["size_bytes"],
             }
+            refreshed_manifest["training_units"] = list(refreshed_manifest["model_files"])
+            refreshed_manifest["success_units"] = len(refreshed_manifest["model_files"])
             _write_manifest(bundle_dir, refreshed_manifest)
             _log("manifest history 已更新")
 
@@ -19984,6 +20012,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "path": output_pt.name,
                 "size_bytes": result["size_bytes"],
             }
+            refreshed_manifest["training_units"] = list(refreshed_manifest["model_files"])
+            refreshed_manifest["success_units"] = len(refreshed_manifest["model_files"])
             _write_manifest(bundle_dir, refreshed_manifest)
             _log("manifest history 已更新")
 

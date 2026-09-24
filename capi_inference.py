@@ -10071,6 +10071,24 @@ class CAPIInferencer:
         import yaml
         mapping = getattr(getattr(self, "config", None), "model_mapping", {}) or {}
         model_path = (mapping.get(lighting) or {}).get(zone)
+        if not model_path:
+            # A partial run can add an independent screen to this bundle.
+            # Discover its recipe only from this inferencer's existing models.
+            roots = set()
+            for zones in mapping.values():
+                if isinstance(zones, dict):
+                    for raw in zones.values():
+                        path = Path(raw)
+                        if not path.is_absolute():
+                            path = self.base_dir / path
+                        roots.add(path.parent.resolve())
+            if len(roots) == 1:
+                recipe_path = roots.pop() / "machine_config.yaml"
+                if recipe_path.is_file():
+                    recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8")) or {}
+                    model_path = ((recipe.get("model_mapping") or {}).get(lighting) or {}).get(zone)
+                    if model_path:
+                        self.config.model_mapping.setdefault(lighting, {})[zone] = model_path
         if model_path:
             model_path = Path(model_path)
             if not model_path.is_absolute():
@@ -10078,9 +10096,15 @@ class CAPIInferencer:
             recipe_path = model_path.parent / "machine_config.yaml"
             if recipe_path.is_file():
                 recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8")) or {}
-                value = (recipe.get("threshold_mapping", {}).get(lighting) or {}).get(zone)
+                thresholds = (recipe.get("threshold_mapping") or {}).get(lighting)
+                value = thresholds.get(zone) if isinstance(thresholds, dict) else thresholds
                 if value is not None:
-                    self.config.threshold_mapping.setdefault(lighting, {})[zone] = float(value)
+                    current = self.config.threshold_mapping.get(lighting)
+                    if not isinstance(current, dict):
+                        self.config.threshold_mapping[lighting] = (
+                            {z: current for z in ("inner", "edge")} if current is not None else {}
+                        )
+                    self.config.threshold_mapping[lighting][zone] = float(value)
         key = (machine_id, lighting, zone)
         if key in self._model_cache_v2:
             del self._model_cache_v2[key]
