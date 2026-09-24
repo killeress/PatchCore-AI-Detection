@@ -350,6 +350,8 @@ h2 {
 .dashboard-settings-link:focus-visible,
 .theme-toggle:focus-visible,
 .process-tab:focus-visible,
+.mode-tab:focus-visible,
+.history-shift-tab:focus-visible,
 .overview-update-action:focus-visible,
 .overview-link:focus-visible,
 .line-links a:focus-visible {
@@ -380,7 +382,8 @@ main {
     box-shadow: var(--shadow-strong);
 }
 
-.process-tabs {
+.process-tabs,
+.mode-tabs {
     display: flex;
     align-items: center;
     gap: 16px;
@@ -395,7 +398,8 @@ main {
 .process-tabs[hidden],
 .overview-table tr[hidden],
 .line-card[hidden],
-.factory-group[hidden] {
+.factory-group[hidden],
+#history-section[hidden] {
     display: none;
 }
 
@@ -414,7 +418,9 @@ main {
     gap: 6px;
 }
 
-.process-tab {
+.process-tab,
+.mode-tab,
+.history-shift-tab {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -431,21 +437,132 @@ main {
     transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
-.process-tab:hover {
+.process-tab:hover,
+.mode-tab:hover,
+.history-shift-tab:hover {
     color: var(--primary-dark);
     background: var(--surface-blue);
     border-color: var(--line);
 }
 
-.process-tab[aria-pressed="true"] {
+.process-tab[aria-pressed="true"],
+.mode-tab[aria-pressed="true"],
+.history-shift-tab[aria-pressed="true"] {
     color: var(--surface);
     background: var(--primary);
     border-color: var(--primary);
 }
 
+.history-shift-tab:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.history-shift-tab:disabled:hover {
+    color: var(--heading-soft);
+    background: var(--surface-soft);
+    border-color: transparent;
+}
+
+/* 歷史班報模式：隱藏即時專屬區塊（保留製程類別頁籤，結果表跟著過濾） */
+body[data-mode="history"] .summary-grid,
+body[data-mode="history"] .overview-section,
+body[data-mode="history"] .alert-panel,
+body[data-mode="history"] .line-section,
+body[data-mode="history"] .refresh-block {
+    display: none;
+}
+
+.history-query-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 18px;
+    margin-bottom: 10px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+}
+
+.history-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.history-field-label {
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+}
+
+#history-date {
+    min-height: 38px;
+    padding: 0 10px;
+    color: var(--heading);
+    background: var(--surface-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    font-size: 0.84rem;
+    font-weight: 700;
+}
+
+.history-shift-tabs {
+    display: inline-flex;
+    gap: 6px;
+}
+
+.history-note {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
+.history-range {
+    margin: 0 0 10px 4px;
+    color: var(--heading-soft);
+    font-size: 0.84rem;
+    font-weight: 800;
+}
+
+/* 需壓過 .overview-table td:last-child 的右對齊（colspan=3 的訊息格是最末欄） */
+#history-overview td.history-message {
+    text-align: left;
+}
+
+/* 狀態小圓章：比照即時總覽 .overview-aoi 的 pill 造型 */
+.history-state-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 5px 12px;
+    color: var(--muted);
+    background: var(--surface-soft);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 900;
+}
+
+.history-state-chip[data-tone="error"] {
+    color: var(--red);
+    background: rgba(207, 63, 80, 0.07);
+    border-color: rgba(207, 63, 80, 0.24);
+}
+
+.history-state-chip[data-tone="warning"] {
+    color: var(--amber);
+    background: rgba(182, 106, 0, 0.08);
+    border-color: rgba(182, 106, 0, 0.26);
+}
+
 .summary-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(118px, 1fr));
+    grid-template-columns: repeat(6, minmax(118px, 1fr));
     gap: 12px;
 }
 
@@ -501,6 +618,14 @@ main {
 
 .summary-warning {
     border-top-color: var(--amber);
+}
+
+.summary-avg-aoi {
+    border-top-color: var(--amber);
+}
+
+.summary-avg-ai {
+    border-top-color: var(--cyan);
 }
 
 .summary-offline {
@@ -1555,7 +1680,7 @@ main {
 
 @media (max-width: 1260px) {
     .summary-grid {
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(3, 1fr);
     }
 }
 
