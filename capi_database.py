@@ -2243,10 +2243,47 @@ class CAPIDatabase:
             shift_end = now.replace(hour=7, minute=30, second=0, microsecond=0)
         return shift_name, shift_start, shift_end
 
+    @staticmethod
+    def _get_shift_window_for_date(report_date: str, shift: str) -> Tuple[str, datetime, datetime]:
+        """指定日期＋班別的統計區間（歷史班報用；夜班跨日、歸屬起班日）。"""
+        try:
+            day = datetime.strptime(str(report_date), "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"無效的日期格式：{report_date!r}（預期 YYYY-MM-DD）"
+            )
+        if shift == "day":
+            shift_name = "白班"
+            shift_start = day.replace(hour=7, minute=30)
+            shift_end = day.replace(hour=19, minute=30)
+        elif shift == "night":
+            shift_name = "夜班"
+            shift_start = day.replace(hour=19, minute=30)
+            shift_end = (day + timedelta(days=1)).replace(hour=7, minute=30)
+        else:
+            raise ValueError(f"無效的班別：{shift!r}（預期 day 或 night）")
+        return shift_name, shift_start, shift_end
+
+    def get_shift_statistics_for(self, report_date: str, shift: str) -> Dict:
+        """取得指定日期＋班別的統計（歷史班報 API 用）。"""
+        shift_name, shift_start, shift_end = self._get_shift_window_for_date(
+            report_date, shift
+        )
+        result = self._query_shift_statistics(shift_name, shift_start, shift_end)
+        result["date"] = shift_start.strftime("%Y-%m-%d")
+        result["shift"] = shift
+        result["start"] = shift_start.strftime("%Y-%m-%d %H:%M:%S")
+        result["end"] = shift_end.strftime("%Y-%m-%d %H:%M:%S")
+        return result
+
     def get_shift_statistics(self, now: Optional[datetime] = None) -> Dict:
         """取得當班統計（白班 07:30~19:30 / 夜班 19:30~07:30）"""
         shift_name, shift_start, shift_end = self._get_shift_window(now or datetime.now())
+        return self._query_shift_statistics(shift_name, shift_start, shift_end)
 
+    def _query_shift_statistics(
+        self, shift_name: str, shift_start: datetime, shift_end: datetime
+    ) -> Dict:
         start_str = shift_start.strftime("%Y-%m-%d %H:%M:%S")
         end_str = shift_end.strftime("%Y-%m-%d %H:%M:%S")
         time_range_label = f"{shift_start.strftime('%m/%d %H:%M')} ~ {shift_end.strftime('%m/%d %H:%M')}"

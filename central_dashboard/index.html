@@ -76,6 +76,14 @@
     </header>
 
     <main>
+        <div id="mode-tabs" class="mode-tabs" role="group" aria-label="看板模式">
+            <span class="process-tabs-label">看板模式</span>
+            <div class="process-tab-list">
+                <button class="mode-tab" type="button" data-mode="realtime" aria-pressed="true">即時</button>
+                <button class="mode-tab" type="button" data-mode="history" aria-pressed="false">歷史班報</button>
+            </div>
+        </div>
+
         <div id="process-tabs" class="process-tabs" role="group" aria-label="製程類別" hidden>
             <span class="process-tabs-label">製程類別</span>
             <div class="process-tab-list">
@@ -100,6 +108,14 @@
             <article class="summary-card summary-offline">
                 <span>設備離線</span>
                 <strong id="summary-offline">0</strong>
+            </article>
+            <article class="summary-card summary-avg-aoi">
+                <span>平均 AOI 排片率</span>
+                <strong id="summary-avg-aoi-rate">—</strong>
+            </article>
+            <article class="summary-card summary-avg-ai">
+                <span>平均 AI 排片率</span>
+                <strong id="summary-avg-ai-rate">—</strong>
             </article>
         </section>
 
@@ -129,6 +145,46 @@
                         </tr>
                     </thead>
                     <tbody id="line-overview" aria-live="polite"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="history-section" class="history-section" aria-labelledby="history-title" hidden>
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">SHIFT REPORT</p>
+                    <h2 id="history-title">歷史班報</h2>
+                </div>
+            </div>
+
+            <div class="history-query-bar">
+                <label class="history-field">
+                    <span class="history-field-label">日期</span>
+                    <input type="date" id="history-date">
+                </label>
+                <div class="history-field" role="group" aria-label="班別">
+                    <span class="history-field-label">班別</span>
+                    <div id="history-shift-tabs" class="history-shift-tabs">
+                        <button type="button" class="history-shift-tab" data-shift="day" aria-pressed="true">白班</button>
+                        <button type="button" class="history-shift-tab" data-shift="night" aria-pressed="false">晚班</button>
+                    </div>
+                </div>
+                <p class="history-note">受線體資料保留 30 天限制，僅可查詢最近 29 天；僅能查詢已結束的班別。</p>
+            </div>
+
+            <p id="history-range" class="history-range"></p>
+
+            <div class="overview-table-wrap">
+                <table class="overview-table history-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">線體</th>
+                            <th scope="col">AOI 排片率</th>
+                            <th scope="col">AI 排片率</th>
+                            <th scope="col">該班投入</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-overview" aria-live="polite"></tbody>
                 </table>
             </div>
         </section>
