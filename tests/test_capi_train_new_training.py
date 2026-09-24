@@ -904,7 +904,7 @@ def test_calibrate_threshold_returns_default():
     改為使用者在 UI 微調。
     """
     from capi_train_new import calibrate_threshold, DEFAULT_THRESHOLD
-    assert DEFAULT_THRESHOLD == 0.5
+    assert DEFAULT_THRESHOLD == 0.35
     # 不論 NG / train_max 多少，都回固定值
     assert calibrate_threshold(ng_scores=[0.5, 0.7, 0.9], train_max_score=0.4) == DEFAULT_THRESHOLD
     assert calibrate_threshold(ng_scores=[], train_max_score=0.95) == DEFAULT_THRESHOLD
