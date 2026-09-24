@@ -288,7 +288,7 @@ def test_training_stages_only_training_and_calibration_never_acceptance(tmp_path
     assert staged and evaluated
     assert result["tile_count"] == 30
     assert result["ng_count"] == (1 if complete_calibration else 0)
-    assert result["threshold"] == 0.5  # OK calibration maximum on the new scale.
+    assert result["threshold"] == 0.35  # Default starting threshold on the new scale.
 
 
 def test_manual_scan_can_select_separate_batches_without_flattening(tmp_path):

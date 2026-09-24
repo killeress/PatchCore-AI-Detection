@@ -1583,8 +1583,8 @@ DEFAULT_THRESHOLD = OK_MAX_DEFAULT_THRESHOLD
 def calibrate_threshold(ng_scores: List[float], train_max_score: float) -> float:
     """所有 unit 統一回傳 DEFAULT_THRESHOLD。
 
-    等比例正規化將 OK 校準最高分對應到 0.5，以此作為新模型起始門檻。
-    NG 不參與選門檻。正式啟用前仍需確認抓取率及正常圖誤報。
+    新模型使用 0.35 作為起始門檻；NG 不參與選門檻。
+    正式啟用前仍需確認抓取率及正常圖誤報。
 
     參數保留是因為呼叫端仍傳入這兩個值，且 ng_scores 仍用於計算 metrics
     （AUROC、ng_caught_rate）給 UI 顯示。
@@ -2245,7 +2245,7 @@ def train_single_submodel(
     """訓練單一 (lighting, zone) unit。
 
     回傳 dict 包含：
-      - threshold: float (DEFAULT_THRESHOLD = 0.5，對應 OK 校準最高分)
+      - threshold: float (DEFAULT_THRESHOLD = 0.35)
       - metrics: dict (compute_unit_metrics 結果)
       - tile_count: int (訓練用 tile 數)
       - ng_count: int (NG 數)

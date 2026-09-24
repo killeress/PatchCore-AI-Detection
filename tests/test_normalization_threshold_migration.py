@@ -38,9 +38,9 @@ def test_legacy_model_retrain_resets_only_its_threshold(bundle, has_threshold_js
     if not has_threshold_json:
         (root / "thresholds.json").unlink()
     reset = install_trained_submodel(source, target, {"normalization_mode": OK_MAX_NORMALIZATION})
-    assert reset == {"previous": .18, "current": .5}
+    assert reset == {"previous": .18, "current": .35}
     recipe = yaml.safe_load((root / "machine_config.yaml").read_text(encoding="utf-8"))
-    assert recipe["threshold_mapping"] == {"G0F00000": {"inner": .5, "edge": .35}}
+    assert recipe["threshold_mapping"] == {"G0F00000": {"inner": .35, "edge": .35}}
     assert json.loads((root / "thresholds.json").read_text(encoding="utf-8")) == recipe["threshold_mapping"]
     assert recipe["image_size"] == [512, 512]
     assert target.read_bytes() == b"new-model"
@@ -68,8 +68,8 @@ def test_new_u0f_threshold_does_not_reuse_standard(bundle, mapping):
 
     reset = install_trained_submodel(source, target, {"normalization_mode": OK_MAX_NORMALIZATION})
 
-    assert reset == {"previous": None, "current": .5}
-    expected = {**(mapping or {}), "U0F00000": {**((mapping or {}).get("U0F00000") or {}), "inner": .5}}
+    assert reset == {"previous": None, "current": .35}
+    expected = {**(mapping or {}), "U0F00000": {**((mapping or {}).get("U0F00000") or {}), "inner": .35}}
     actual = yaml.safe_load((root / "machine_config.yaml").read_text(encoding="utf-8"))
     assert actual["threshold_mapping"] == expected
     assert json.loads((root / "thresholds.json").read_text(encoding="utf-8")) == expected
@@ -85,11 +85,11 @@ def test_retrain_accepts_legacy_scalar_or_empty_thresholds(bundle, yaml_value, j
     (root / "machine_config.yaml").write_text(yaml.safe_dump(recipe), encoding="utf-8")
     (root / "thresholds.json").write_text(json.dumps({"G0F00000": json_value}), encoding="utf-8")
     reset = install_trained_submodel(source, target, {"normalization_mode": OK_MAX_NORMALIZATION})
-    assert reset == {"previous": yaml_value, "current": .5}
+    assert reset == {"previous": yaml_value, "current": .35}
     recipe = yaml.safe_load((root / "machine_config.yaml").read_text(encoding="utf-8"))
-    expected = {"inner": .5, **({"edge": yaml_value} if yaml_value is not None else {})}
+    expected = {"inner": .35, **({"edge": yaml_value} if yaml_value is not None else {})}
     assert recipe["threshold_mapping"]["G0F00000"] == expected
-    expected_json = {"inner": .5, **({"edge": json_value} if json_value is not None else {})}
+    expected_json = {"inner": .35, **({"edge": json_value} if json_value is not None else {})}
     assert json.loads((root / "thresholds.json").read_text(encoding="utf-8"))["G0F00000"] == expected_json
 
 
@@ -100,11 +100,11 @@ def test_same_scale_retrain_repairs_missing_threshold_and_model_mapping(bundle):
         target.stem: {"normalization_mode": OK_MAX_NORMALIZATION},
     }}), encoding="utf-8")
     assert install_trained_submodel(source, target, {"normalization_mode": OK_MAX_NORMALIZATION}) == {
-        "previous": None, "current": .5,
+        "previous": None, "current": .35,
     }
     recipe = yaml.safe_load((root / "machine_config.yaml").read_text(encoding="utf-8"))
     assert recipe["model_mapping"]["U0F00000"]["inner"] == str(target)
-    assert recipe["threshold_mapping"]["U0F00000"]["inner"] == .5
+    assert recipe["threshold_mapping"]["U0F00000"]["inner"] == .35
 
 
 @pytest.mark.parametrize("text", [
@@ -164,7 +164,7 @@ def test_runtime_reload_refreshes_threshold_for_retrained_unit(bundle, relative_
     install_trained_submodel(source, target, {"normalization_mode": OK_MAX_NORMALIZATION})
     assert engine.reload_submodel(*key)
     assert key not in engine._model_cache_v2
-    assert engine.config.threshold_mapping == {"G0F00000": {"inner": .5, "edge": .35}}
+    assert engine.config.threshold_mapping == {"G0F00000": {"inner": .35, "edge": .35}}
 
 
 def test_new_screen_reload_does_not_take_model_from_another_bundle(bundle, tmp_path):
@@ -199,7 +199,7 @@ def test_runtime_reload_converts_legacy_scalar_without_changing_other_zone(bundl
     engine._model_cache_v2 = {("M", "G0F00000", "inner"): object()}
     install_trained_submodel(source, target, {"normalization_mode": OK_MAX_NORMALIZATION})
     assert engine.reload_submodel("M", "G0F00000", "inner")
-    assert engine.config.threshold_mapping == {"G0F00000": {"inner": .5, "edge": .18}}
+    assert engine.config.threshold_mapping == {"G0F00000": {"inner": .35, "edge": .18}}
 
 
 def test_threshold_edit_syncs_legacy_scalar_json(bundle):
