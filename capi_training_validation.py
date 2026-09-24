@@ -408,6 +408,9 @@ def evaluate_model(model_path, tiles, train_tiles, config, bundle_dir, unit_labe
     """Stream already-preprocessed tiles through one exported inferencer."""
     import cv2
     from anomalib.deploy import TorchInferencer
+    from capi_torch_compat import patch_torch_inferencer_precision
+
+    patch_torch_inferencer_precision(TorchInferencer)
 
     frozen, input_issues = frozen_inputs if frozen_inputs is not None else freeze_inputs(tiles, train_tiles, bundle_dir, unit_label, job_id)
     issues = list(input_issues)
