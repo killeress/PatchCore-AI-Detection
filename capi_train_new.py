@@ -2203,6 +2203,8 @@ def _calibrate_from_model(
     train_max 是其中最大值（保留供 calibrate_threshold 使用）。
     """
     from anomalib.deploy import TorchInferencer
+    from capi_torch_compat import patch_torch_inferencer_precision
+    patch_torch_inferencer_precision(TorchInferencer)
     inferencer = TorchInferencer(path=str(model_pt))
 
     sample = random.sample(train_paths, min(100, len(train_paths)))

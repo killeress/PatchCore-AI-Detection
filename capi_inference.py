@@ -66,33 +66,16 @@ if not hasattr(_anomalib, "PrecisionType"):
         "Injected PrecisionType stub into anomalib for legacy checkpoint compat"
     )
 
-# 修補 2: TorchInferencer.predict → 強制 float32 輸入
-# 舊版 checkpoint 序列化了 PrecisionType.FLOAT16，新版 anomalib 的
-# TorchInferencer.predict() 會將輸入轉 fp16，但 backbone 權重仍為 float32
-# → RuntimeError: Input type (HalfTensor) and weight type (FloatTensor) mismatch
-# 解法: 包裝 model.forward，在 forward 前強制輸入轉 float32
+# 修補 2: TorchInferencer.predict → 輸入對齊實際 backbone 權重精度
+# 舊 checkpoint 可能標記 FLOAT16 但權重仍是 FP32；新訓練匯出的權重則
+# 可能確實為 FP16。不能一律轉 FP32，否則訓練後校正／驗收會反向 mismatch。
+# 以 backbone 浮點參數為準，避免 precision metadata 或 FP16 KNN buffer 誤導。
 try:
     from anomalib.deploy import TorchInferencer as _TI
-    _orig_predict = _TI.predict
-
-    def _fp32_predict(self, *args, **kwargs):
-        _orig_fwd = self.model.forward
-        def _force_fp32_fwd(batch, *a, **kw):
-            # anomalib 使用 InferenceBatch dataclass，圖片在 .image 屬性
-            if hasattr(batch, 'image') and isinstance(batch.image, torch.Tensor):
-                batch.image = batch.image.float()
-            elif isinstance(batch, torch.Tensor):
-                batch = batch.float()
-            return _orig_fwd(batch, *a, **kw)
-        self.model.forward = _force_fp32_fwd
-        try:
-            return _orig_predict(self, *args, **kwargs)
-        finally:
-            self.model.forward = _orig_fwd
-
-    _TI.predict = _fp32_predict
+    from capi_torch_compat import patch_torch_inferencer_precision
+    patch_torch_inferencer_precision(_TI)
     logging.getLogger("capi.inference").info(
-        "Patched TorchInferencer.predict → force float32 input"
+        "Patched TorchInferencer.predict → match backbone weight precision"
     )
 except Exception as _e:
     logging.getLogger("capi.inference").warning(
@@ -2208,12 +2191,13 @@ class CAPIInferencer:
         else:
             print("  ⚠️ 未找到 feature_extractor，無法註冊 pre-hook")
 
-        # ── Step 3: 確保模型權重為 float32 ──
+        # ── Step 3: 權重與 memory bank buffers 都要對齊 float32 ──
         if isinstance(model, torch.nn.Module):
-            has_half = any(p.dtype == torch.float16 for p in model.parameters())
+            has_half = (any(p.dtype == torch.float16 for p in model.parameters())
+                        or any(b.dtype == torch.float16 for b in model.buffers()))
             if has_half:
                 model.float()
-                print("  🔧 模型權重已全部轉回 float32")
+                print("  🔧 模型權重與 buffers 已全部轉回 float32")
 
     def _optimize_model_fp16(self, inferencer) -> None:
         """

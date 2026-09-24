@@ -44,6 +44,7 @@ CODE_FILES = [
     "capi_image_preprocess_lab.py",
     "capi_grid_canonicalization.py",
     "capi_inference.py",
+    "capi_torch_compat.py",
     "capi_cuda_diagnostics.py",
     "capi_mark_calibration.py",
     "capi_mark_detector.py",
