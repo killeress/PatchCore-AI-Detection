@@ -12,6 +12,7 @@ import yaml
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from capi_image_naming import CAPI_LIGHTING_PREFIXES
 from capi_train_new import ZONES
 
 logger = logging.getLogger(__name__)
@@ -1059,7 +1060,7 @@ def get_pending_change_summary_for_bundle(db, bundle: dict) -> dict:
     回傳 {(lighting, zone): count, ...}，過濾掉 count == 0 的。
     """
     out = {}
-    for lighting in ("G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"):
+    for lighting in CAPI_LIGHTING_PREFIXES:
         for zone in ("inner", "edge"):
             n = get_pending_change_count(db, bundle, lighting, zone)
             if n > 0:

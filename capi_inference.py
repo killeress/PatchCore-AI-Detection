@@ -1116,8 +1116,15 @@ class CAPIInferencer:
         查找順序:
         1. model_mapping 中的對應模型
         2. fallback 到 self.inferencer (單一模型)
+
+        CAPI U0F00000 必須有獨立模型；加入 U0F00000 後，STANDARD 也不能
+        使用預設模型代替，避免兩種同片畫面再次共用錯誤模型。
         """
         prefix = self._get_model_prefix(prefix)
+        independent_capi_screen = self.station_adapter.profile == "capi" and (
+            prefix == "U0F00000"
+            or (prefix == "STANDARD" and "U0F00000" in self._model_mapping)
+        )
         # 查找映射
         if prefix in self._model_mapping:
             model_path = self._model_mapping[prefix]
@@ -1134,9 +1141,13 @@ class CAPIInferencer:
                 self._inferencers[path_key] = inf
                 return inf
             else:
+                if independent_capi_screen:
+                    raise RuntimeError(f"{prefix} 獨立模型載入失敗，請確認 model_mapping")
                 print(f"⚠️ {prefix} 模型載入失敗，fallback 到預設模型")
         
         # Fallback: 使用預設模型
+        if independent_capi_screen:
+            raise RuntimeError(f"{prefix} 缺少獨立模型，請設定 model_mapping 後重新推論")
         return self.inferencer
     
     def _get_threshold_for_prefix(self, prefix: str) -> float:
@@ -6335,7 +6346,7 @@ class CAPIInferencer:
         if not report_prefix or not target_prefix:
             return False
         # Compare internal lighting keys while preserving station-specific naming.
-        # CAPI U0F00000 is STANDARD; AAPI keeps these lightings distinct.
+        # U0F00000 and STANDARD are distinct screens on both CAPI and AAPI.
         report_prefix = self._get_image_prefix(report_prefix)
         target_prefix = self._get_image_prefix(target_prefix)
         return (

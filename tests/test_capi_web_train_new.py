@@ -1623,8 +1623,8 @@ def test_handle_train_new_progress_page_uses_step4_template_for_train_state():
     h.jinja_env.get_template.assert_called_with("train_new/step4_progress.html")
     assert h._sent_response[0]["body"] == "<html>step4</html>"
     assert template.render.call_args.kwargs["display_unit_labels"][-2:] == [
-        "U0F00000-inner",
-        "U0F00000-edge",
+        "STANDARD-inner",
+        "STANDARD-edge",
     ]
 
 
@@ -1671,11 +1671,11 @@ def test_train_new_review_lighting_label_matches_source_filename(image_name, exp
     with patch.object(Path, "iterdir", return_value=[Path(image_name)]), \
             patch.object(Path, "is_file", return_value=True):
         labels = CAPIWebHandler._train_new_lighting_labels(
-            ["G0F00000", "STANDARD"],
+            ["G0F00000", expected_label],
             ["/panel"],
         )
 
-    assert labels == {"G0F00000": "G0F00000", "STANDARD": expected_label}
+    assert labels == {"G0F00000": "G0F00000", expected_label: expected_label}
 
 
 def test_train_new_done_template_uses_chinese_summary_labels():
@@ -1792,13 +1792,15 @@ def test_record_detail_uses_source_prefix_display_labels():
     detail = {
         "images": [
             {"image_name": "U0F00000083755.tif"},
+            {"image_name": "STANDARD_083756.tif"},
             {"image_name": "W0F00000083751.tif"},
         ],
     }
     CAPIWebHandler._decorate_record_image_prefix_labels(detail)
 
     assert detail["image_prefix_labels"] == {
-        "STANDARD": "U0F00000",
+        "STANDARD": "STANDARD",
+        "U0F00000": "U0F00000",
         "W0F00000": "W0F00000",
     }
 
@@ -1814,7 +1816,7 @@ def test_debug_inference_uses_source_prefix_display_label():
     assert text.count("data.image_prefix_label || data.image_prefix") == 2
 
 
-def test_dashboard_lighting_labels_use_active_bundle_training_source():
+def test_dashboard_lighting_labels_preserve_configured_model_names():
     from capi_web import CAPIWebHandler
 
     db = MagicMock()
@@ -1827,7 +1829,7 @@ def test_dashboard_lighting_labels_use_active_bundle_training_source():
             ["G0F00000", "STANDARD"],
         )
 
-    assert labels == {"G0F00000": "G0F00000", "STANDARD": "U0F00000"}
+    assert labels == {"G0F00000": "G0F00000", "STANDARD": "STANDARD"}
 
     template_path = Path(__file__).resolve().parent.parent / "templates" / "dashboard.html"
     text = template_path.read_text(encoding="utf-8")
@@ -2138,7 +2140,7 @@ def test_handle_train_new_start_full_scope_omits_capi_screen_without_images(tmp_
         "R0F00000-inner", "R0F00000-edge",
         "W0F00000-inner", "W0F00000-edge",
         "WGF50500-inner", "WGF50500-edge",
-        "STANDARD-inner", "STANDARD-edge",
+        "U0F00000-inner", "U0F00000-edge",
     ]
     assert not any(unit.startswith("G0F00000-") for unit in scope["selected_units"])
     runtime = CAPIWebHandler._get_job_runtime(

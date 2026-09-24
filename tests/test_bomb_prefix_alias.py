@@ -18,16 +18,16 @@ def make_inferencer(profile="capi"):
     inferencer.config = CAPIConfig(
         bomb_match_tolerance=20,
         bomb_area_force_detection_enabled=True,
-        bomb_defects=[BombDefect("STANDARD", "B01", "point", BOMB_POINTS)],
+        bomb_defects=[BombDefect("U0F00000", "B01", "point", BOMB_POINTS)],
     )
     inferencer.station_adapter = create_station_adapter(profile)
     return inferencer
 
 
 @pytest.mark.parametrize("client_prefix,report_prefix", [
-    ("U0F00000", "STANDARD"), ("STANDARD", "U0F00000"),
+    ("U0F00000", "U0F00000"), ("STANDARD", "STANDARD"),
 ])
-def test_report_alias_covers_all_five_client_bombs(client_prefix, report_prefix, capsys):
+def test_same_screen_report_covers_all_five_client_bombs(client_prefix, report_prefix, capsys):
     inferencer = make_inferencer()
     report = {report_prefix: [
         AOIReportDefect("PCDK2", x, y, report_prefix) for x, y in AOI_POINTS
@@ -40,7 +40,7 @@ def test_report_alias_covers_all_five_client_bombs(client_prefix, report_prefix,
 
 
 @pytest.mark.parametrize("source", ["client", "config"])
-def test_five_bombs_match_alias_without_absorbing_unrelated_aoi_point(source, capsys):
+def test_five_bombs_match_same_screen_without_absorbing_unrelated_aoi_point(source, capsys):
     inferencer = make_inferencer()
     # Identity image/product mapping isolates prefix matching from calibration.
     tiles = []
@@ -79,9 +79,9 @@ def test_five_bombs_match_alias_without_absorbing_unrelated_aoi_point(source, ca
     ("point", [(350, 231)]), ("line", [(300, 231), (400, 231)]),
 ])
 @pytest.mark.parametrize("prefix,expected", [
-    ("STANDARD", True), ("U0F00000_085943", True), ("G0F00000", False),
+    ("STANDARD", False), ("U0F00000_085943", True), ("G0F00000", False),
 ])
-def test_bomb_alias_point_and_line_matching(defect_type, coords, prefix, expected):
+def test_bomb_point_and_line_matching_preserves_screen(defect_type, coords, prefix, expected):
     inferencer = make_inferencer()
     bomb = BombDefect("U0F00000", "B01", defect_type, coords)
     matched, _ = inferencer.check_bomb_match(
@@ -91,8 +91,9 @@ def test_bomb_alias_point_and_line_matching(defect_type, coords, prefix, expecte
     assert matched is expected
 
 
-def test_aapi_keeps_u0f_separate_from_standard():
-    inferencer = make_inferencer("aapi")
+@pytest.mark.parametrize("profile", ["capi", "aapi"])
+def test_stations_keep_u0f_separate_from_standard(profile):
+    inferencer = make_inferencer(profile)
     assert not inferencer._aoi_prefix_matches("STANDARD", "U0F00000")
     matched, _ = inferencer.check_bomb_match(
         "STANDARD", 350, 231, (0, 0, 1920, 1080),

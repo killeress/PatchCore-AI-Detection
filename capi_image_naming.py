@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Tuple
 
 CANONICAL_IMAGE_PREFIXES: Tuple[str, ...] = (
     "STANDARD",
+    "U0F00000",
     "WGF50500",
     "WGF00000",
     "G0F00000",
@@ -13,24 +14,21 @@ CANONICAL_IMAGE_PREFIXES: Tuple[str, ...] = (
     "B0F00000",
 )
 
-IMAGE_PREFIX_ALIASES = {
-    "U0F00000": "STANDARD",
-}
+# These are independent source screens, including when both occur on one panel.
+CAPI_LIGHTING_PREFIXES: Tuple[str, ...] = (
+    "G0F00000", "R0F00000", "W0F00000", "WGF50500", "U0F00000", "STANDARD",
+)
 
 # WHITEFRA is handled by the dedicated white-frame inspector, but its
 # machine defect record is still part of the AOI report format.
 AOI_REPORT_PREFIXES: Tuple[str, ...] = (
-    tuple(IMAGE_PREFIX_ALIASES) + CANONICAL_IMAGE_PREFIXES + ("WHITEFRA",)
+    CANONICAL_IMAGE_PREFIXES + ("WHITEFRA",)
 )
 
 
 def canonical_image_prefix(image_name: str) -> str:
     stem = Path(str(image_name)).stem
     upper = stem.upper()
-
-    for raw_prefix, canonical in IMAGE_PREFIX_ALIASES.items():
-        if _matches_prefix(upper, raw_prefix):
-            return canonical
 
     for prefix in CANONICAL_IMAGE_PREFIXES:
         if _matches_prefix(upper, prefix):
@@ -42,24 +40,12 @@ def canonical_image_prefix(image_name: str) -> str:
 
 
 def source_image_prefix(image_name: str) -> str:
-    stem = Path(str(image_name)).stem
-    upper = stem.upper()
-    for raw_prefix in IMAGE_PREFIX_ALIASES:
-        if _matches_prefix(upper, raw_prefix):
-            return raw_prefix
     return canonical_image_prefix(image_name)
 
 
 def image_prefix_display_labels(image_names: Iterable[str]) -> Dict[str, str]:
-    labels: Dict[str, str] = {}
-    for image_name in image_names:
-        canonical = canonical_image_prefix(image_name)
-        source = source_image_prefix(image_name)
-        if source != canonical:
-            labels[canonical] = source
-        else:
-            labels.setdefault(canonical, canonical)
-    return labels
+    prefixes = (canonical_image_prefix(name) for name in image_names)
+    return {prefix: prefix for prefix in prefixes}
 
 
 def panel_image_group_key(image_name: str) -> str:

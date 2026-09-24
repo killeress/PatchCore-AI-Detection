@@ -604,6 +604,7 @@ _REPORT_SCREEN_PREFIXES = ("W0F00010",) + CANONICAL_IMAGE_PREFIXES
 
 _IMAGE_ABNORMAL_SCREEN_FIELDS = (
     ("STANDARD", "image_abnormal_standard_mean_lower", "image_abnormal_standard_mean_upper"),
+    ("U0F00000", "image_abnormal_u0f00000_mean_lower", "image_abnormal_u0f00000_mean_upper"),
     ("WGF50500", "image_abnormal_wgf50500_mean_lower", "image_abnormal_wgf50500_mean_upper"),
     ("W0F00010", "image_abnormal_w0f00010_mean_lower", "image_abnormal_w0f00010_mean_upper"),
     ("G0F00000", "image_abnormal_g0f00000_mean_lower", "image_abnormal_g0f00000_mean_upper"),
@@ -827,6 +828,10 @@ def check_image_abnormal_precheck(
         return None
 
     limits = _image_abnormal_limits(config)
+    if station_profile == "aapi":
+        # This split preserves CAPI's existing U0F brightness check; it must
+        # not enable a new screen check on existing AAPI deployments.
+        limits.pop("U0F00000", None)
     requested_screens = {}
     for source_prefix in report_prefixes or []:
         screen = (

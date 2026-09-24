@@ -6828,6 +6828,8 @@ class CAPIDatabase:
             ("image_abnormal_detection_enabled", config.image_abnormal_detection_enabled, "bool", "啟用推論前畫異預檢（只檢查 AOI Report 涉及畫面的產品 polygon 內平均亮度，低於下限或高於上限時回報 PCO05）"),
             ("image_abnormal_standard_mean_lower", config.image_abnormal_standard_mean_lower, "int", "STANDARD 產品區平均亮度下限"),
             ("image_abnormal_standard_mean_upper", config.image_abnormal_standard_mean_upper, "int", "STANDARD 產品區平均亮度上限"),
+            ("image_abnormal_u0f00000_mean_lower", config.image_abnormal_u0f00000_mean_lower, "int", "U0F00000 產品區平均亮度下限"),
+            ("image_abnormal_u0f00000_mean_upper", config.image_abnormal_u0f00000_mean_upper, "int", "U0F00000 產品區平均亮度上限"),
             ("image_abnormal_wgf50500_mean_lower", config.image_abnormal_wgf50500_mean_lower, "int", "WGF50500 產品區平均亮度下限"),
             ("image_abnormal_wgf50500_mean_upper", config.image_abnormal_wgf50500_mean_upper, "int", "WGF50500 產品區平均亮度上限"),
             ("image_abnormal_w0f00010_mean_lower", config.image_abnormal_w0f00010_mean_lower, "int", "W0F00010 產品區平均亮度下限"),
@@ -7247,11 +7249,7 @@ class CAPIDatabase:
         ]
         params: List[Any] = [machine_id]
         if clean_lightings:
-            raw_prefixes = []
-            for lighting in clean_lightings:
-                raw_prefixes.append(lighting)
-                if lighting == "STANDARD":
-                    raw_prefixes.append("U0F00000")
+            raw_prefixes = clean_lightings
             conditions.append(
                 "(" + " OR ".join("UPPER(im.image_name) LIKE ?" for _ in raw_prefixes) + ")"
             )

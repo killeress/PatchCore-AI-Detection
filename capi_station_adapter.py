@@ -14,6 +14,7 @@ import socket
 from typing import Dict, List, Optional, Tuple
 
 from capi_image_naming import (
+    CAPI_LIGHTING_PREFIXES,
     canonical_image_prefix,
     is_white_frame_image_name,
     panel_image_group_key,
@@ -32,16 +33,11 @@ class StationAOIDefect:
 
 class StationAdapter:
     profile = "capi"
-    inference_prefixes: Tuple[str, ...] = (
-        "G0F00000",
-        "R0F00000",
-        "W0F00000",
-        "WGF50500",
-        "STANDARD",
-    )
+    inference_prefixes: Tuple[str, ...] = CAPI_LIGHTING_PREFIXES
     boundary_reference_priority: Tuple[str, ...] = (
         "W0F00000",
         "STANDARD",
+        "U0F00000",
         "G0F00000",
         "R0F00000",
         "WGF50500",
