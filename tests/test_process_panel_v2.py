@@ -100,6 +100,48 @@ def test_process_panel_v2_returns_compatible_tuple(tmp_path):
     assert isinstance(results, list), "results should be List[ImageResult]"
 
 
+@pytest.mark.parametrize("grid", [False, True])
+def test_process_panel_v2_keeps_u0f_and_standard_separate(tmp_path, grid):
+    from capi_inference import AOIReportDefect, CAPIInferencer
+
+    screens = ("U0F00000", "STANDARD")
+    cfg = _make_config(tmp_path)
+    cfg.grid_tiling_enabled = grid
+    cfg.aoi_coord_inspection_enabled = True
+    cfg.patchcore_concentration_enabled = False
+    cfg.patchcore_diffuse_area_enabled = False
+    cfg.model_mapping = {p: {"inner": f"{p}-inner.pt", "edge": f"{p}-edge.pt"} for p in screens}
+    cfg.threshold_mapping = {"U0F00000": {"inner": 0.2, "edge": 0.2},
+                             "STANDARD": {"inner": 0.8, "edge": 0.8}}
+    for screen in screens:
+        _write_grey_panel_image(tmp_path, screen)
+    report = {p: [AOIReportDefect("PCDK2", 960, 540, p)] for p in screens}
+    fake_model = MagicMock()
+    fake_model.predict.return_value = _make_fake_predict_result(0.5)
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=fake_model) as load:
+        worker = CAPIInferencer(cfg)
+        results, *_rest = worker._process_panel_v2(tmp_path, aoi_report_override=report)
+    assert {worker._get_image_prefix(r.image_path.name) for r in results} == set(screens)
+    assert {call.args[1] for call in load.call_args_list} == set(screens)
+    for result in results:
+        screen = worker._get_image_prefix(result.image_path.name)
+        assert result.anomaly_tiles
+        assert all(tile.score_threshold == cfg.threshold_mapping[screen][tile.zone]
+                   for tile, _score, _map in result.anomaly_tiles)
+
+
+def test_process_panel_v2_missing_u0f_model_does_not_use_standard(tmp_path):
+    from capi_inference import CAPIInferencer
+
+    _write_grey_panel_image(tmp_path, "U0F00000")
+    cfg = _make_config(tmp_path)
+    cfg.model_mapping = {"STANDARD": {"inner": "standard-inner.pt", "edge": "standard-edge.pt"}}
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=MagicMock()):
+        worker = CAPIInferencer(cfg)
+        with pytest.raises(RuntimeError, match="U0F00000.*model_mapping"):
+            worker._process_panel_v2(tmp_path)
+
+
 def test_process_panel_v2_duplicate_panel_uses_latest_lighting_file(tmp_path):
     old_img = _write_grey_panel_image_at(tmp_path / "G0F00000_010000.png")
     latest_img = _write_grey_panel_image_at(tmp_path / "G0F00000_020000.png")

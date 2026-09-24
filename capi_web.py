@@ -1859,7 +1859,7 @@ def _within_spec_screen_code(image_name: str, screens: Dict[str, Any], station_a
     if stem.startswith("overview_"):
         stem = stem[len("overview_"):]
     # Use the deployment station, never guess it from a filename. AAPI places
-    # the lighting after the glass ID and keeps U0F00000 distinct from STANDARD.
+    # the lighting after the glass ID. Both stations keep U0F00000 distinct.
     adapter = station_adapter or create_station_adapter(
         resolve_station_profile_from_hostname(_get_host_identity(), default_if_unknown="capi")
     )
@@ -15140,21 +15140,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     if source == model or labels[model] == model:
                         labels[model] = source
             return labels
-        if "STANDARD" not in labels:
-            return labels
-
-        for panel_path in panel_paths:
-            try:
-                source_labels = image_prefix_display_labels(
-                    entry.name for entry in Path(panel_path).iterdir() if entry.is_file()
-                )
-            except OSError:
-                continue
-            if source_labels.get("STANDARD") != "STANDARD":
-                for lighting in labels:
-                    if lighting in source_labels:
-                        labels[lighting] = source_labels[lighting]
-                return labels
         return labels
 
     @classmethod

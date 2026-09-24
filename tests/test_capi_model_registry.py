@@ -4,6 +4,16 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 
+def test_pending_changes_include_independent_u0f_screen(monkeypatch):
+    import capi_model_registry as registry
+
+    monkeypatch.setattr(registry, "get_pending_change_count",
+                        lambda _db, _bundle, lighting, _zone: 3 if lighting == "U0F00000" else 0)
+    assert registry.get_pending_change_summary_for_bundle(None, {}) == {
+        ("U0F00000", "inner"): 3, ("U0F00000", "edge"): 3,
+    }
+
+
 def test_list_bundles_grouped(tmp_path):
     from capi_database import CAPIDatabase
     from capi_model_registry import list_bundles_grouped

@@ -41,7 +41,7 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     fixture_img = Path("tests/fixtures/preprocess/synthetic_panel.png")
     panel_dir = tmp_path / "panel_a"
     panel_dir.mkdir()
-    for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"]:
+    for lighting in ["G0F00000", "R0F00000", "W0F00000", "WGF50500", "U0F00000", "STANDARD"]:
         target = panel_dir / f"{lighting}_x.png"
         target.write_bytes(fixture_img.read_bytes())
 
@@ -73,9 +73,9 @@ def test_preprocess_panels_to_pool_writes_tiles(tmp_path):
     # grid 最外圈應歸為 edge，其餘完整在 panel 內的 tile 才是 inner。
     zones = {t["zone"] for t in db.tiles}
     assert "inner" in zones and "edge" in zones
-    # 5 lighting 都應有 tile
+    # Both coexisting CAPI screens must reach separate training pools.
     lightings = {t["lighting"] for t in db.tiles}
-    assert lightings == set(["G0F00000", "R0F00000", "W0F00000", "WGF50500", "STANDARD"])
+    assert lightings == {"G0F00000", "R0F00000", "W0F00000", "WGF50500", "U0F00000", "STANDARD"}
     # tile 和 thumb 檔案應確實存在磁碟
     assert len(db.tiles) > 0
     first_tile = db.tiles[0]
