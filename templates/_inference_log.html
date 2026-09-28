@@ -1,5 +1,5 @@
-{% if detail.inference_log %}
 <link rel="stylesheet" href="/static/css/inference-log.css">
+{% if detail.inference_log %}
 <section class="il card {{ 'il-light white-panel' if log_light else '' }}" aria-label="推論 Log">
   <button type="button" class="il-toggle" aria-expanded="false" aria-controls="log-panel">› &nbsp; 推論 Log <small>（點擊展開）</small></button>
   <div id="log-panel" hidden>
@@ -31,5 +31,6 @@
     <span class="il-feedback" role="status"></span>
   </div>
 </section>
-<script src="/static/js/inference-log.js"></script>
 {% endif %}
+<script src="/central_dashboard/inference-errors.js"></script>
+<script src="/static/js/inference-log.js"></script>
