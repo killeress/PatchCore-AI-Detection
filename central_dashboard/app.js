@@ -893,6 +893,7 @@
                 modelId: textValue(latestEvent.model_id),
                 machineNo: textValue(latestEvent.machine_no),
                 judgment: textValue(latestEvent.judgment || latestEvent.detail),
+                detail: textValue(latestEvent.detail || latestEvent.judgment),
                 time: textValue(latestEvent.time),
                 duration: textValue(latestEvent.duration)
             },
@@ -1023,7 +1024,7 @@
         renderOverviewRow(state);
         card.dataset.state = state.status;
         const healthAlerts = data && state.status !== "offline"
-            ? getHardwareAlerts(data)
+            ? getLineAlerts(data)
             : [];
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
         setField(card, "status", statusText(state.status));
@@ -1146,7 +1147,7 @@
         const alertCell = row.querySelector(".overview-alert-cell");
         const alertContainer = row.querySelector('[data-field="overview-alerts"]');
         const healthAlerts = data && state.status !== "offline"
-            ? getHardwareAlerts(data)
+            ? getLineAlerts(data)
             : [];
         row.dataset.health = healthAlerts.length
             ? healthAlerts[0].severity
@@ -1575,6 +1576,22 @@
         });
     }
 
+    function getLineAlerts(data) {
+        const alerts = getHardwareAlerts(data);
+        const event = data.latestEvent || {};
+        const notice = window.CAPIInferenceErrors.missingModelNotice(event.detail);
+        if (notice) {
+            const context = [event.machineNo, event.modelId, event.glassId, event.time]
+                .filter(Boolean).join(' / ');
+            alerts.unshift({
+                severity: 'critical',
+                summary: `需重新訓練模型（${notice.screens.join('、')}）`,
+                message: `${context ? context + '：' : ''}${notice.message} ${notice.action}`
+            });
+        }
+        return alerts;
+    }
+
     function updateSummary() {
         const states = Array.from(lineStates.values()).filter(
             (state) => state.processZone === activeProcessZone
@@ -1662,7 +1679,7 @@
             }
 
             if (state.data && state.status !== "offline") {
-                for (const alert of getHardwareAlerts(state.data)) {
+                for (const alert of getLineAlerts(state.data)) {
                     alerts.push({
                         severity: alert.severity,
                         message: `${label}：${alert.message}`
