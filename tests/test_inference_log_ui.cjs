@@ -1,7 +1,7 @@
 // Run with: node --test tests/test_inference_log_ui.cjs
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {parseLog} = require('../static/js/inference-log.js');
+const {parseLog, missingModelNotice} = require('../static/js/inference-log.js');
 
 test('stage NG counts do not become final panel decisions', () => {
     const result = parseLog('[v2] W0F00000: tiles=15 (inner=15, edge=0), NG=15, infer 0.33s\nPanel X 總耗時 57.92s | 前置=10.51s | 6 lighting(s), 6 NG');
@@ -57,4 +57,39 @@ test('missing metadata and malformed markers cannot be mistaken for baseline or 
     const soft = parseLog('[MODEL_TRAINING] '+JSON.stringify({mode:'softpatch_plus_v1',lighting:'G0F00000',zone:'inner',soft_weight:false,weight_strength:0,model_path:'<img src=x onerror=alert(1)>'}));
     assert.match(soft.models[0].settings, /評分設定未記錄；推論權重關閉；強度 0/);
     assert.equal(soft.models[0].path, '<img src=x onerror=alert(1)>');
+});
+
+test('legacy missing screen errors explain retraining and override incomplete decisions', () => {
+    const error = "[v2] U0F00000/inner tile(1608,1080) 推論失敗: 'U0F00000'";
+    const raw = `[2026-09-28 12:56:13] ERROR [capi.server] Inference error: ${error}`;
+    const result = parseLog(`[WITHIN_SPEC_INFERENCE] 原始 AI=NG，符合規格內，最終判定 OK-i\n${raw}\nRuntimeError: ${error}`);
+    assert.equal(result.decision, '檢測未完成 · 需要重新訓練模型');
+    assert.match(result.modelNotice.message, /U0F00000（內部）/);
+    assert.match(result.modelNotice.action, /正常圖片重新訓練/);
+    assert.match(result.modelNotice.action, /啟用更新後的模型套件/);
+    assert.equal(result.alerts.length, 1);
+    assert.equal(result.alerts[0].count, 2);
+    assert.equal(result.events[1].raw, raw);
+    assert.equal(result.events[2].level, 'error');
+});
+
+test('persisted error without a log and missing zone mappings also give actionable notices', () => {
+    const error = "ERR:INFERENCE_FAILED (RuntimeError: [v2] U0F00000/inner tile(1608,1080) 推論失敗: 'U0F00000')";
+    assert.equal(missingModelNotice(error).title, '需要重新訓練模型');
+    const zones = parseLog("[v2] W0F00000/edge tile(0,0) 推論失敗: 'edge'\n[v2] U0F00000/inner tile(2,3) 推論失敗: 'U0F00000'");
+    assert.match(zones.modelNotice.message, /W0F00000（邊緣）.*U0F00000（內部）/);
+});
+
+test('other failures and successful runs never suggest retraining for a missing model', () => {
+    for (const raw of [
+        '', "KeyError: 'U0F00000'",
+        '[v2] U0F00000/inner tile(1608,1080) 推論失敗: CUDA out of memory',
+        "[v2] U0F00000/inner tile(1608,1080) 推論失敗: 'pred_score'",
+        'U0F00000_130007.tif → inner: ? (thr=0.750), edge: ? (thr=0.750)',
+        '[v2] U0F00000: tiles=3 (inner=3, edge=0), NG=0, infer 0.33s',
+        '[v2] <img src=x onerror=alert(1)>/inner tile(0,0) 推論失敗: \'inner\'',
+    ]) {
+        assert.equal(missingModelNotice(raw), null, raw);
+        assert.equal(parseLog(raw).modelNotice, null, raw);
+    }
 });

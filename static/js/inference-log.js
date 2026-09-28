@@ -2,6 +2,8 @@
 (function () {
     'use strict';
     const stages = {image_list: '建立影像清單', mark_primary: '主要定位標記偵測', mark_fallback: '備用定位標記偵測', mark_read_locate_recognize: '讀取及辨識定位標記', omit_read_check: '讀取灰塵檢查影像'};
+    const {missingModelNotice} = typeof module !== 'undefined' && module.exports
+        ? require('../../central_dashboard/inference-errors.js') : window.CAPIInferenceErrors;
     function trainingModel(raw) {
         const marker = '[MODEL_TRAINING] ';
         const start = raw.indexOf(marker);
@@ -25,6 +27,8 @@
     }
     function describe(raw) {
         let m;
+        const missing = missingModelNotice(raw);
+        if (missing) return `${missing.title}：${missing.message}`;
         const model = trainingModel(raw);
         if (model) return `使用模型：${model.unit} · ${model.mode}${model.settings === '—' ? '' : ' · ' + model.settings} · ${model.path}`;
         if ((m = raw.match(/\[stage\] (\S+) elapsed_ms=([\d.]+)/))) return `${stages[m[1]] || (m[1].startsWith('aoi_raw_bounds:') ? '取得 AOI 原圖邊界：' + m[1].slice(15) : m[1])} · ${(Number(m[2]) / 1000).toFixed(2)} 秒`;
@@ -44,7 +48,7 @@
         let decision = '紀錄未提供可辨識的最終規格判定', overview = '', report = '';
         for (const raw of text.split(/\r?\n/).filter(line => line.trim())) {
             const message = describe(raw);
-            const level = /\b(ERROR|CRITICAL)\b|Traceback/.test(raw) ? 'error' : /\bWARNING\b|no dot-matrix|large-panel raw boundary skipped|BOMB_FORCE/.test(raw) ? 'attention' : 'info';
+            const level = missingModelNotice(raw) || /\b(ERROR|CRITICAL)\b|Traceback/.test(raw) ? 'error' : /\bWARNING\b|no dot-matrix|large-panel raw boundary skipped|BOMB_FORCE/.test(raw) ? 'attention' : 'info';
             const time = (raw.match(/^\[\d{4}-\d\d-\d\d ([\d:]+)\]/) || [,''])[1];
             const event = {raw, message, level, time}; events.push(event);
             const model = trainingModel(raw);
@@ -71,10 +75,21 @@
                 specs.push([parts.shift(), parts.join('：').replace(/；/g, '\n')]);
             }
         }
-        return {events, specs, timings, models: [...models.values()], alerts: [...alerts.values()], decision, overview, report};
+        const modelNotice = missingModelNotice(text);
+        if (modelNotice) decision = '檢測未完成 · 需要重新訓練模型';
+        return {events, specs, timings, models: [...models.values()], alerts: [...alerts.values()], decision, overview, report, modelNotice};
     }
-    if (typeof module !== 'undefined' && module.exports) module.exports = {parseLog, describe};
+    if (typeof module !== 'undefined' && module.exports) module.exports = {parseLog, describe, missingModelNotice};
     if (typeof document === 'undefined') return;
+    document.querySelectorAll('[data-inference-error]').forEach(card => {
+        const original = card.querySelector('[data-error-raw]');
+        const notice = missingModelNotice(original.textContent);
+        if (!notice) return;
+        card.querySelector('h3').textContent = notice.title;
+        appendModelNotice(card, notice);
+        const details = disclosure(card, '原始錯誤（供查修）');
+        details.append(original);
+    });
     const root = document.querySelector('.il');
     if (!root) return;
     const find = selector => root.querySelector(selector);
@@ -89,6 +104,15 @@
     function disclosure(parent, title, open = false) {
         const d = node('details'); d.open = open; d.append(node('summary', title)); parent.append(d); return d;
     }
+    function appendModelNotice(parent, notice) {
+        const box = node('div', undefined, 'il-model-notice');
+        box.append(node('p', notice.message), node('p', notice.action));
+        const links = node('div', undefined, 'il-model-actions');
+        for (const [label, href] of [['前往重新訓練', '/train/new'], ['模型管理', '/models']]) {
+            const link = node('a', label); link.href = href; links.append(link);
+        }
+        box.append(links); parent.append(box);
+    }
     function table(parent, headings, rows) {
         const wrapper = node('div', undefined, 'il-table'), tbl = node('table'), head = node('thead'), body = node('tbody'), tr = node('tr');
         headings.forEach(h => { const th = node('th', h); th.scope = 'col'; tr.append(th); }); head.append(tr);
@@ -98,6 +122,7 @@
     function initialize() {
         if (initialized) return; initialized = true; parsed = parseLog(raw);
         const summary = find('#il-summary'); summary.append(node('strong', parsed.decision), node('p', parsed.overview || '耗時摘要未記錄'), node('p', parsed.report));
+        if (parsed.modelNotice) appendModelNotice(summary, parsed.modelNotice);
         const models = disclosure(summary, `本次使用模型（${parsed.models.length} 組）`, true);
         if (parsed.models.length) table(models, ['光源／區域', '訓練方式', '推論權重／評分', '模型檔案'], parsed.models.map(m => [m.unit, m.mode, m.settings, m.path]));
         else models.append(node('p', '此紀錄未保存模型訓練方式，無法判定是否使用 SoftPatch+。'));

@@ -605,7 +605,7 @@
                     {% endif %}
 
                     {% if detail.error_message %}
-                    <div class="white-panel" style="border-color: #FDE68A; background: #FFFBEB;">
+                    <div class="white-panel" style="border-color: #FDE68A; background: #FFFBEB;" data-inference-error>
                         <h3
                             style="font-size: 14px; font-weight: 600; color: #D97706; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
                             <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -614,8 +614,8 @@
                             </svg>
                             系統錯誤訊息
                         </h3>
-                        <p style="font-family: monospace; font-size: 13px; color: #92400E; margin: 0;">{{
-                            detail.error_message }}</p>
+                        <p style="font-family: monospace; font-size: 13px; color: #92400E; margin: 0; overflow-wrap: anywhere;" data-error-raw>{{
+                            detail.error_message | e }}</p>
                     </div>
                     {% endif %}
 

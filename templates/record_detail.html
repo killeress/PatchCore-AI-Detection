@@ -463,9 +463,9 @@
 {% endif %}
 
 {% if detail.error_message %}
-<div class="card" style="border-color:var(--err)">
+<div class="card" style="border-color:var(--err)" data-inference-error>
     <h3 style="color:var(--err)">錯誤訊息</h3>
-    <p style="margin-top:8px">{{ detail.error_message }}</p>
+    <p style="margin-top:8px;overflow-wrap:anywhere" data-error-raw>{{ detail.error_message | e }}</p>
 </div>
 {% endif %}
 
