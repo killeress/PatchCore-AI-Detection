@@ -4133,7 +4133,71 @@ class CAPIInferencer:
         detail_text += f" CtxShift:{shift}"
         return True, merged_mask, bright_ratio, detail_text
     
-    def check_omit_overexposure(self, omit_image: np.ndarray) -> tuple:
+    def _omit_reference_polygon(
+        self,
+        image_files: List[Path],
+        omit_shape: Tuple[int, int],
+        product_resolution: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[Optional[np.ndarray], str]:
+        """Find a white-first product polygon in the original OMIT coordinate space."""
+        from capi_preprocess import (
+            detect_panel_geometry, filter_panel_lighting_files,
+            panel_boundary_config_for_station,
+        )
+
+        adapter = self.station_adapter
+        references = filter_panel_lighting_files(
+            Path("."), image_files=[
+                Path(path) for path in image_files
+                if Path(path).suffix.lower() in self._PANEL_IMAGE_EXTENSIONS
+            ],
+            prefix_resolver=adapter.image_prefix,
+            allowed_prefixes=adapter.boundary_reference_priority,
+        )
+        pre_cfg = PreprocessConfig(
+            **panel_boundary_config_for_station(adapter.profile),
+            tile_size=self.config.tile_size,
+            otsu_offset=self.config.otsu_offset,
+            enable_panel_polygon=self.config.enable_panel_polygon,
+            image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+            product_resolution=product_resolution or self._product_resolution(),
+            generate_grid_tiles=False,
+            recover_failed_raw_boundary=bool(
+                adapter.profile in ("capi", "aapi")
+                and self.config.aoi_coord_inspection_enabled
+                and not self.config.grid_tiling_enabled
+            ),
+        )
+        reason = "no_valid_product_polygon"
+        for prefix in adapter.boundary_reference_priority:
+            path = references.get(prefix)
+            if path is None:
+                continue
+            try:
+                # Same reader/rotation as OMIT; never reuse canonicalized tile geometry.
+                reference = self._read_detection_image(path)
+                if reference is None:
+                    continue
+                if reference.shape[:2] != omit_shape:
+                    reason = "reference_size_mismatch"
+                    logger.warning("OMIT reference size mismatch: %s %s != %s",
+                                   path.name, reference.shape[:2], omit_shape)
+                    continue
+                _, polygon = detect_panel_geometry(reference, pre_cfg, source_name=path.name)
+                if polygon is not None:
+                    return polygon, path.name
+            except Exception as exc:
+                logger.warning("OMIT reference polygon failed (%s): %s", path.name, exc)
+        return None, reason
+
+    def check_omit_overexposure(
+        self,
+        omit_image: np.ndarray,
+        panel_polygon: Optional[np.ndarray] = None,
+        *,
+        image_files: Optional[List[Path]] = None,
+        product_resolution: Optional[Tuple[int, int]] = None,
+    ) -> tuple:
         """
         檢查 OMIT 圖片是否曝光過度
         
@@ -4142,6 +4206,9 @@ class CAPIInferencer:
         
         Args:
             omit_image: OMIT 圖片 (BGR 或灰階)
+            panel_polygon: 與 OMIT 同座標系的產品 polygon；僅統計內部像素
+            image_files: 同片原圖，未提供 polygon 時依白畫面優先序偵測產品區域
+            product_resolution: 產品解析度，供共用邊界偵測選擇適用流程
             
         Returns:
             (is_overexposed, mean_brightness, bright_ratio, detail_text)
@@ -4157,8 +4224,31 @@ class CAPIInferencer:
         else:
             gray = omit_image.reshape(omit_image.shape[0], omit_image.shape[1])
         
-        mean_brightness = float(np.mean(gray))
-        bright_ratio = float(np.sum(gray > 230)) / gray.size if gray.size > 0 else 0.0
+        reference_source = "no_valid_product_polygon"
+        detected_reference = panel_polygon is None and image_files is not None
+        if detected_reference:
+            panel_polygon, reference_source = self._omit_reference_polygon(
+                image_files, gray.shape[:2], product_resolution,
+            )
+
+        pixels = gray.reshape(-1)
+        scope = "full_image"
+        if panel_polygon is not None:
+            try:
+                polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
+                if (len(polygon) >= 3 and np.isfinite(polygon).all()
+                        and abs(cv2.contourArea(polygon)) > 0):
+                    mask = np.zeros(gray.shape[:2], dtype=np.uint8)
+                    cv2.fillPoly(mask, [np.rint(polygon).astype(np.int32)], 255)
+                    if np.any(mask):
+                        pixels = gray[mask > 0]
+                        scope = "product_polygon"
+            except (ValueError, TypeError, cv2.error):
+                pass
+
+        # Both numerator and denominator use product pixels; black padding would dilute them.
+        mean_brightness = float(np.mean(pixels))
+        bright_ratio = float(np.count_nonzero(pixels > 230)) / pixels.size
         
         mean_thr = self.config.omit_overexposure_mean_threshold
         ratio_thr = self.config.omit_overexposure_ratio_threshold
@@ -4166,7 +4256,12 @@ class CAPIInferencer:
         is_overexposed = (mean_brightness > mean_thr) and (bright_ratio > ratio_thr)
         
         detail_text = (f"Mean:{mean_brightness:.1f}(thr={mean_thr}) "
-                       f"BrightRatio:{bright_ratio:.3f}(thr={ratio_thr})")
+                       f"BrightRatio:{bright_ratio:.3f}(thr={ratio_thr}) "
+                       f"Scope:{scope} Pixels:{pixels.size}")
+        if scope == "full_image":
+            detail_text += f" Fallback:{reference_source}"
+        elif detected_reference:
+            detail_text += f" Reference:{reference_source}"
         
         return is_overexposed, mean_brightness, bright_ratio, detail_text
     
@@ -7478,7 +7573,9 @@ class CAPIInferencer:
         
         # 過曝檢查 (在灰塵檢測之前)
         if omit_image is not None:
-            omit_overexposed, oe_mean, oe_ratio, oe_detail = self.check_omit_overexposure(omit_image)
+            omit_overexposed, oe_mean, oe_ratio, oe_detail = self.check_omit_overexposure(
+                omit_image, image_files=image_files, product_resolution=product_resolution,
+            )
             omit_overexposure_info = oe_detail
             if omit_overexposed:
                 print(f"⚠️ OMIT OVEREXPOSED [{omit_path.name}]: {oe_detail}")
@@ -8473,7 +8570,10 @@ class CAPIInferencer:
 
         return results, omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report
 
-    def _load_omit_context(self, panel_dir: Path, image_files: Optional[List[Path]] = None):
+    def _load_omit_context(
+        self, panel_dir: Path, image_files: Optional[List[Path]] = None,
+        product_resolution: Optional[Tuple[int, int]] = None,
+    ):
         """Load the panel-level OMIT/PINIGBI image used by dust filtering."""
         if image_files is None:
             image_files = self._list_panel_image_files(panel_dir)
@@ -8488,7 +8588,9 @@ class CAPIInferencer:
             omit_image = self._read_detection_image(omit_files[0])
             if omit_image is not None:
                 omit_overexposed, _mean, _ratio, omit_overexposure_info = \
-                    self.check_omit_overexposure(omit_image)
+                    self.check_omit_overexposure(
+                        omit_image, image_files=image_files, product_resolution=product_resolution,
+                    )
 
         omit_vis = None
         if omit_image is not None:
@@ -9544,7 +9646,9 @@ class CAPIInferencer:
 
         with timed_inference_stage("omit_read_check"):
             omit_vis, omit_overexposed, omit_overexposure_info, omit_image = \
-                self._load_omit_context(panel_path, image_files=image_files)
+                self._load_omit_context(
+                    panel_path, image_files=image_files, product_resolution=product_resolution,
+                )
         if omit_image is not None:
             tag = "OVEREXPOSED" if omit_overexposed else "OK"
             print(f"[v2] OMIT {tag}: {omit_overexposure_info}")
