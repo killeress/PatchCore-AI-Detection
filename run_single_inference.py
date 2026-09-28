@@ -284,7 +284,9 @@ def run_single_inference(
         if omit_image is not None:
             print(f"✅ OMIT/PINIGBI 圖片已載入: {omit_file.name}")
             # 過曝檢查
-            is_overexposed, oe_mean, oe_ratio, oe_detail = inferencer.check_omit_overexposure(omit_image)
+            is_overexposed, oe_mean, oe_ratio, oe_detail = inferencer.check_omit_overexposure(
+                omit_image, image_files=inferencer._list_panel_image_files(image_path.parent),
+            )
             if is_overexposed:
                 print(f"⚠️ OMIT 過曝: {oe_detail}")
                 print("   → 灰塵檢測將被跳過")

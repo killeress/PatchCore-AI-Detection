@@ -73,7 +73,8 @@ class _DiagnosticInferencer:
         tile.score_edge_margin_sides = ""
         return 1.0, anomaly
 
-    def check_omit_overexposure(self, _omit_image):
+    def check_omit_overexposure(self, _omit_image, **kwargs):
+        self.omit_exposure_kwargs = kwargs
         return False, 80.0, 0.01, "正常"
 
     def _check_dust_or_scratch_feature_with_context(
@@ -193,6 +194,10 @@ def test_coord_debug_uses_station_omit_for_dust_diagnostics(
         assert response["dust_analysis"]["dust_filter_result"] == "NO_OMIT"
         assert response["final_judgment"] == "NG"
         return
+
+    assert image_path in handler.inferencer.omit_exposure_kwargs["image_files"]
+    assert handler.inferencer.omit_exposure_kwargs["panel_polygon"] is None
+    assert handler.inferencer.omit_exposure_kwargs["product_resolution"] == (128, 128)
 
     assert response["dust_analysis"]["omit_name"] == omit_name
     assert response["dust_analysis"]["available"] is True

@@ -9769,6 +9769,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         raw_bounds,
         edge_light_leak_config=None,
         edge_light_leak_force_debug=False,
+        omit_reference_files=None,
     ):
         """
         Reproduce the production OMIT/per-region/two-stage path for coordinate debug.
@@ -9954,7 +9955,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if callable(overexposure_check):
             try:
                 is_overexposed, _mean, _ratio, overexposure_detail = \
-                    overexposure_check(omit_image)
+                    overexposure_check(
+                        omit_image,
+                        panel_polygon=panel_polygon if omit_reference_files is None else None,
+                        image_files=omit_reference_files,
+                        product_resolution=product_resolution,
+                    )
             except Exception as exc:
                 logger.warning("[DEBUG-COORD] OMIT overexposure check failed: %s", exc)
                 is_overexposed = False
@@ -10783,6 +10789,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     edge_light_leak_force_debug=(
                         edge_light_leak_overrides is not None
                     ),
+                    omit_reference_files=list(image_path.parent.iterdir()),
                 )
             dust_analysis["omit_name"] = omit_name
 

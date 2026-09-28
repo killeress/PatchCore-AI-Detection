@@ -234,7 +234,7 @@ def test_debug_dust_pipeline_rescues_only_bright_edge_light_leak(dark):
     inferencer.config.dust_two_stage_enabled = False
     inferencer.edge_inspector = SimpleNamespace(config=_light_leak_config())
     inferencer.check_omit_overexposure = (
-        lambda _image: (False, 80.0, 0.0, "正常")
+        lambda _image, **kwargs: (False, 80.0, 0.0, "正常")
     )
     inferencer._check_dust_or_scratch_feature_with_context = (
         lambda *args, **kwargs: (True, dust.copy(), 0.01, "OMIT dust")
@@ -392,7 +392,7 @@ def test_debug_edge_light_leak_tab_forces_diagnostic_with_request_config():
     inferencer.config.dust_two_stage_enabled = False
     inferencer.edge_inspector = SimpleNamespace(config=formal_config)
     inferencer.check_omit_overexposure = (
-        lambda _image: (False, 80.0, 0.0, "正常")
+        lambda _image, **kwargs: (False, 80.0, 0.0, "正常")
     )
     inferencer._check_dust_or_scratch_feature_with_context = (
         lambda *args, **kwargs: (False, dust.copy(), 0.0, "no dust")
