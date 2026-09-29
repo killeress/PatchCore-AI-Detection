@@ -222,7 +222,13 @@
         activeProcessZone = availableZones.has("capi")
             ? "capi"
             : (availableZones.values().next().value || "capi");
-        tabs.hidden = availableZones.size < 2;
+        // 列永遠顯示（右側有「即時／歷史班報」模式切換）；
+        // 僅類別按鈕組維持既有行為：單一製程類別時隱藏
+        tabs.hidden = false;
+        const zoneList = document.getElementById("process-tab-list");
+        if (zoneList) {
+            zoneList.hidden = availableZones.size < 2;
+        }
         for (const tab of tabs.querySelectorAll(".process-tab")) {
             tab.addEventListener("click", () => selectProcessZone(tab.dataset.processZone));
         }
@@ -248,9 +254,11 @@
         }
         updateSummary();
         renderAlerts();
-        // 歷史班報模式下切換製程類別：結果表跟著重查
+        // 歷史班報模式下切換製程類別：結果表與趨勢圖跟著重查
         if (activeMode === "history") {
             refreshHistoryReport();
+            initializeTrendLines();
+            refreshTrend();
         }
     }
 
@@ -289,6 +297,9 @@
             nextRefreshAt = null;
             initializeHistoryMode();
             refreshHistoryReport();
+            initializeTrend();
+            initializeTrendLines();
+            refreshTrend();
         } else {
             refreshAllLines();
         }
@@ -609,6 +620,335 @@
         } finally {
             clearTimeout(timeoutId);
         }
+    }
+
+    // ── 歷史趨勢 ──────────────────────────────────────────
+
+    const TREND_METRICS = Object.freeze({
+        aoi: { label: "AOI 排片率", unit: "%" },
+        ai: { label: "AI 排片率", unit: "%" },
+        total: { label: "當班投入量", unit: "片" }
+    });
+    function trendLineColor(index) {
+        // 黃金角色相遞增（137.508°）：線數無上限，相鄰線體顏色仍有明顯差異
+        const hue = (index * 137.508) % 360;
+        return `hsl(${Math.round(hue)}, 65%, 45%)`;
+    }
+
+    const trendState = {
+        initialized: false,
+        shiftFilter: "all",
+        metric: "aoi",
+        selectedLines: new Set(),
+        lineData: new Map(),
+        chart: null
+    };
+
+    function initializeTrend() {
+        if (trendState.initialized) {
+            return;
+        }
+        trendState.initialized = true;
+        const fromInput = document.getElementById("trend-from");
+        const toInput = document.getElementById("trend-to");
+        if (!fromInput || !toInput) {
+            return;
+        }
+        const now = new Date();
+        const yesterday = new Date(now);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const weekAgo = new Date(now);
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        const minDate = new Date(now);
+        minDate.setDate(minDate.getDate() - HISTORY_MAX_LOOKBACK_DAYS);
+        fromInput.min = toInput.min = formatDateValue(minDate);
+        fromInput.max = toInput.max = formatDateValue(now);
+        fromInput.value = formatDateValue(weekAgo);
+        toInput.value = formatDateValue(yesterday);
+        fromInput.addEventListener("change", refreshTrend);
+        toInput.addEventListener("change", refreshTrend);
+
+        const bindTabs = (selector, datasetKey, stateKey) => {
+            const buttons = Array.from(document.querySelectorAll(selector));
+            for (const btn of buttons) {
+                btn.addEventListener("click", () => {
+                    trendState[stateKey] = btn.dataset[datasetKey];
+                    for (const other of buttons) {
+                        other.setAttribute("aria-pressed", String(other === btn));
+                    }
+                    renderTrendChart();
+                });
+            }
+        };
+        bindTabs("#trend-shift-tabs [data-shift-filter]", "shiftFilter", "shiftFilter");
+        bindTabs("#trend-metric-tabs [data-metric]", "metric", "metric");
+    }
+
+    function initializeTrendLines() {
+        const container = document.getElementById("trend-lines");
+        if (!container) {
+            return;
+        }
+        container.innerHTML = "";
+        const lines = historyLinesForActiveZone();
+        trendState.selectedLines = new Set(lines.map((line) => line.id));
+        lines.forEach((line, index) => {
+            const chip = document.createElement("label");
+            chip.className = "trend-line-chip";
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.checked = true;
+            checkbox.addEventListener("change", () => {
+                if (checkbox.checked) {
+                    trendState.selectedLines.add(line.id);
+                } else {
+                    trendState.selectedLines.delete(line.id);
+                }
+                renderTrendChart();
+            });
+            const dot = document.createElement("span");
+            dot.className = "trend-line-dot";
+            dot.style.background = trendLineColor(index);
+            const name = document.createElement("span");
+            name.textContent = line.line || "未設定線體";
+            chip.append(checkbox, dot, name);
+            container.appendChild(chip);
+        });
+    }
+
+    async function refreshTrend() {
+        const fromInput = document.getElementById("trend-from");
+        const toInput = document.getElementById("trend-to");
+        if (!fromInput || !toInput) {
+            return;
+        }
+        const from = fromInput.value;
+        const to = toInput.value;
+        const lines = historyLinesForActiveZone();
+        trendState.lineData = new Map(
+            lines.map((line) => [line.id, { status: "loading", shifts: [] }])
+        );
+        renderTrendIssues(lines);
+        if (!from || !to || from > to) {
+            showTrendEmpty("請選擇有效的起訖日期。");
+            return;
+        }
+        // 歷史資料是靜態的：全部線體查完再畫一次，不逐線重繪
+        showTrendEmpty("查詢中…");
+
+        await Promise.all(lines.map(async (line) => {
+            const entry = trendState.lineData.get(line.id);
+            const baseUrl = deriveBaseUrl(line.apiUrl);
+            if (!baseUrl) {
+                entry.status = "offline";
+                return;
+            }
+            const controller = new AbortController();
+            const timeoutId = window.setTimeout(
+                () => controller.abort(),
+                config.requestTimeoutSeconds * 1000
+            );
+            try {
+                const response = await fetch(
+                    `${baseUrl}api/shift_report/series?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+                    {
+                        method: "GET",
+                        headers: { "Accept": "application/json" },
+                        cache: "no-store",
+                        credentials: "omit",
+                        signal: controller.signal
+                    }
+                );
+                if (response.status === 404) {
+                    entry.status = "outdated";
+                } else if (!response.ok) {
+                    entry.status = "offline";
+                } else {
+                    const payload = await response.json();
+                    entry.shifts = Array.isArray(payload && payload.shifts)
+                        ? payload.shifts
+                        : [];
+                    entry.status = "ok";
+                }
+            } catch (_error) {
+                // 舊版 404 無 CORS 標頭時讀不到狀態碼，補探 /api/status 區分
+                const reachable = await probeLineReachable(line);
+                entry.status = reachable ? "outdated" : "offline";
+            } finally {
+                clearTimeout(timeoutId);
+            }
+            // 有資料的線一回覆就先畫（不等離線線體的逾時）；失敗線只更新提示清單
+            if (entry.status === "ok") {
+                renderTrendChart();
+            }
+            renderTrendIssues(lines);
+        }));
+        renderTrendChart();
+        renderTrendIssues(lines);
+    }
+
+    function renderTrendIssues(lines) {
+        const list = document.getElementById("trend-issues");
+        if (!list) {
+            return;
+        }
+        list.innerHTML = "";
+        for (const line of lines) {
+            const entry = trendState.lineData.get(line.id);
+            if (!entry || entry.status === "ok" || entry.status === "loading") {
+                continue;
+            }
+            const item = document.createElement("li");
+            const message = entry.status === "outdated"
+                ? "未更新，請更新線體程式"
+                : "離線無法查詢";
+            item.textContent = `${line.line || line.id}：${message}`;
+            list.appendChild(item);
+        }
+    }
+
+    function showTrendEmpty(message) {
+        const canvas = document.getElementById("trend-canvas");
+        const emptyElement = document.getElementById("trend-empty");
+        if (emptyElement) {
+            emptyElement.textContent = message;
+            emptyElement.hidden = false;
+        }
+        if (canvas) {
+            canvas.hidden = true;
+        }
+        if (trendState.chart) {
+            trendState.chart.destroy();
+            trendState.chart = null;
+        }
+    }
+
+    function trendMetricValue(shiftEntry, metric) {
+        const total = Number(shiftEntry.total) || 0;
+        if (metric === "total") {
+            return total;
+        }
+        if (total <= 0) {
+            return null; // 排片率無定義：該點斷開不畫 0%
+        }
+        const ng = metric === "aoi"
+            ? Number(shiftEntry.aoi_ng_count) || 0
+            : Number(shiftEntry.ng_count) || 0;
+        return Math.round((ng / total) * 1000) / 10;
+    }
+
+    function buildTrendPoints(entries, shiftFilter, metric) {
+        const filtered = entries.filter(
+            (entry) => shiftFilter === "all" || entry.shift === shiftFilter
+        );
+        return filtered.map((entry) => ({
+            key: `${entry.date}|${entry.shift}`,
+            label: `${entry.date.slice(5).replace("-", "/")} ${
+                entry.shift === "day" ? "白班" : "晚班"
+            }`,
+            value: trendMetricValue(entry, metric)
+        }));
+    }
+
+    function renderTrendChart() {
+        const canvas = document.getElementById("trend-canvas");
+        const emptyElement = document.getElementById("trend-empty");
+        if (!canvas || !emptyElement) {
+            return;
+        }
+        if (typeof Chart === "undefined") {
+            showTrendEmpty("圖表元件載入失敗，請重新整理頁面。");
+            return;
+        }
+        const metric = TREND_METRICS[trendState.metric] || TREND_METRICS.aoi;
+        const lines = historyLinesForActiveZone();
+        const active = lines.filter(
+            (line) =>
+                trendState.selectedLines.has(line.id) &&
+                (trendState.lineData.get(line.id) || {}).status === "ok"
+        );
+        const reference = active
+            .map((line) => trendState.lineData.get(line.id).shifts)
+            .find((shifts) => shifts.length > 0);
+        if (!reference) {
+            showTrendEmpty("查無資料：所選區間與線體沒有任何已結束班別的紀錄。");
+            return;
+        }
+
+        const points = active.map((line) => {
+            const entry = trendState.lineData.get(line.id);
+            const zoneIndex = lines.indexOf(line);
+            return {
+                line,
+                color: trendLineColor(zoneIndex),
+                points: buildTrendPoints(
+                    entry.shifts, trendState.shiftFilter, trendState.metric
+                )
+            };
+        });
+        const referencePoints = buildTrendPoints(
+            reference, trendState.shiftFilter, trendState.metric
+        );
+        const labels = referencePoints.map((point) => point.label);
+        const keys = referencePoints.map((point) => point.key);
+
+        const datasets = points.map(({ line, color, points: linePoints }) => {
+            const valueByKey = new Map(
+                linePoints.map((point) => [point.key, point.value])
+            );
+            return {
+                label: line.line || line.id,
+                data: keys.map((key) => valueByKey.has(key) ? valueByKey.get(key) : null),
+                borderColor: color,
+                backgroundColor: color,
+                spanGaps: false,
+                tension: 0.2,
+                pointRadius: 3
+            };
+        });
+
+        if (!datasets.some((dataset) => dataset.data.some((value) => value !== null))) {
+            showTrendEmpty("查無資料：所選區間與線體沒有任何已結束班別的紀錄。");
+            return;
+        }
+
+        canvas.hidden = false;
+        emptyElement.hidden = true;
+        const formatValue = (value) =>
+            metric.unit === "%" ? `${Number(value).toFixed(1)}%` : `${value} 片`;
+        if (trendState.chart) {
+            trendState.chart.destroy();
+            trendState.chart = null;
+        }
+        trendState.chart = new Chart(canvas, {
+            type: "line",
+            data: { labels, datasets },
+            options: {
+                // 歷史資料為靜態內容，關閉動畫避免圖面一直動
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: { display: true, position: "bottom" },
+                    tooltip: {
+                        callbacks: {
+                            label: (context) =>
+                                ` ${context.dataset.label}：${formatValue(context.parsed.y)}`
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        title: { display: true, text: "時間" }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        title: { display: true, text: `${metric.label}（${metric.unit}）` }
+                    }
+                }
+            }
+        });
     }
 
     function createOverviewRow(line) {

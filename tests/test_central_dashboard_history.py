@@ -17,6 +17,18 @@ def test_history_mode_tab_and_section_exist():
     assert 'id="history-section"' in index_html
 
 
+def test_mode_tabs_merged_into_process_tabs_row():
+    """模式切換併入製程類別列右側，不再有獨立的看板模式操作列。"""
+    index_html = _read("index.html")
+    styles = _read("styles.css")
+    # 獨立操作列已移除（mode-tabs 不再是獨立 bar）
+    assert '<div id="mode-tabs" class="mode-tabs"' not in index_html
+    # mode-tabs 位於 process-tabs 之後（同一列內右側）
+    assert index_html.index('id="process-tabs"') < index_html.index('id="mode-tabs"')
+    # 右側靠右對齊的樣式
+    assert ".mode-tab-list" in styles
+
+
 def test_history_query_bar_elements():
     index_html = _read("index.html")
     assert 'id="history-date"' in index_html
