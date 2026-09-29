@@ -61,26 +61,102 @@ def test_real_omit_detector_reused_without_model_load(tmp_path):
     side,front=write_pair(tmp_path)
     omit=np.zeros((500,700),np.uint8)
     cv2.circle(omit,(350,250),12,230,-1)
-    cv2.imwrite(str(tmp_path/'PINIGBI _153501.tif'),omit)
+    cv2.imwrite(str(tmp_path/'SPINIGBI _153501.tif'),omit)
     config=CAPIConfig()
     context=snapshot_context(config,None,{'model_id':'GN140JCAL010S'})
     raw,detector,info=load_omit_evidence(tmp_path,side,context,False)
     assert raw is not None and callable(detector),info
-    assert info['image']=='PINIGBI _153501.tif'
+    assert info['image']=='SPINIGBI _153501.tif'
     payload=inspect_side_white_image(side,front,tmp_path/'out',context=context,omit_image=raw,dust_detector=detector,omit_info=info)
     assert payload['status']=='CANDIDATES',payload.get('reason')
     assert all(c['dust']['status']!='unavailable' for c in payload['candidates'])
     json.dumps(payload)
 
 
+@pytest.mark.parametrize('filename', ['SPINIGBI _155809.tif', 'spinigbi_155809.TIFF', 'SPINIGBI155809.tif'])
+def test_side_omit_filename_formats_and_front_omit_ignored(tmp_path, filename):
+    side, _ = write_pair(tmp_path)
+    side = side.rename(tmp_path / 'SW0F00000_155809.tif')
+    omit = np.full((500, 700), 15, np.uint8)
+    cv2.imwrite(str(tmp_path / filename), omit)
+    cv2.imwrite(str(tmp_path / 'PINIGBI _155809.tif'), np.full_like(omit, 255))
+    cv2.imwrite(str(tmp_path / 'SPINIGBI _155808.tif'), np.full_like(omit, 255))
+    raw, detector, info = load_omit_evidence(tmp_path, side, {'config': CAPIConfig()}, False)
+    assert info['image'] == filename and info['pairing'] == 'exact_acquisition'
+    assert info['coordinate_space'] == 'side_detection_pixels'
+    assert callable(detector) and np.array_equal(raw, omit)
+
+
+def test_side_omit_unique_timestamp_and_glass_prefix(tmp_path):
+    side, _ = write_pair(tmp_path)
+    side = side.rename(tmp_path / 'GLASS_SW0F00000_153501.tif')
+    omit = np.full((500, 700), 15, np.uint8)
+    cv2.imwrite(str(tmp_path / 'GLASS_SPINIGBI _153502.tif'), omit)
+    cv2.imwrite(str(tmp_path / 'OTHER_SPINIGBI _153501.tif'), omit)
+    _, detector, info = load_omit_evidence(tmp_path, side, {'config': CAPIConfig()}, False)
+    assert callable(detector) and info['image'] == 'GLASS_SPINIGBI _153502.tif'
+    assert info['pairing'] == 'unique_side_omit'
+
+
+def test_front_omit_alone_is_not_used_for_side(tmp_path):
+    side, _ = write_pair(tmp_path)
+    cv2.imwrite(str(tmp_path / 'PINIGBI _153501.tif'), np.zeros((500, 700), np.uint8))
+    raw, detector, info = load_omit_evidence(tmp_path, side, {'config': CAPIConfig()}, False)
+    assert raw is None and detector is None and 'SPINIGBI' in info['reason']
+
+
+@pytest.mark.parametrize('rotated', [False, True])
+def test_side_omit_without_front_uses_same_rotation_and_generates_evidence(tmp_path, rotated):
+    side, front = write_pair(tmp_path)
+    front.unlink()
+    # Asymmetric position verifies that both images rotate together.
+    source = cv2.imread(str(side), cv2.IMREAD_GRAYSCALE)
+    source[230:271, 330:371] = 90
+    cv2.circle(source, (240, 180), 8, 125, -1)
+    cv2.imwrite(str(side), source)
+    omit = np.zeros_like(source)
+    cv2.circle(omit, (240, 180), 12, 230, -1)
+    cv2.imwrite(str(tmp_path / 'SPINIGBI _153501.tif'), omit)
+    context = {'config': CAPIConfig()}
+    raw, detector, info = load_omit_evidence(tmp_path, side, context, rotated)
+    expected = cv2.rotate(omit, cv2.ROTATE_180) if rotated else omit
+    assert np.array_equal(raw, expected)
+    payload = inspect_side_white_image(side, None, tmp_path / 'out', rotate_180=rotated,
+                                      context=context, omit_image=raw, dust_detector=detector, omit_info=info)
+    assert payload['mapping']['status'] == 'unavailable'
+    assert payload['candidates']
+    c = min(payload['candidates'], key=lambda c: np.linalg.norm(np.array(c['side_raw_xy']) - [240, 180]))
+    assert c['dust']['overlap_ratio'] > .8, c
+    assert c['crop_bounds']['omit'] == c['crop_bounds']['side']
+    assert Path(payload['artifacts'][c['composite_key']]).is_file()
+    CAPIWebHandler.init_jinja()
+    html = CAPIWebHandler.jinja_env.get_template('_side_white_result.html').render(
+        detail={'side_white_result': {'id': 1, 'status': payload['status'], 'payload': payload}})
+    assert '側拍 OMIT（SPINIGBI）' in html and '3 側拍 px' in html
+
+
+def test_side_omit_overexposure_uses_side_panel_and_shape(tmp_path):
+    side, _ = write_pair(tmp_path)
+    # Bright external fixture must not invalidate a dark side-panel OMIT.
+    omit = np.full((500, 700), 255, np.uint8)
+    omit[45:456, 45:656] = 10
+    path = tmp_path / 'SPINIGBI _153501.tif'
+    cv2.imwrite(str(path), omit)
+    _, detector, info = load_omit_evidence(tmp_path, side, {'config': CAPIConfig()}, False)
+    assert callable(detector) and 'Scope:product_polygon' in info['exposure_detail']
+    cv2.imwrite(str(path), np.zeros((250, 350), np.uint8))
+    raw, detector, info = load_omit_evidence(tmp_path, side, {'config': CAPIConfig()}, False)
+    assert raw is not None and detector is None and '尺寸不一致' in info['reason']
+
+
 def test_omit_overexposure_and_ambiguous_acquisition_disable_suppression(tmp_path):
     side,_=write_pair(tmp_path)
-    cv2.imwrite(str(tmp_path/'PINIGBI _153501.tif'),np.full((500,700),255,np.uint8))
+    cv2.imwrite(str(tmp_path/'SPINIGBI _153501.tif'),np.full((500,700),255,np.uint8))
     context=snapshot_context(CAPIConfig(),None,{'model_id':'GN140JCAL010S'})
     raw,detector,info=load_omit_evidence(tmp_path,side,context,False)
     assert raw is not None and detector is None and info['status']=='unavailable'
-    (tmp_path/'PINIGBI _153501.tif').rename(tmp_path/'PINIGBI _153500.tif')
-    cv2.imwrite(str(tmp_path/'PINIGBI _153502.tif'),np.zeros((500,700),np.uint8))
+    (tmp_path/'SPINIGBI _153501.tif').rename(tmp_path/'SPINIGBI _153500.tif')
+    cv2.imwrite(str(tmp_path/'SPINIGBI _153502.tif'),np.zeros((500,700),np.uint8))
     raw,detector,info=load_omit_evidence(tmp_path,side,context,False)
     assert raw is None and detector is None and info['status']=='unavailable'
 

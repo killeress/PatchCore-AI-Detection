@@ -3,6 +3,8 @@
 {% if sw %}
 {% include "_side_white_styles.html" %}
 {% set p = sw.payload %}
+{% set side_omit = p.get('omit',{}).get('coordinate_space') == 'side_detection_pixels' %}
+{% set omit_label = '側拍 OMIT（SPINIGBI）' if side_omit else 'OMIT' %}
 {% set statuses = {'CANDIDATES':'保留可疑區域', 'FILTERED':'候選已排除或屬於炸彈', 'NO_CANDIDATES':'未發現候選（非 OK 判定）', 'NO_IMAGE':'無側拍白畫面', 'ERROR':'檢測失敗'} %}
 {% set kinds = {'bright_dark_pair':'亮暗成對', 'bright_spot':'亮斑', 'dark_spot':'暗斑', 'line':'細長紋路'} %}
 {% set dispositions = {'retained':'保留', 'excluded':'不檢測區域', 'dust_suppressed':'灰塵屏蔽'} %}
@@ -19,9 +21,9 @@
     <p class="sw-note">{{ p.get('mapping',{}).get('reason','') }}。正拍僅供位置對照，正拍看不到不會否決側拍候選。</p>
     {% if p.get('parameters') %}
     <p class="sw-note">當時參數：最低局部反差 {{ p.parameters.min_contrast_gray }} · 雜訊門檻倍率 {{ p.parameters.noise_sigma_factor }} · 最小候選面積 {{ p.parameters.min_area_px }} 個側拍像素 · 邊緣排除寬度 {{ p.parameters.edge_margin_px }} 側拍 px{% if p.get('threshold_gray') is not none %}；本次實際門檻 {{ p.threshold_gray }} 灰階。{% endif %}</p>
-    {% if 'dust_mode' in p.parameters %}<p class="sw-note">灰塵模式：{{ {'off':'關閉','observe':'標示疑似灰塵','suppress':'啟用屏蔽'}.get(p.parameters.dust_mode) }} · 重疊門檻 {{ p.parameters.dust_overlap_ratio }} · 灰塵比對外擴 {{ p.parameters.mapping_margin_px }} 正拍 px · 炸彈容許誤差 {{ p.parameters.bomb_tolerance_product_px }} 產品 px · 局部強制檢測 {{ '啟用' if p.parameters.bomb_force_detection_enabled else '關閉' }}</p>{% endif %}
+    {% if 'dust_mode' in p.parameters %}<p class="sw-note">灰塵模式：{{ {'off':'關閉','observe':'標示疑似灰塵','suppress':'啟用屏蔽'}.get(p.parameters.dust_mode) }} · 重疊門檻 {{ p.parameters.dust_overlap_ratio }} · 灰塵比對外擴 {{ p.parameters.mapping_margin_px }} {{ '側拍' if side_omit else '正拍' }} px · 炸彈容許誤差 {{ p.parameters.bomb_tolerance_product_px }} 產品 px · 局部強制檢測 {{ '啟用' if p.parameters.bomb_force_detection_enabled else '關閉' }}</p>{% endif %}
     {% else %}<p class="sw-note">此筆未保存參數快照。</p>{% endif %}
-    {% if p.get('omit') %}<p class="sw-note">OMIT：{{ p.omit.get('image','無可用影像') }} · {{ p.omit.get('reason','') }}</p>{% endif %}
+    {% if p.get('omit') %}<p class="sw-note">{{ omit_label }}：{{ p.omit.get('image','無可用影像') }} · {{ p.omit.get('reason','') }}</p>{% endif %}
     {% if p.get('evidence_context',{}).get('zone_warning') %}<p class="sw-note">{{ p.evidence_context.zone_warning }}</p>{% endif %}
     {% if p.get('exclusion_status') == 'unavailable' %}<p class="sw-note">不檢測區域無法映射，候選保留。</p>{% endif %}
     <p class="sw-note">黃框為候選；藍色為排除區域／MASK；紫色為炸彈位置容許範圍。表格座標為原始 TIF：左上角 (0,0)，X 向右、Y 向下。{% if p.get('rotation_applied') %}預覽已旋轉 180°。{% endif %}</p>
@@ -33,6 +35,7 @@
         {% endfor %}
     </div>
     {% if p.get('artifacts',{}).get('residual') %}<details><summary>局部亮暗差（CV 背景差分）</summary><a href="/api/side-white/image?id={{ sw.id }}&amp;kind=residual" target="_blank" rel="noopener">開啟局部亮暗差圖</a></details>{% endif %}
+    {% if p.get('bomb_source_prefix') %}<p class="sw-note">炸彈比對範圍：僅正拍 {{ p.bomb_source_prefix }}；其他畫面炸彈不列入側拍結果。</p>{% endif %}
     {% if p.get('bombs') %}
     <div class="sw-scroll"><table class="sw-table"><thead><tr><th>炸彈</th><th>來源／類型</th><th>正拍產品座標</th><th>狀態／候選</th><th>說明</th></tr></thead><tbody>
     {% for b in p.bombs %}<tr><td>B{{ b.id }} {{ b.defect_code }}</td><td>{{ b.image_prefix }}／{{ '點' if b.type == 'point' else '線' }}</td><td>{{ b.product_coordinates }}</td><td>{{ bomb_states.get(b.status,b.status) }} {{ b.candidate_ids }}</td><td>{{ b.reason }}{% if b.overlaps_exclusion %} · 不檢測區重疊{% endif %}{% if b.overlaps_dust %} · 灰塵重疊{% endif %}</td></tr>{% endfor %}
@@ -44,7 +47,7 @@
     </tbody></table></div>
     {% for c in p.candidates %}
     {% if c.get('composite_key') %}<details class="sw-candidate"><summary>#{{ c.id }} · {{ kinds.get(c.kind,c.kind) }} · {{ dispositions.get(c.disposition,c.disposition) }} · 查看同區域組合圖</summary>
-        <p class="sw-note">{{ dust_states.get(c.get('dust',{}).get('status',''),'') }} · {{ c.get('dust',{}).get('reason','') }}。排除區域：{{ c.get("excluded_zone_names",[])|join("、") or "無" }}。左至右：側拍、正拍對照、OMIT、OMIT 表面特徵遮罩；側拍藍色為不檢測區，綠色輪廓為處理後保留範圍。</p>
+        <p class="sw-note">{{ dust_states.get(c.get('dust',{}).get('status',''),'') }} · {{ c.get('dust',{}).get('reason','') }}。排除區域：{{ c.get("excluded_zone_names",[])|join("、") or "無" }}。左至右：側拍、正拍對照、{{ omit_label }}、{{ omit_label }} 表面特徵遮罩；側拍藍色為不檢測區，綠色輪廓為處理後保留範圍。</p>
         <a href="/api/side-white/image?id={{ sw.id }}&amp;kind={{ c.composite_key }}" target="_blank" rel="noopener"><img class="sw-composite" loading="lazy" src="/api/side-white/image?id={{ sw.id }}&amp;kind={{ c.composite_key }}" alt="候選 {{ c.id }} 同區域側拍、正拍、OMIT 與遮罩" onerror="this.replaceWith(document.createTextNode('組合圖已過期或遺失'))"></a>
     </details>{% endif %}{% endfor %}
     {% endif %}
