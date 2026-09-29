@@ -34,6 +34,7 @@ import socket
 import select
 import threading
 import contextvars
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import json
 from capi_tile_diagnostics import tile_decision_context
@@ -2998,6 +2999,8 @@ class CAPIServer:
         """Queue result persistence, falling back when the server is shutting down."""
         if kwargs.get("side_white_params") is not None:
             kwargs["side_white_params"] = dict(kwargs["side_white_params"])
+        if kwargs.get("side_white_context") is not None:
+            kwargs["side_white_context"] = copy.deepcopy(kwargs["side_white_context"])
         with self._async_executor_lock:
             if self._async_executor_shutdown:
                 should_save_sync = True
@@ -3259,6 +3262,7 @@ class CAPIServer:
                         side_white_enabled=bool(getattr(request_config, "side_white_detection_enabled", False)),
                         side_white_rotate_180=bool(getattr(request_config, "inference_rotate_180_enabled", False)),
                         side_white_params=getattr(request_config, "side_white_detection_params", None),
+                        side_white_context=self._snapshot_side_white_context(parsed, request_config),
                     )
 
                 except ProtocolError as e:
@@ -3752,6 +3756,7 @@ class CAPIServer:
         side_white_enabled: bool = False,
         side_white_rotate_180: bool = False,
         side_white_params: Optional[Dict] = None,
+        side_white_context: Optional[Dict] = None,
     ):
         """
         非同步儲存 Heatmap 和 DB 記錄（在背景執行緒中執行）
@@ -3923,7 +3928,8 @@ class CAPIServer:
                 )
 
             if side_white_enabled:
-                self._save_side_white_review(record_id, parsed, heatmap_info, side_white_rotate_180, side_white_params)
+                self._save_side_white_result(record_id, parsed, heatmap_info, side_white_rotate_180,
+                                             side_white_params, side_white_context)
 
             dup_tag = " [DUPLICATE]" if is_duplicate else ""
             save_time = time.time() - save_start
@@ -3933,9 +3939,26 @@ class CAPIServer:
             logger.error(f"[{client_addr}] Async save failed: {e}", exc_info=True)
 
 
-    def _save_side_white_review(self, record_id, parsed, heatmap_info, rotate_180, params=None):
+    def _snapshot_side_white_context(self, parsed, config):
+        if not getattr(config, "side_white_detection_enabled", False):
+            return None
+        from capi_side_white import snapshot_context
+        warning = ""
+        try:
+            inferencer = self._get_or_create_inferencer(parsed.get("model_id", ""))
+            edge_config = getattr(getattr(inferencer, "edge_inspector", None), "config", None)
+        except Exception as exc:
+            edge_config = None
+            warning = f"不檢測區域快照無法取得：{exc}"
+        context = snapshot_context(config, edge_config, parsed)
+        if warning:
+            context["zone_warning"] = warning
+        context["station_profile"] = getattr(self, "station_profile", "capi")
+        return context
+
+    def _save_side_white_result(self, record_id, parsed, heatmap_info, rotate_180, params=None, context=None):
         """Run after the formal response; side results never enter ImageResult aggregation."""
-        from capi_side_white import ALGORITHM, find_side_white_pair, inspect_side_white_image
+        from capi_side_white import ALGORITHM, find_side_white_pair, inspect_side_white_image, load_omit_evidence, _bomb_geometry
         from capi_config import normalize_side_white_params
 
         output_dir = None
@@ -3945,6 +3968,8 @@ class CAPIServer:
         try:
             params = normalize_side_white_params(params)
             payload["parameters"] = dict(params)
+            payload["evidence_context"] = {k: v for k, v in (context or {}).items() if k != "config"}
+            payload["bombs"], _ = _bomb_geometry(context or {}, None, None, (1, 1), params)
             folder = Path(resolve_unc_path(parsed["image_dir"], self.path_mapping))
             side, front = find_side_white_pair(folder)
             if side is not None:
@@ -3952,7 +3977,14 @@ class CAPIServer:
                     output_dir = Path(heatmap_info["dir"]) / f"side_white_{record_id}"
                 else:
                     output_dir = self.heatmap_manager.base_dir / datetime.now().strftime("%Y%m%d") / f"side_white_{record_id}"
-                payload = inspect_side_white_image(side, front, output_dir, rotate_180=rotate_180, params=params)
+                try:
+                    omit, detector, omit_info = load_omit_evidence(folder, side, context or {}, rotate_180)
+                except Exception as exc:
+                    omit, detector = None, None
+                    omit_info = {"status": "unavailable", "reason": f"OMIT 載入失敗：{exc}"}
+                payload = inspect_side_white_image(side, front, output_dir, rotate_180=rotate_180,
+                                                   params=params, context=context, omit_image=omit,
+                                                   dust_detector=detector, omit_info=omit_info)
         except Exception as exc:
             logger.warning("[SIDE_WHITE] Inspection failed for record=%s: %s", record_id, exc, exc_info=True)
             payload.update(status="ERROR", reason=str(exc))
@@ -3961,7 +3993,7 @@ class CAPIServer:
             logger.info("[SIDE_WHITE] record=%s status=%s candidates=%s TT=%sms formal_judgment=unchanged",
                         record_id, payload["status"], len(payload["candidates"]), payload.get("processing_ms", 0))
         except Exception as exc:
-            logger.warning("[SIDE_WHITE] Review save failed for record=%s: %s", record_id, exc, exc_info=True)
+            logger.warning("[SIDE_WHITE] Result save failed for record=%s: %s", record_id, exc, exc_info=True)
 
     def _save_error_record(
         self,

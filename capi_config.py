@@ -18,19 +18,27 @@ from capi_image_naming import canonical_image_prefix
 
 
 def normalize_side_white_params(value=None) -> Dict[str, Any]:
-    """Validate the four review-only inspection controls and fill older config defaults."""
+    """Validate observation-only inspection controls and fill older config defaults."""
     defaults = {"min_contrast_gray": 2.2, "noise_sigma_factor": 4.5,
-                "min_area_px": 20, "edge_margin_px": 16}
+                "min_area_px": 20, "edge_margin_px": 16,
+                "apply_exclusions": True, "dust_mode": "observe", "dust_overlap_ratio": .8,
+                "mapping_margin_px": 3, "crop_padding_px": 32,
+                "bomb_check_enabled": True, "bomb_tolerance_product_px": 50,
+                "bomb_force_detection_enabled": False}
     if value is None:
         value = {}
     if not isinstance(value, dict) or set(value) - defaults.keys():
-        raise ValueError("側拍參數必須是包含四項已知設定的物件")
+        raise ValueError("側拍參數必須是包含已知設定的物件")
     result = {**defaults, **value}
     for key, label, low, high, integer in (
         ("min_contrast_gray", "最低局部反差", .1, 255, False),
         ("noise_sigma_factor", "雜訊門檻倍率", .1, 100, False),
         ("min_area_px", "最小候選面積", 1, 1000000, True),
         ("edge_margin_px", "邊緣排除寬度", 0, 512, True),
+        ("dust_overlap_ratio", "灰塵重疊門檻", .01, 1, False),
+        ("mapping_margin_px", "灰塵比對外擴", 0, 32, True),
+        ("crop_padding_px", "組合圖周邊範圍", 0, 512, True),
+        ("bomb_tolerance_product_px", "炸彈容許誤差", 0, 500, True),
     ):
         number = result[key]
         if (isinstance(number, bool) or not isinstance(number, (int, float))
@@ -39,6 +47,11 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
             unit = "整數" if integer else "數值"
             raise ValueError(f"{label}必須是 {low}～{high} 的{unit}")
         result[key] = int(number) if integer else float(number)
+    for key in ("apply_exclusions", "bomb_check_enabled", "bomb_force_detection_enabled"):
+        if not isinstance(result[key], bool):
+            raise ValueError(f"{key} 必須是布林值")
+    if result["dust_mode"] not in ("off", "observe", "suppress"):
+        raise ValueError("灰塵模式必須是 off、observe 或 suppress")
     return result
 
 
@@ -237,7 +250,7 @@ class CAPIConfig:
     anomaly_threshold: float = 0.5
     model_path: str = ""  # 預設模型路徑 (fallback，當 model_mapping 無對應時使用)
     inference_rotate_180_enabled: bool = False  # 推論來源影像統一旋轉 180°
-    side_white_detection_enabled: bool = False  # 側拍白畫面只記錄與 Review
+    side_white_detection_enabled: bool = False  # 側拍白畫面只記錄結果
     side_white_detection_params: Dict[str, Any] = field(default_factory=normalize_side_white_params)
     
     # 多模型映射 {image_prefix: model_path} — 依圖片前綴自動選用對應模型

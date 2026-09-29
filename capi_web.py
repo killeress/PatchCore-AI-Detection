@@ -4159,8 +4159,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_update()
             elif path == "/api/settings/side-white/review":
-                if self._require_settings_user(api=True, admin=True):
-                    self._handle_api_side_white_review()
+                self._handle_api_side_white_review()
             elif path == "/api/settings/reload":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_reload()
@@ -12293,39 +12292,27 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             limit = max(1, min(int(query.get("limit", [20])[0]), 100))
             offset = max(0, int(query.get("offset", [0])[0]))
             data = self.db.list_side_white_results(
-                status=query.get("status", [""])[0], review=query.get("review", [""])[0],
+                status=query.get("status", [""])[0],
                 glass_id=query.get("glass_id", [""])[0], machine_no=query.get("machine_no", [""])[0],
                 limit=limit, offset=offset,
             )
+            self.init_jinja()
+            template = self.jinja_env.get_template("_side_white_result.html")
+            for row in data["rows"]:
+                row["result_html"] = template.render(detail={"glass_id": row["glass_id"], "side_white_result": row}, embedded=True)
             self._send_json({**data, "limit": limit, "offset": offset})
         except (ValueError, TypeError) as exc:
             self._send_json({"error": str(exc)}, status=400)
 
     def _handle_api_side_white_review(self):
-        data = self._read_json_body()
-        if data is None:
-            return
-        if not isinstance(data, dict):
-            self._send_json({"error": "Review 資料必須是 JSON 物件"}, status=400)
-            return
-        try:
-            user = self._current_settings_user() or {}
-            updated = self.db.review_side_white_result(
-                int(data.get("id", 0)), data.get("decision", ""), data.get("note", ""), user.get("username", ""),
-            )
-            if not updated:
-                self._send_json({"error": "找不到側拍檢測結果"}, status=404)
-                return
-            self._send_json({"success": True})
-        except (ValueError, TypeError) as exc:
-            self._send_json({"error": str(exc)}, status=400)
+        self._send_json({"error": "側拍結果已改為唯讀"}, status=410)
 
     def _handle_api_side_white_image(self, query):
         # Same visibility as record detail; only serve artifacts recorded by this inspector.
         try:
             kind = query.get("kind", ["side"])[0]
             row = self.db.get_side_white_result(int(query.get("id", [0])[0]))
-            if not row or kind not in {"side", "front", "residual"}:
+            if not row or (kind not in {"side", "front", "residual"} and not re.fullmatch(r"candidate_[1-9][0-9]*", kind)):
                 self._send_404()
                 return
             stored = row["payload"].get("artifacts", {}).get(kind)

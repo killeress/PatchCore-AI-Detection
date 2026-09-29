@@ -127,7 +127,7 @@ def test_config_default_persistence_and_hot_reload(tmp_path):
     config = CAPIConfig()
     assert config.side_white_detection_enabled is False
     assert config.side_white_detection_params == normalize_side_white_params()
-    custom = {"min_contrast_gray": 3.1, "noise_sigma_factor": 6.0, "min_area_px": 30, "edge_margin_px": 25}
+    custom = normalize_side_white_params({"min_contrast_gray": 3.1, "noise_sigma_factor": 6.0, "min_area_px": 30, "edge_margin_px": 25})
     config.apply_db_overrides([{"param_name":"side_white_detection_params", "decoded_value":custom}])
     assert config.side_white_detection_params == custom
     custom["min_area_px"] = 999
@@ -147,21 +147,21 @@ def test_config_default_persistence_and_hot_reload(tmp_path):
     assert config.side_white_detection_enabled is False
 
 
-def test_review_persists_without_changing_formal_record_and_cascades(tmp_path):
+def test_legacy_review_data_preserved_in_readonly_storage_and_cascades(tmp_path):
     db = CAPIDatabase(str(tmp_path / "results.db"))
     record_id = _record(db)
     before = db.get_record_detail(record_id)
     result_id = db.save_side_white_result(record_id, {"status":"CANDIDATES","candidates":[{"id":1}]})
-    assert db.review_side_white_result(result_id, "confirmed", "<script>alert(1)</script>", "reviewer")
+    # Legacy columns remain readable, but there is no application write method.
+    with db._get_conn() as conn:
+        conn.execute("UPDATE side_white_results SET review_decision='confirmed' WHERE id=?", (result_id,))
     after = db.get_record_detail(record_id)
     for key in ("ai_judgment", "machine_judgment", "ng_images", "total_images", "ng_details", "client_response_text"):
         assert after[key] == before[key]
     assert after["side_white_result"]["review_decision"] == "confirmed"
-    assert db.list_side_white_results(review="unreviewed")["total"] == 0
-    assert db.list_side_white_results(review="confirmed", machine_no="CAPI1")["total"] == 1
+    assert db.list_side_white_results(machine_no="CAPI1")["total"] == 1
     assert db.list_side_white_results(glass_id="' OR 1=1 --")["total"] == 0
-    with pytest.raises(ValueError):
-        db.review_side_white_result(result_id, "NG", "", "reviewer")
+    assert not hasattr(db, "review_side_white_result")
     with db._get_conn() as conn:
         conn.execute("DELETE FROM inference_records WHERE id=?", (record_id,))
     assert db.get_side_white_result(result_id) is None
@@ -199,7 +199,7 @@ def test_inspection_failure_is_saved_and_cannot_change_verdict(tmp_path, monkeyp
     db = CAPIDatabase(str(tmp_path / "results.db")); record_id = _record(db, "NG")
     server = CAPIServer.__new__(CAPIServer); server.db = db; server.path_mapping = {}
     monkeypatch.setattr(capi_side_white, "find_side_white_pair", MagicMock(side_effect=RuntimeError("camera read failed")))
-    server._save_side_white_review(record_id, {"image_dir":str(tmp_path)}, {}, False)
+    server._save_side_white_result(record_id, {"image_dir":str(tmp_path)}, {}, False)
     record = db.get_record_detail(record_id)
     assert record["ai_judgment"] == "NG"
     assert record["side_white_result"]["status"] == "ERROR"
@@ -224,15 +224,16 @@ def test_record_review_notes_are_escaped_even_with_legacy_jinja_defaults(tmp_pat
         "id":1,"status":"ERROR","candidate_count":0,"review_decision":"uncertain",
         "review_note":"<script>alert(1)</script>","payload":{"algorithm":"test","candidates":[]}}})
     assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" not in html
+    assert "待 Review" not in html
 
 
-def test_review_api_rejects_non_object_json():
+def test_removed_review_api_never_reads_or_writes_input():
     handler = CAPIWebHandler.__new__(CAPIWebHandler)
     handler._read_json_body = lambda: []
     handler._send_json = MagicMock()
     handler._handle_api_side_white_review()
-    assert handler._send_json.call_args.kwargs["status"] == 400
+    assert handler._send_json.call_args.kwargs["status"] == 410
 
 
 def test_review_routes_require_same_admin_role_as_mark(tmp_path):
@@ -266,17 +267,22 @@ def test_review_routes_require_same_admin_role_as_mark(tmp_path):
         for role, status in [(None, 401), ("operator", 403)]:
             headers = {"X-Test-Role":role} if role else {}
             for path, body in [("/api/settings/side-white", None),
-                               ("/api/settings/side-white/review", b'{}'),
                                ("/api/settings/update", update_body)]:
                 with pytest.raises(HTTPError) as error:
                     opener.open(Request(base + path, data=body, headers=headers), timeout=5)
                 assert error.value.code == status
         body = json.dumps({"id":result_id,"decision":"missed","note":"test"}).encode()
-        with opener.open(Request(base + "/api/settings/side-white/review", data=body,
-                             headers={"X-Test-Role":"admin","Content-Type":"application/json"}), timeout=5) as response:
-            assert json.load(response)["success"] is True
+        for role in (None, "operator", "admin"):
+            headers = {"X-Test-Role":role} if role else {}
+            with pytest.raises(HTTPError) as error:
+                opener.open(Request(base + "/api/settings/side-white/review", data=body, headers=headers), timeout=5)
+            assert error.value.code == 410
         assert db.get_record_detail(record_id)["ai_judgment"] == "OK"
-        assert db.get_side_white_result(result_id)["review_decision"] == "missed"
+        assert db.get_side_white_result(result_id)["review_decision"] == "unreviewed"
+        with opener.open(Request(base + "/api/settings/side-white", headers={"X-Test-Role":"admin"}), timeout=5) as response:
+            listing = json.load(response)
+        assert "result_html" in listing["rows"][0]
+        assert "儲存 Review" not in listing["rows"][0]["result_html"]
         with opener.open(Request(base + "/api/settings/update", data=update_body,
                              headers={"X-Test-Role":"admin","Content-Type":"application/json"}), timeout=5) as response:
             assert json.load(response)["success"] is True
@@ -326,7 +332,7 @@ def test_missing_image_keeps_parameter_snapshot_after_later_updates(tmp_path):
     db = CAPIDatabase(str(tmp_path / "results.db")); record_id = _record(db)
     server = CAPIServer.__new__(CAPIServer); server.db = db; server.path_mapping = {}
     params = normalize_side_white_params({"min_area_px":35})
-    server._save_side_white_review(record_id, {"image_dir":str(tmp_path)}, {}, False, params)
+    server._save_side_white_result(record_id, {"image_dir":str(tmp_path)}, {}, False, params)
     params["min_area_px"] = 800
     result = db.get_record_detail(record_id)["side_white_result"]
     assert result["status"] == "NO_IMAGE"
