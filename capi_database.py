@@ -2018,10 +2018,10 @@ class CAPIDatabase:
         finally:
             conn.close()
 
-    def list_side_white_results(self, *, status="", review="", glass_id="", machine_no="",
+    def list_side_white_results(self, *, status="", glass_id="", machine_no="",
                                 limit=50, offset=0) -> Dict:
         conditions, params = [], []
-        for column, value in (("s.status", status), ("s.review_decision", review),
+        for column, value in (("s.status", status),
                               ("r.machine_no", machine_no)):
             if value:
                 conditions.append(column + " = ?")
@@ -2042,24 +2042,6 @@ class CAPIDatabase:
             return {"rows": [self._decode_side_white_row(row) for row in rows], "total": total}
         finally:
             conn.close()
-
-    def review_side_white_result(self, result_id: int, decision: str, note: str, actor: str) -> bool:
-        if decision not in {"unreviewed", "confirmed", "false_positive", "missed", "uncertain"}:
-            raise ValueError("無效的側拍 Review 標記")
-        if not isinstance(note, str) or len(note) > 2000:
-            raise ValueError("Review 備註最多 2000 字")
-        with self._lock:
-            conn = self._get_conn()
-            try:
-                cursor = conn.execute(
-                    """UPDATE side_white_results SET review_decision=?, review_note=?,
-                       reviewed_by=?, reviewed_at=datetime('now','localtime') WHERE id=?""",
-                    (decision, note, actor, result_id),
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-            finally:
-                conn.close()
 
     def get_record_detail(self, record_id: int) -> Optional[Dict]:
         """取得完整推論記錄 (含圖片和 tile 結果)"""
@@ -6847,8 +6829,8 @@ class CAPIDatabase:
         # 定義要遷移的參數
         params_def = [
             ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
-            ("side_white_detection_enabled", config.side_white_detection_enabled, "bool", "側拍白畫面檢測：僅記錄候選與 Review，不影響最終判定及 AOI／QJPG 回報"),
-            ("side_white_detection_params", config.side_white_detection_params, "dict", "側拍白畫面檢測參數：最低局部反差、雜訊門檻倍率、最小候選面積、邊緣排除寬度"),
+            ("side_white_detection_enabled", config.side_white_detection_enabled, "bool", "側拍白畫面檢測：僅記錄自動處理結果，不影響最終判定及 AOI／QJPG 回報"),
+            ("side_white_detection_params", config.side_white_detection_params, "dict", "側拍白畫面檢測參數：CV 候選、不檢測區域、OMIT 灰塵、炸彈比對與組合圖"),
             ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；MARK PPOCR Crop 依定位方向處理：normal 不旋轉，rot180 才旋轉 180°；不修改原始檔）"),
             ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
             ("threshold_mapping", config.threshold_mapping, "dict", "前綴 → 獨立閾值映射"),
