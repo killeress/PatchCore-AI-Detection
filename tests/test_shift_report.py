@@ -2,6 +2,7 @@
 import io
 import json
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -174,3 +175,122 @@ def test_shift_report_route_is_registered():
         encoding="utf-8"
     )
     assert '"/api/shift_report"' in source
+
+
+# ── get_shift_series：區間班別序列（歷史趨勢用） ─────────────
+
+def test_shift_series_buckets_records_into_shifts(tmp_path):
+    """依起班日＋班別分桶：跨午夜晚班歸前一天，白班/晚班各自成列。"""
+    db_path = tmp_path / "line.db"
+    db = CAPIDatabase(db_path)
+    _insert_record(db_path, "D1", "OK", "2026-01-20 10:00:00")
+    _insert_record(db_path, "D2", "NG", "2026-01-20 15:00:00", machine_judgment="NG")
+    _insert_record(db_path, "N1", "OK", "2026-01-20 20:00:00")
+    _insert_record(db_path, "N2", "OK", "2026-01-21 02:00:00")  # 歸 01-20 晚班
+    _insert_record(db_path, "N3", "ERR:x", "2026-01-21 07:00:00")
+    _insert_record(db_path, "OUT", "OK", "2026-01-22 08:00:00")  # 超出區間
+
+    series = db.get_shift_series("2026-01-20", "2026-01-21")
+
+    by_key = {(s["date"], s["shift"]): s for s in series}
+    assert by_key[("2026-01-20", "day")]["total"] == 2
+    assert by_key[("2026-01-20", "day")]["ng_count"] == 1
+    assert by_key[("2026-01-20", "day")]["aoi_ng_count"] == 1
+    assert by_key[("2026-01-20", "night")]["total"] == 3
+    assert by_key[("2026-01-20", "night")]["err_count"] == 1
+    assert by_key[("2026-01-21", "day")]["total"] == 0  # 無資料班別補零
+    assert ("2026-01-22", "day") not in by_key
+
+
+def test_shift_series_sorted_day_before_night(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    series = db.get_shift_series("2026-01-20", "2026-01-21")
+    keys = [(s["date"], s["shift"]) for s in series]
+    assert keys == [
+        ("2026-01-20", "day"),
+        ("2026-01-20", "night"),
+        ("2026-01-21", "day"),
+        ("2026-01-21", "night"),
+    ]
+
+
+def test_shift_series_excludes_in_progress_shift(tmp_path):
+    """未完結的班別（end > now）不出現在序列中，即使已有紀錄。"""
+    db_path = tmp_path / "line.db"
+    db = CAPIDatabase(db_path)
+    now = datetime.now()
+    # 在「目前正在進行的班別」放一筆
+    _insert_record(db_path, "NOW", "OK", now.strftime("%Y-%m-%d %H:%M:%S"))
+
+    series = db.get_shift_series(
+        (now - timedelta(days=1)).strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d")
+    )
+
+    assert all(
+        datetime.strptime(s["end"], "%Y-%m-%d %H:%M:%S") <= now for s in series
+    )
+
+
+def test_shift_series_start_end_labels(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    series = db.get_shift_series("2026-01-20", "2026-01-20")
+    day = next(s for s in series if s["shift"] == "day")
+    night = next(s for s in series if s["shift"] == "night")
+    assert day["start"] == "2026-01-20 07:30:00"
+    assert day["end"] == "2026-01-20 19:30:00"
+    assert night["start"] == "2026-01-20 19:30:00"
+    assert night["end"] == "2026-01-21 07:30:00"
+
+
+def test_shift_series_rejects_invalid_params(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    with pytest.raises(ValueError):
+        db.get_shift_series("bad", "2026-01-20")
+    with pytest.raises(ValueError):
+        db.get_shift_series("2026-01-21", "2026-01-20")  # from > to
+    with pytest.raises(ValueError):
+        db.get_shift_series("2026-01-01", "2026-04-01")  # 超過跨度上限
+
+
+# ── /api/shift_report/series ─────────────────────────────────
+
+def test_shift_series_api_returns_list_with_cors(tmp_path):
+    db_path = tmp_path / "line.db"
+    db = CAPIDatabase(db_path)
+    _insert_record(db_path, "G1", "OK", "2026-01-20 10:00:00")
+
+    responses = []
+    handler = _make_handler(db, responses)
+    handler._handle_api_shift_report_series(
+        {"from": ["2026-01-20"], "to": ["2026-01-20"]}
+    )
+
+    status, payload, headers = responses[-1]
+    assert status == 200
+    assert headers.get("Access-Control-Allow-Origin") == "*"
+    assert payload["from"] == "2026-01-20"
+    assert payload["to"] == "2026-01-20"
+    assert isinstance(payload["shifts"], list)
+    day = next(s for s in payload["shifts"] if s["shift"] == "day")
+    assert day["total"] == 1
+
+
+def test_shift_series_api_rejects_invalid_params(tmp_path):
+    db = CAPIDatabase(tmp_path / "line.db")
+    responses = []
+    handler = _make_handler(db, responses)
+
+    handler._handle_api_shift_report_series({})
+    assert responses[-1][0] == 400
+    handler._handle_api_shift_report_series({"from": ["2026-01-20"], "to": ["bad"]})
+    assert responses[-1][0] == 400
+    assert responses[-1][2].get("Access-Control-Allow-Origin") == "*"
+
+
+def test_shift_series_route_is_registered():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "capi_web.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"/api/shift_report/series"' in source

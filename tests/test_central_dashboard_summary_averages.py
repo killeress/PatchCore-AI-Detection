@@ -35,15 +35,18 @@ def test_summary_averages_update_as_each_line_responds():
     assert app_js.count("renderSummaryAverages()") >= 3
 
 
-def test_process_tabs_hidden_when_single_zone():
-    """製程類別頁籤維持既有行為：只有單一製程類別時隱藏。"""
+def test_process_tabs_row_keeps_single_zone_hiding_for_zone_buttons():
+    """製程類別列永遠顯示（右側有模式切換）；僅類別按鈕組在單一類別時隱藏。"""
     index_html = _read("index.html")
     app_js = _read("app.js")
     process_tabs_line = next(
         line for line in index_html.splitlines() if 'id="process-tabs"' in line
     )
-    assert "hidden" in process_tabs_line
+    # 列本身不再整列隱藏
+    assert "hidden" not in process_tabs_line
+    # 類別按鈕組在單一類別時隱藏（JS 控制）
     assert "availableZones.size < 2" in app_js
+    assert "process-tab-list" in app_js
 
 
 def test_summary_average_cards_have_distinct_accent_colors():
