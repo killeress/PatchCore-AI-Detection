@@ -16,6 +16,32 @@ _SIDE_NAME = re.compile(r"^(.*?)SW0F00000(_?\d{6})?$", re.IGNORECASE)
 _IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 
 
+def inspect_side_white_folder(folder, output_dir, *, rotate_180=False, params=None, context=None):
+    """Shared live/rerun path; missing images and inspection failures replace stale results."""
+    payload = {"algorithm": ALGORITHM, "shadow_only": True, "status": "NO_IMAGE",
+               "bomb_source_prefix": "W0F00000", "candidates": [], "artifacts": {},
+               "mapping": {"status": "unavailable"}, "processing_ms": 0,
+               "reason": "此筆沒有側拍白畫面 SW0F00000"}
+    try:
+        params = normalize_side_white_params(params)
+        payload["parameters"] = dict(params)
+        payload["evidence_context"] = {k: v for k, v in (context or {}).items() if k != "config"}
+        payload["bombs"], _ = _bomb_geometry(context or {}, None, None, (1, 1), params)
+        side, front = find_side_white_pair(Path(folder))
+        if side is not None:
+            try:
+                omit, detector, omit_info = load_omit_evidence(folder, side, context or {}, rotate_180)
+            except Exception as exc:
+                omit, detector = None, None
+                omit_info = {"status": "unavailable", "reason": f"OMIT 載入失敗：{exc}"}
+            payload = inspect_side_white_image(side, front, Path(output_dir), rotate_180=rotate_180,
+                                               params=params, context=context, omit_image=omit,
+                                               dust_detector=detector, omit_info=omit_info)
+    except Exception as exc:
+        payload.update(status="ERROR", reason=str(exc))
+    return payload
+
+
 def find_side_white_pair(folder: Path):
     """Select the newest white side shot and its exact acquisition-name partner."""
     files = [p for p in Path(folder).iterdir()

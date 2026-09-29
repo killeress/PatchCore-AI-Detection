@@ -33,6 +33,7 @@ def test_rerun_passes_stored_request_context_to_inference(
 
     result = SimpleNamespace(edge_defects=[], preprocess_steps=[])
     inferencer = MagicMock()
+    inferencer.config.side_white_detection_enabled = False
     inferencer.config.image_preprocess_pipeline = []
     inferencer.process_panel.return_value = (
         [result],

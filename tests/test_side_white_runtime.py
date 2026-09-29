@@ -1,6 +1,7 @@
 """Validate side evidence integration with existing settings, OMIT and web paths."""
 import io
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -14,6 +15,91 @@ from capi_side_white import load_omit_evidence, snapshot_context, inspect_side_w
 from capi_server import CAPIServer
 from capi_database import CAPIDatabase
 from capi_web import CAPIWebHandler
+
+
+@pytest.mark.parametrize('scenario', ['normal', 'rotated', 'disabled', 'missing', 'error'])
+def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monkeypatch, scenario):
+    import capi_server
+    import capi_side_white
+    from capi_station_adapter import create_station_adapter
+
+    side, _ = write_pair(tmp_path)
+    omit = np.zeros((500, 700), np.uint8)
+    cv2.circle(omit, (350, 250), 12, 230, -1)
+    cv2.imwrite(str(tmp_path / 'SPINIGBI _153501.tif'), omit)
+    config = CAPIConfig()
+    config.side_white_detection_enabled = scenario != 'disabled'
+    config.inference_rotate_180_enabled = scenario == 'rotated'
+    config.side_white_detection_params = normalize_side_white_params()
+    config.within_spec_judgment_enabled = False
+    inferencer = SimpleNamespace(
+        config=config, station_adapter=create_station_adapter('capi'),
+        edge_inspector=SimpleNamespace(config=SimpleNamespace(
+            all_exclude_zones_by_product={'J': [{'enabled': True, 'x': 0, 'y': 0, 'w': 10, 'h': 10}]})),
+        process_panel=MagicMock(return_value=([SimpleNamespace(edge_defects=[], preprocess_steps=[])], None, False, '', False, None, {})),
+    )
+    db = CAPIDatabase(str(tmp_path / 'results.db'))
+    record = db.save_inference_record(
+        glass_id='TEST', model_id='GN140JCAL010S', machine_no='CAPI1', resolution=(1920, 1200),
+        machine_judgment='OK', ai_judgment='OK', image_dir=str(tmp_path), total_images=1, ng_images=0,
+        ng_details='[]', request_time='2026-09-29 12:00:00', response_time='2026-09-29 12:00:01',
+        processing_seconds=.1, client_response_text='unchanged')
+    old_id = db.save_side_white_result(record, {'status': 'CANDIDATES', 'candidates': [{'id': 99}], 'algorithm': 'old'})
+    cls = CAPIWebHandler
+    for name, value in {'inferencer': inferencer, '_capi_server_instance': None, 'db': db,
+                        '_gpu_lock': None, '_rerun_lock': threading.Lock(),
+                        '_rerun_tasks': {record: {'status': 'running'}}, 'heatmap_manager': None,
+                        'heatmap_base_dir': str(tmp_path / 'heatmaps')}.items():
+        monkeypatch.setattr(cls, name, value, raising=False)
+    monkeypatch.setattr(capi_server, 'aggregate_judgment', lambda _: ('OK', '[]'))
+    monkeypatch.setattr(capi_server, 'results_to_db_data', lambda *_: [])
+    monkeypatch.setattr(capi_server.InferenceLogCapture, 'start_capture', lambda: None)
+    monkeypatch.setattr(capi_server.InferenceLogCapture, 'stop_capture', lambda: '')
+    if scenario == 'missing':
+        side.unlink()
+    elif scenario == 'error':
+        monkeypatch.setattr(capi_side_white, 'inspect_side_white_image', MagicMock(side_effect=ValueError('side failure')))
+    original_save = db.save_side_white_result
+    def save_when_running(record_id, payload, **kwargs):
+        assert cls._rerun_tasks[record_id]['status'] == 'running'
+        assert db.get_side_white_result(old_id) is None
+        assert all(Path(path).is_file() for path in payload.get('artifacts', {}).values())
+        return original_save(record_id, payload, **kwargs)
+    monkeypatch.setattr(db, 'save_side_white_result', save_when_running)
+    detail = db.get_record_detail(record)
+    detail['client_bomb_info'] = json.dumps({'image_prefix': 'W0F00000', 'defect_type': 'point', 'coordinates': [[960, 600]]})
+    cls._rerun_worker(record, detail)
+    assert cls._rerun_tasks[record]['status'] == 'done', cls._rerun_tasks[record]
+    updated = db.get_record_detail(record)
+    assert updated['ai_judgment'] == 'OK' and updated['client_response_text'] == 'unchanged'
+    assert db.get_side_white_result(old_id) is None
+    if scenario == 'disabled':
+        assert updated['side_white_result'] is None
+        assert db.list_side_white_results()['total'] == 0
+        return
+    row = updated['side_white_result']
+    payload = row['payload']
+    assert row['id'] != old_id and db.list_side_white_results()['total'] == 1
+    if scenario in {'missing', 'error'}:
+        assert payload['status'] == ('NO_IMAGE' if scenario == 'missing' else 'ERROR')
+        assert payload['candidates'] == [] and payload['artifacts'] == {}
+        assert '側拍' in cls._rerun_tasks[record]['message']
+        return
+    assert payload['rotation_applied'] == (scenario == 'rotated')
+    assert payload['omit']['image'] == 'SPINIGBI _153501.tif'
+    assert payload['candidates'][0]['dust']['overlap_ratio'] > .8
+    assert payload['bombs'][0]['status'] == 'matched'
+    assert payload['evidence_context']['zones'][0]['w'] == 10
+    # A second click must use new parameters and discard the first run's candidates.
+    config.side_white_detection_params = normalize_side_white_params({'min_contrast_gray': 60})
+    cls._rerun_tasks[record] = {'status': 'running'}
+    cls._rerun_worker(record, db.get_record_detail(record))
+    assert cls._rerun_tasks[record]['status'] == 'done'
+    again = db.get_record_detail(record)['side_white_result']
+    assert again['payload']['parameters']['min_contrast_gray'] == 60
+    assert again['payload']['status'] == 'NO_CANDIDATES'
+    assert again['payload']['candidates'] == []
+    assert db.list_side_white_results()['total'] == 1 and db.get_side_white_result(row['id']) is None
 
 
 def test_snapshot_does_not_mutate_active_product_or_follow_live_settings():
