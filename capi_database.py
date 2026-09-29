@@ -1477,7 +1477,7 @@ class CAPIDatabase:
         """
         重新推論後覆蓋更新紀錄 (同一 record_id)
 
-        1. 刪除舊的 tile_results, edge_defect_results, image_results
+        1. 刪除舊的 tile_results, edge_defect_results, image_results, side_white_results
         2. 更新 inference_records 欄位
         3. 插入新的 image_results, tile_results, edge_defect_results
         """
@@ -1489,6 +1489,7 @@ class CAPIDatabase:
                     "DELETE FROM image_results WHERE record_id = ?",
                     (record_id,),
                 )
+                conn.execute("DELETE FROM side_white_results WHERE record_id = ?", (record_id,))
 
                 # --- 更新主紀錄 ---
                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

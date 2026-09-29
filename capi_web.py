@@ -13762,6 +13762,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            side_white_context = None
+            if getattr(inferencer.config, "side_white_detection_enabled", False):
+                from capi_side_white import snapshot_context
+                side_white_context = snapshot_context(
+                    inferencer.config,
+                    getattr(getattr(inferencer, "edge_inspector", None), "config", None),
+                    {"model_id": model_id, "bomb_info": bomb_info},
+                )
+
             aoi_report_override = None
             client_request_text = str(detail.get("client_request_text") or "").strip()
             if client_request_text:
@@ -14065,8 +14074,32 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     source="inference",
                 )
 
+            completion_message = "完成"
+            if side_white_context is not None:
+                from capi_side_white import inspect_side_white_folder
+                _update_status("正在重新檢測側拍與產生 OMIT 組合圖...")
+                side_config = side_white_context["config"]
+                base_dir = heatmap_info.get("dir") or (
+                    str(getattr(getattr(cls, "heatmap_manager", None), "base_dir", "") or cls.heatmap_base_dir or "")
+                )
+                if not base_dir:
+                    raise RuntimeError("側拍結果儲存目錄未設定")
+                output_dir = Path(base_dir) / f"side_white_{record_id}"
+                side_payload = inspect_side_white_folder(
+                    panel_dir, output_dir,
+                    rotate_180=bool(getattr(side_config, "inference_rotate_180_enabled", False)),
+                    params=getattr(side_config, "side_white_detection_params", None),
+                    context=side_white_context,
+                )
+                cls.db.save_side_white_result(
+                    record_id, side_payload,
+                    heatmap_dir=str(output_dir.resolve()) if side_payload.get("artifacts") else "",
+                )
+                if side_payload["status"] in {"ERROR", "NO_IMAGE"}:
+                    completion_message = f"正拍完成；側拍：{side_payload.get('reason', side_payload['status'])}"
+
             with cls._rerun_lock:
-                cls._rerun_tasks[record_id] = {"status": "done", "message": "完成"}
+                cls._rerun_tasks[record_id] = {"status": "done", "message": completion_message}
 
         except Exception as e:
             import traceback
