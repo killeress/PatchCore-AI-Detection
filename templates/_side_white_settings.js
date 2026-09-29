@@ -6,11 +6,11 @@
         ['min_area_px','最小候選面積',20,1,1000000,1,'側拍像素數；調高可濾掉碎點，也可能漏掉小白點。'],
         ['edge_margin_px','邊緣排除寬度',16,0,512,1,'側拍 px；調高會縮小近邊檢測範圍，0 表示不內縮。'],
         ['dust_overlap_ratio','灰塵重疊門檻',.8,.01,1,.01,'0～1；尚未以側拍樣本驗證，預設僅標示疑似灰塵。'],
-        ['mapping_margin_px','灰塵比對外擴',3,0,32,1,'正拍 px；只補償小幅對位誤差，不能取代校正。'],
+        ['mapping_margin_px','灰塵比對外擴',3,0,32,1,'側拍 px；側拍白畫面與 SPINIGBI 同座標，比對時外擴遮罩。'],
         ['crop_padding_px','組合圖周邊範圍',32,0,512,1,'各原圖 px；顯示同一面板位置及周邊。'],
-        ['bomb_tolerance_product_px','炸彈容許誤差',50,0,500,1,'產品 px；從正拍產品座標映射至側拍。'],
+        ['bomb_tolerance_product_px','炸彈容許誤差',50,0,500,1,'產品 px；只將正拍 W0F00000 炸彈座標映射至側拍。'],
     ];
-    const sideWhiteSwitches = [['apply_exclusions','套用產品不檢測區域',true],['bomb_check_enabled','比對正拍炸彈座標',true],['bomb_force_detection_enabled','炸彈區域強制檢測',false]];
+    const sideWhiteSwitches = [['apply_exclusions','套用產品不檢測區域',true],['bomb_check_enabled','比對 W0F00000 炸彈座標',true],['bomb_force_detection_enabled','炸彈區域強制檢測',false]];
     let sideWhiteParamDraft = null, sideWhiteParamSaving = false, sideWhiteParamMessage = '';
 
     function savedSideWhiteParams() {
@@ -34,7 +34,7 @@
             ${sideWhiteSwitches.map(([key,label]) => `<label>${label}<input id="sw-param-${key}" type="checkbox" ${values[key]?'checked':''} onchange="editSideWhiteParam('${key}',this.checked)"></label>`).join('')}
             <label>灰塵處理模式<select id="sw-param-dust_mode" onchange="editSideWhiteParam('dust_mode',this.value)">${Object.entries({off:'關閉',observe:'標示疑似灰塵（預設）',suppress:'啟用灰塵屏蔽'}).map(([v,label]) => `<option value="${v}" ${values.dust_mode===v?'selected':''}>${label}</option>`).join('')}</select></label>
             </fieldset>
-            <p class="sw-note">實際檢測門檻取「最低局部反差」與「影像雜訊 × 倍率」較大者。原有檢測參數以側拍原圖為準；其他欄位依標示單位。區域來源沿用「CV 邊緣檢測」的產品不檢測區域；OMIT 特徵沿用灰塵設定。</p>
+            <p class="sw-note">實際檢測門檻取「最低局部反差」與「影像雜訊 × 倍率」較大者。原有檢測參數以側拍原圖為準；其他欄位依標示單位。區域來源沿用「CV 邊緣檢測」的產品不檢測區域；側拍灰塵圖使用 SPINIGBI（例如 SPINIGBI _155809.tif），同區域裁切與屏蔽不依賴正拍；特徵偵測沿用灰塵設定。</p>
             <button class="sw-btn" type="submit" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamSaving?'儲存中…':'儲存側拍參數'}</button>
             <span id="sw-param-message" class="sw-note" role="status">${escapeHtml(sideWhiteParamMessage||(sideWhiteParamDraft?'尚未儲存':''))}</span>
         </form>`;

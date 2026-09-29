@@ -11,7 +11,7 @@ import numpy as np
 
 from capi_config import normalize_side_white_params
 
-ALGORITHM = "side-white-cv-v2"
+ALGORITHM = "side-white-cv-v3"
 _SIDE_NAME = re.compile(r"^(.*?)SW0F00000(_?\d{6})?$", re.IGNORECASE)
 _IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 
@@ -221,32 +221,50 @@ def snapshot_context(config, edge_config, parsed):
 
 
 def load_omit_evidence(folder, side_path, context, rotate_180):
-    """Select an exact acquisition or unique OMIT; ambiguous files fail open."""
+    """Pair side-camera SPINIGBI with SW0F00000; never substitute front OMIT."""
     from capi_inference import CAPIInferencer
-    from capi_station_adapter import create_station_adapter
+    info = {"status": "unavailable", "coordinate_space": "side_detection_pixels"}
     config = context.get("config")
     if config is None:
-        return None, None, {"status": "unavailable", "reason": "沒有 OMIT 偵測設定快照"}
+        return None, None, {**info, "reason": "沒有 OMIT 偵測設定快照"}
     detector = CAPIInferencer.__new__(CAPIInferencer)
     detector.config = config
-    detector.station_adapter = create_station_adapter(context.get("station_profile", "capi"))
     files = sorted(p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS)
-    matches = [p for p in files if detector.station_adapter.is_omit_image(p.name)]
-    acquisition = _SIDE_NAME.fullmatch(side_path.stem)[2] or ""
-    exact = [p for p in matches if acquisition and p.stem.endswith(acquisition)]
+    side_name = _SIDE_NAME.fullmatch(Path(side_path).stem)
+    if side_name is None:
+        return None, None, {**info, "reason": "側拍白畫面檔名無法辨識"}
+    prefix, acquisition = side_name[1].casefold(), (side_name[2] or "").lstrip("_")
+    matches, exact = [], []
+    for path in files:
+        name = re.fullmatch(r"(.*?)SPINIGBI\s*(_?\d{6})?", path.stem, re.IGNORECASE)
+        if name and name[1].casefold() == prefix:
+            matches.append(path)
+            if acquisition and (name[2] or "").lstrip("_") == acquisition:
+                exact.append(path)
     choices = exact or matches
     if len(choices) != 1:
-        return None, None, {"status": "unavailable", "reason": "缺少 OMIT 或同次拍攝的 OMIT 無法唯一配對"}
+        return None, None, {**info, "reason": "缺少側拍 OMIT（SPINIGBI）或無法唯一配對"}
     path = choices[0]
+    info.update(image=path.name, pairing="exact_acquisition" if exact else "unique_side_omit")
     raw = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     if raw is None:
-        return None, None, {"status": "unavailable", "image": path.name, "reason": "OMIT 無法讀取"}
+        return None, None, {**info, "reason": "側拍 OMIT 無法讀取"}
     if rotate_180:
         raw = cv2.rotate(raw, cv2.ROTATE_180)
-    overexposed, _, _, reason = detector.check_omit_overexposure(
-        raw, image_files=files, product_resolution=context.get("product_resolution"))
-    info = {"status": "unavailable" if overexposed else "available", "image": path.name,
-            "size": [raw.shape[1], raw.shape[0]], "reason": reason if overexposed else "沿用正拍／OMIT 同相機像素對齊；側拍位置為面板邊界估算"}
+    info["size"] = [raw.shape[1], raw.shape[0]]
+    side = cv2.imdecode(np.fromfile(str(side_path), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    if side is None or side.shape != raw.shape:
+        return raw, None, {**info, "reason": "側拍白畫面／OMIT 尺寸不一致或無法讀取，未自動縮放屏蔽"}
+    if rotate_180:
+        side = cv2.rotate(side, cv2.ROTATE_180)
+    try:
+        quad = detect_panel_quad(side)
+    except (ValueError, cv2.error) as exc:
+        return raw, None, {**info, "reason": f"側拍面板範圍無法辨識：{exc}"}
+    overexposed, _, _, reason = detector.check_omit_overexposure(raw, panel_polygon=quad)
+    info.update(status="unavailable" if overexposed else "available", exposure_detail=reason,
+                reason=f"側拍 OMIT 過曝：{reason}" if overexposed else
+                "側拍白畫面／SPINIGBI 使用同相機像素座標與相同旋轉；不依賴正拍映射")
     return raw, None if overexposed else detector.check_dust_or_scratch_feature, info
 
 
@@ -261,6 +279,7 @@ def _raw_points(points, shape, rotated):
 
 def _bomb_geometry(context, front_quad, transform, shape, params):
     """Bomb coordinates are product coordinates in the existing detection orientation."""
+    from capi_image_naming import canonical_image_prefix
     bombs, force = [], np.zeros(shape, np.uint8)
     resolution = context.get("product_resolution", [0, 0])
     matrix = None
@@ -269,6 +288,10 @@ def _bomb_geometry(context, front_quad, transform, shape, params):
         product = np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)
         matrix = np.linalg.inv(transform) @ cv2.getPerspectiveTransform(product, front_quad)
     for definition in context.get("bombs", []):
+        # SW0F00000 inspects only white-screen evidence. Other screens' bombs
+        # must not create missed results, force regions, or exempt candidates.
+        if canonical_image_prefix(definition.get("image_prefix", "")).upper() != "W0F00000":
+            continue
         coords = definition.get("coordinates", [])
         kind = definition.get("defect_type", "")
         groups = [[p] for p in coords] if kind == "point" else [coords[:2]]
@@ -280,12 +303,6 @@ def _bomb_geometry(context, front_quad, transform, shape, params):
             bombs.append(bomb)
             if not params["bomb_check_enabled"]:
                 bomb["reason"] = "炸彈比對未啟用"
-                continue
-            # Only front-camera definitions can be a source; never interpret side pixels as product coordinates.
-            from capi_image_naming import canonical_image_prefix, CANONICAL_IMAGE_PREFIXES
-            prefix = canonical_image_prefix(bomb["image_prefix"]).upper()
-            if prefix not in CANONICAL_IMAGE_PREFIXES:
-                bomb["reason"] = "炸彈來源不是正拍畫面"
                 continue
             if matrix is None or kind not in ("point", "line") or len(points) != (1 if kind == "point" else 2):
                 continue
@@ -398,13 +415,14 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
     if front is not None and transform is not None:
         front_bounds = _crop_bounds(item["front_contour"], front.shape, params["crop_padding_px"])
         item["crop_bounds"]["front"] = list(front_bounds)
-    aligned = omit is not None and front is not None and omit.shape[:2] == front.shape[:2]
-    if aligned and front_bounds is not None:
-        item["crop_bounds"]["omit"] = list(front_bounds)
+    aligned = omit is not None and omit.shape[:2] == side.shape[:2]
+    omit_bounds = item["crop_bounds"]["side"] if aligned else None
+    if aligned:
+        item["crop_bounds"]["omit"] = list(omit_bounds)
     if params["dust_mode"] == "off":
         item["dust"].update(status="disabled", reason="灰塵判斷未啟用")
-    elif aligned and detector is not None and front_bounds is not None:
-        fx1, fy1, fx2, fy2 = front_bounds
+    elif aligned and detector is not None:
+        fx1, fy1, fx2, fy2 = omit_bounds
         if fx2 > fx1 and fy2 > fy1:
             try:
                 _, mask, _, detail = detector(omit[fy1:fy2, fx1:fx2])
@@ -413,11 +431,10 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
                 margin = params["mapping_margin_px"]
                 comparison = cv2.dilate(mask, np.ones((margin * 2 + 1, margin * 2 + 1), np.uint8)) if margin else mask
                 yy, xx = np.nonzero(support)
-                mapped = _transform(np.column_stack((xx + x, yy + y)), transform)
-                mx, my = np.rint(mapped - [fx1, fy1]).astype(int).T
+                mx, my = xx + x - fx1, yy + y - fy1
                 in_crop = (mx >= 0) & (my >= 0) & (mx < mask.shape[1]) & (my < mask.shape[0])
                 if not in_crop.all():
-                    raise ValueError("候選映射超出 OMIT 有效範圍")
+                    raise ValueError("側拍候選超出 OMIT 有效範圍")
                 dust_local[yy, xx] = comparison[my, mx] > 0
                 ratio = float(np.count_nonzero(dust_local & remaining) / max(1, np.count_nonzero(remaining)))
                 suspected = ratio >= params["dust_overlap_ratio"]
@@ -429,7 +446,7 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
             except Exception as exc:
                 item["dust"].update(status="unavailable", reason=f"灰塵證據無法產生：{exc}")
     elif omit is not None and not aligned:
-        item["dust"]["reason"] = "正拍／OMIT 尺寸不一致或缺少映射，未自動縮放屏蔽"
+        item["dust"]["reason"] = "側拍白畫面／OMIT 尺寸不一致，未自動縮放屏蔽"
     count, labels, stats, _ = cv2.connectedComponentsWithStats(remaining.astype(np.uint8))
     accepted = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= params["min_area_px"]]
     remaining = np.isin(labels, accepted) if accepted else np.zeros_like(remaining)
@@ -443,8 +460,8 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
     panels = [_panel(side, item["crop_bounds"]["side"], f"Side #{item['id']}", item["side_contour"],
                      zone_mask[sy1:sy2, sx1:sx2], (255, 140, 50), item["remaining_contours"]),
               _panel(front, front_bounds, "Front (estimated)", item.get("front_contour")),
-              _panel(omit if aligned else None, front_bounds, "OMIT", item.get("front_contour")),
-              _panel(omit if aligned and mask is not None else None, front_bounds, "OMIT surface mask", item.get("front_contour"), mask)]
+              _panel(omit if aligned else None, omit_bounds, "Side OMIT", item["side_contour"]),
+              _panel(omit if aligned and mask is not None else None, omit_bounds, "Side OMIT surface mask", item["side_contour"], mask)]
     return np.hstack(panels)
 
 
@@ -455,11 +472,13 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
     """Detect in camera pixels, then map contours; missing mapping never implies OK."""
     started = time.perf_counter()
     payload = {"algorithm": ALGORITHM, "shadow_only": True, "status": "ERROR",
+               "bomb_source_prefix": "W0F00000",
                "side_image": Path(side_path).name, "front_image": Path(front_path).name if front_path else "",
                "rotation_applied": bool(rotate_180), "coordinate_space": "detection_image_pixels",
                "candidates": [], "mapping": {"status": "unavailable"}, "artifacts": {}}
     context = context or {}
     omit_info = dict(omit_info or {"status": "unavailable", "reason": "缺少 OMIT"})
+    omit_info["coordinate_space"] = "side_detection_pixels"
     payload["evidence_context"] = {k: v for k, v in context.items() if k != "config"}
     payload["omit"] = omit_info
     config = context.get("config")

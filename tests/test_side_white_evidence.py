@@ -64,6 +64,25 @@ def test_dust_partial_overlap_preserves_adjacent_anomaly():
     assert item["disposition"] == "retained"
 
 
+@pytest.mark.parametrize("with_front", [False, True])
+def test_side_dust_coordinates_are_independent_of_front_mapping(with_front):
+    item = candidate()
+    side = np.full((100, 100), 90, np.uint8)
+    omit = np.zeros_like(side)
+    omit[20:40, 20:60] = 255
+    transform = np.diag([2., 2., 1.]) if with_front else None
+    front = np.full((200, 200), 90, np.uint8) if with_front else None
+    item['front_contour'] = [[40, 40], [118, 40], [118, 78], [40, 78]] if with_front else None
+    composite = _candidate_evidence(
+        item, side, front, omit, lambda crop: (True, crop, 1, 'side dust'), {},
+        transform, np.zeros_like(side), np.full(side.shape, 10, np.float32),
+        normalize_side_white_params({'dust_mode': 'suppress', 'mapping_margin_px': 0}))
+    assert item['dust']['overlap_ratio'] == 1
+    assert item['disposition'] == 'dust_suppressed'
+    assert item['crop_bounds']['omit'] == item['crop_bounds']['side']
+    assert composite[:, 800:1200].max() == 255
+
+
 def test_dust_in_bbox_hole_does_not_suppress_candidate():
     item = candidate()
     item["_mask"][:, 10:30] = 0
@@ -104,7 +123,32 @@ def test_bomb_requires_detected_evidence_and_front_source():
     assert bombs[0]["status"] == "matched" and bombs[1]["status"] == "missed"
     assert item["bomb_ids"] == [1]
     invalid,_ = _bomb_geometry(bomb_context([[20,20]],prefix="SW0F00000"),quad,np.eye(3),(100,100),options)
-    assert invalid[0]["status"] == "unavailable"
+    assert invalid == []
+
+
+@pytest.mark.parametrize('prefix', ['R0F00000', 'G0F00000', 'B0F00000', 'U0F00000',
+                                    'WGF00000', 'WGF50500', 'STANDARD', 'SW0F00000', ''])
+def test_other_screen_bombs_do_not_force_or_exempt_side_candidates(prefix):
+    quad = np.array([[0,0],[100,0],[100,100],[0,100]], np.float32)
+    options = normalize_side_white_params({'bomb_force_detection_enabled': True})
+    bombs, force = _bomb_geometry(bomb_context([[40,30]], prefix=prefix), quad, np.eye(3), (100,100), options)
+    item = candidate()
+    _match_bombs([item], bombs)
+    assert bombs == [] and not force.any() and item['bomb_ids'] == []
+
+
+@pytest.mark.parametrize('prefix', ['W0F00000', 'w0f00000', 'W0F00000_155813.tif'])
+def test_only_white_screen_bombs_survive_mixed_definitions(prefix):
+    quad = np.array([[0,0],[100,0],[100,100],[0,100]], np.float32)
+    ctx = bomb_context([[80,80]], prefix='R0F00000')
+    ctx['bombs'] += bomb_context([[40,30]], prefix=prefix)['bombs']
+    options = normalize_side_white_params({'bomb_tolerance_product_px': 5, 'bomb_force_detection_enabled': True})
+    bombs, force = _bomb_geometry(ctx, quad, np.eye(3), (100,100), options)
+    item = candidate()
+    _match_bombs([item], bombs)
+    assert len(bombs) == 1 and bombs[0]['status'] == 'matched'
+    assert bombs[0]['image_prefix'] == prefix and item['bomb_ids'] == [1]
+    assert force[30,40] and not force[80,80]
 
 
 def test_line_bomb_rejects_dot_and_wrong_direction():
