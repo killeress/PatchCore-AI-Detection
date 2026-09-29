@@ -117,9 +117,11 @@ def test_normalize_forced_char_conversions_rejects_invalid_or_duplicate_rules():
 
 
 @pytest.mark.parametrize("inference_rotate_180_enabled", [False, True])
-def test_mark_crop_always_rotates_after_optional_full_image_rotation(
+@pytest.mark.parametrize("orientation", ["normal", "rot180", ""])
+def test_mark_crop_follows_locator_after_optional_full_image_rotation(
     tmp_path,
     inference_rotate_180_enabled,
+    orientation,
 ):
     raw_image = np.arange(12 * 20, dtype=np.uint8).reshape(12, 20)
     image_path = tmp_path / "W0F00000_080000.tif"
@@ -134,8 +136,7 @@ def test_mark_crop_always_rotates_after_optional_full_image_rotation(
         "found": True,
         "text": "EJ",
         "roi": "bottom_left",
-        # The locator result must not control the PPOCR crop direction.
-        "orientation": "normal",
+        "orientation": orientation,
         "bbox": {"x": 0, "y": 0, "width": 20, "height": 12},
     }
 
@@ -148,11 +149,40 @@ def test_mark_crop_always_rotates_after_optional_full_image_rotation(
 
     png = base64.b64decode(payload["image_png_base64"])
     actual = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
-    expected = cv2.rotate(detection_image, cv2.ROTATE_180)
+    expected_image = (
+        cv2.rotate(raw_image, cv2.ROTATE_180)
+        if inference_rotate_180_enabled else raw_image
+    )
+    expected = (
+        cv2.rotate(expected_image, cv2.ROTATE_180)
+        if orientation == "rot180" else expected_image
+    )
     np.testing.assert_array_equal(actual, expected)
 
+    # Exercise the worker boundary: saved crops and Paddle inputs must have
+    # exactly the same orientation, with no second rotation in the worker.
+    class FakeRecognizer:
+        model_name = "fake"
 
-def test_mark_stream_key_uses_fixed_crop_rotation_not_locator_orientation():
+        def predict(self, image):
+            np.testing.assert_array_equal(image, expected)
+            return {"paddle_text": "EJ", "paddle_confidence": 0.9,
+                    "model_name": self.model_name}
+
+    store = ShadowStore(tmp_path / "shadow.db", tmp_path / "disagreements")
+    result = ShadowApplication(FakeRecognizer(), store).infer(payload)
+    assert not result.get("error")
+    with sqlite3.connect(store.db_path) as connection:
+        crop_path = connection.execute(
+            "SELECT crop_path FROM mark_shadow_results WHERE id = ?",
+            (result["id"],),
+        ).fetchone()[0]
+    saved = cv2.imdecode(np.frombuffer(Path(crop_path).read_bytes(), dtype=np.uint8),
+                         cv2.IMREAD_UNCHANGED)
+    np.testing.assert_array_equal(saved, expected)
+
+
+def test_mark_stream_key_separates_locator_directions_and_legacy_history():
     normal_key = CAPIInferencer._build_mark_stream_key(
         "CAPI13",
         "MODEL-A",
@@ -164,8 +194,17 @@ def test_mark_stream_key_uses_fixed_crop_rotation_not_locator_orientation():
         {"roi": "bottom_left", "orientation": "rot180"},
     )
 
-    assert normal_key == "CAPI13|MODEL-A|bottom_left|rot180"
-    assert locator_rotated_key == normal_key
+    assert normal_key == "CAPI13|MODEL-A|bottom_left|locator-normal"
+    assert locator_rotated_key == "CAPI13|MODEL-A|bottom_left|locator-rot180"
+    assert normal_key != locator_rotated_key
+    legacy_key = "CAPI13|MODEL-A|bottom_left|rot180"
+    temporal = MarkTemporalStabilizer(
+        lambda key, limit: ["14"] * 100 if key == legacy_key else []
+    )
+    for key in (normal_key, locator_rotated_key):
+        result = temporal.observe(key, "C4")
+        assert result["final_text"] == "C4"
+        assert result["temporal_history_count"] == 1
 
 
 def test_normalize_mark_text_rejects_non_two_character_results():
