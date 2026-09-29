@@ -193,12 +193,12 @@ class TestConfigParamDefaults:
         assert param is not None
         assert param["param_type"] == "bool"
         assert param["decoded_value"] is False
-        assert "MARK PPOCR Crop 固定再旋轉 180°" in param["description"]
+        assert "MARK PPOCR Crop 依定位方向處理" in param["description"]
 
         settings_html = (
             Path(__file__).resolve().parent.parent / "templates" / "settings.html"
         ).read_text(encoding="utf-8")
-        assert "MARK PPOCR Crop 固定再旋轉 180°" in settings_html
+        assert "MARK PPOCR Crop 依定位方向處理" in settings_html
 
     def test_inference_rotation_description_refresh_preserves_enabled_value(self, tmp_path):
         db = _make_db(tmp_path)
@@ -220,7 +220,7 @@ class TestConfigParamDefaults:
 
         param = db.get_config_param("inference_rotate_180_enabled")
         assert param["decoded_value"] is True
-        assert "MARK PPOCR Crop 固定再旋轉 180°" in param["description"]
+        assert "MARK PPOCR Crop 依定位方向處理" in param["description"]
 
     def test_pixel_grid_descriptions_drop_resolution_restriction(self, tmp_path):
         db = _make_db(tmp_path)

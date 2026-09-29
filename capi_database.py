@@ -6770,7 +6770,7 @@ class CAPIDatabase:
             ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
             ("side_white_detection_enabled", config.side_white_detection_enabled, "bool", "側拍白畫面檢測：僅記錄候選與 Review，不影響最終判定及 AOI／QJPG 回報"),
             ("side_white_detection_params", config.side_white_detection_params, "dict", "側拍白畫面檢測參數：最低局部反差、雜訊門檻倍率、最小候選面積、邊緣排除寬度"),
-            ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；MARK PPOCR Crop 固定再旋轉 180°；不修改原始檔）"),
+            ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；MARK PPOCR Crop 依定位方向處理：normal 不旋轉，rot180 才旋轉 180°；不修改原始檔）"),
             ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
             ("threshold_mapping", config.threshold_mapping, "dict", "前綴 → 獨立閾值映射"),
             ("patchcore_filter_enabled", config.patchcore_filter_enabled, "bool", "啟用 PatchCore 後處理進階過濾"),
