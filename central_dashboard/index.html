@@ -25,6 +25,7 @@
     </script>
     <link rel="stylesheet" href="./styles.css">
     <script defer src="./config.js"></script>
+    <script defer src="./chart.umd.min.js"></script>
     <script defer src="./inference-errors.js"></script>
     <script defer src="./app.js"></script>
 </head>
@@ -77,19 +78,16 @@
     </header>
 
     <main>
-        <div id="mode-tabs" class="mode-tabs" role="group" aria-label="看板模式">
-            <span class="process-tabs-label">看板模式</span>
-            <div class="process-tab-list">
-                <button class="mode-tab" type="button" data-mode="realtime" aria-pressed="true">即時</button>
-                <button class="mode-tab" type="button" data-mode="history" aria-pressed="false">歷史班報</button>
-            </div>
-        </div>
-
-        <div id="process-tabs" class="process-tabs" role="group" aria-label="製程類別" hidden>
+        <div id="process-tabs" class="process-tabs" role="group" aria-label="製程類別與看板模式">
             <span class="process-tabs-label">製程類別</span>
-            <div class="process-tab-list">
+            <div class="process-tab-list" id="process-tab-list" hidden>
                 <button class="process-tab" type="button" data-process-zone="capi">CAPI</button>
                 <button class="process-tab" type="button" data-process-zone="aapi">AAPI</button>
+            </div>
+            <div id="mode-tabs" class="mode-tab-list" role="group" aria-label="看板模式">
+                <span class="process-tabs-label">看板模式</span>
+                <button class="mode-tab" type="button" data-mode="realtime" aria-pressed="true">即時</button>
+                <button class="mode-tab" type="button" data-mode="history" aria-pressed="false">歷史班報</button>
             </div>
         </div>
 
@@ -187,6 +185,52 @@
                     </thead>
                     <tbody id="history-overview" aria-live="polite"></tbody>
                 </table>
+            </div>
+
+            <div id="trend-section" class="trend-section" aria-labelledby="trend-title">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">TREND</p>
+                        <h2 id="trend-title">歷史趨勢</h2>
+                    </div>
+                </div>
+
+                <div class="history-query-bar trend-query-bar">
+                    <label class="history-field">
+                        <span class="history-field-label">起始日期</span>
+                        <input type="date" id="trend-from">
+                    </label>
+                    <label class="history-field">
+                        <span class="history-field-label">結束日期</span>
+                        <input type="date" id="trend-to">
+                    </label>
+                    <div class="history-field" role="group" aria-label="班別">
+                        <span class="history-field-label">班別</span>
+                        <div id="trend-shift-tabs" class="history-shift-tabs">
+                            <button type="button" class="history-shift-tab" data-shift-filter="all" aria-pressed="true">全部</button>
+                            <button type="button" class="history-shift-tab" data-shift-filter="day" aria-pressed="false">白班</button>
+                            <button type="button" class="history-shift-tab" data-shift-filter="night" aria-pressed="false">晚班</button>
+                        </div>
+                    </div>
+                    <div class="history-field" role="group" aria-label="指標">
+                        <span class="history-field-label">指標</span>
+                        <div id="trend-metric-tabs" class="history-shift-tabs">
+                            <button type="button" class="history-shift-tab" data-metric="aoi" aria-pressed="true">AOI 排片率</button>
+                            <button type="button" class="history-shift-tab" data-metric="ai" aria-pressed="false">AI 排片率</button>
+                            <button type="button" class="history-shift-tab" data-metric="total" aria-pressed="false">當班投入量</button>
+                        </div>
+                    </div>
+                    <p class="history-note">僅統計已結束的班別；進行中的班別自動略過。</p>
+                </div>
+
+                <div id="trend-lines" class="trend-lines" aria-label="線體選擇"></div>
+
+                <div class="trend-chart-wrap">
+                    <canvas id="trend-canvas"></canvas>
+                    <p id="trend-empty" class="history-message" hidden>查無資料：所選區間與線體沒有任何已結束班別的紀錄。</p>
+                </div>
+
+                <ul id="trend-issues" class="trend-issues"></ul>
             </div>
         </section>
 

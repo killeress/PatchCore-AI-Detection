@@ -2276,6 +2276,85 @@ class CAPIDatabase:
         result["end"] = shift_end.strftime("%Y-%m-%d %H:%M:%S")
         return result
 
+    _SHIFT_SERIES_MAX_SPAN_DAYS = 62
+
+    def get_shift_series(self, from_date: str, to_date: str) -> List[Dict]:
+        """區間內每日白班/晚班的統計序列（歷史趨勢用）。
+
+        只回傳已完結的班別（統計區間 end <= now）；無紀錄的班別補零。
+        分桶規則：created_at 往前平移 7.5 小時後，日期即起班日、
+        12:00 前為白班、之後為晚班。
+        """
+        try:
+            start_day = datetime.strptime(str(from_date), "%Y-%m-%d")
+            end_day = datetime.strptime(str(to_date), "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"無效的日期格式：{from_date!r} ~ {to_date!r}（預期 YYYY-MM-DD）"
+            )
+        if end_day < start_day:
+            raise ValueError("起始日期不可晚於結束日期")
+        if (end_day - start_day).days + 1 > self._SHIFT_SERIES_MAX_SPAN_DAYS:
+            raise ValueError(
+                f"區間跨度不可超過 {self._SHIFT_SERIES_MAX_SPAN_DAYS} 天"
+            )
+
+        range_start = start_day.replace(hour=7, minute=30)
+        range_end = (end_day + timedelta(days=1)).replace(hour=7, minute=30)
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT
+                     date(created_at, '-450 minutes') AS shift_date,
+                     CASE WHEN time(created_at, '-450 minutes') < '12:00:00'
+                          THEN 'day' ELSE 'night' END AS shift,
+                     COUNT(*) as total,
+                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
+                     SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng_count,
+                     SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count
+                   FROM inference_records
+                   WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
+                   GROUP BY shift_date, shift""",
+                (
+                    range_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    range_end.strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        counts = {(row["shift_date"], row["shift"]): row for row in rows}
+        now = datetime.now()
+        series: List[Dict] = []
+        day = start_day
+        while day <= end_day:
+            date_str = day.strftime("%Y-%m-%d")
+            for shift in ("day", "night"):
+                shift_name, shift_start, shift_end = self._get_shift_window_for_date(
+                    date_str, shift
+                )
+                if shift_end > now:
+                    continue  # 未完結的班別不回傳
+                row = counts.get((date_str, shift))
+                series.append(
+                    {
+                        "date": date_str,
+                        "shift": shift,
+                        "shift_name": shift_name,
+                        "start": shift_start.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": shift_end.strftime("%Y-%m-%d %H:%M:%S"),
+                        "total": int(row["total"]) if row else 0,
+                        "ok_count": int(row["ok_count"] or 0) if row else 0,
+                        "ng_count": int(row["ng_count"] or 0) if row else 0,
+                        "aoi_ng_count": int(row["aoi_ng_count"] or 0) if row else 0,
+                        "err_count": int(row["err_count"] or 0) if row else 0,
+                    }
+                )
+            day += timedelta(days=1)
+        return series
+
     def get_shift_statistics(self, now: Optional[datetime] = None) -> Dict:
         """取得當班統計（白班 07:30~19:30 / 夜班 19:30~07:30）"""
         shift_name, shift_start, shift_end = self._get_shift_window(now or datetime.now())
