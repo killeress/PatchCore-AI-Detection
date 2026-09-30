@@ -58,6 +58,7 @@ CODE_FILES = [
     "capi_normalization_config.py",
     "capi_model_validation.py",
     "capi_preprocess.py",
+    "capi_boundary_refinement.py",
     "capi_patchcore_feature_cleaning.py",
     "capi_patchcore_post_processor.py",
     "capi_patchcore_softpatch.py",

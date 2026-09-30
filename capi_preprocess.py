@@ -13,6 +13,7 @@ import cv2
 from capi_image_orientation import read_detection_image
 from capi_image_preprocess_lab import apply_preprocess_method, normalize_preprocess_pipeline
 from capi_image_naming import CAPI_LIGHTING_PREFIXES, canonical_image_prefix
+from capi_boundary_refinement import refine_panel_polygon_from_raw
 
 
 logger = logging.getLogger("capi.preprocess")
@@ -159,6 +160,8 @@ class PreprocessConfig:
     aoi_only_fast_path_enabled: bool = False
     # Recover only after legacy detection fails, before producing final tiles.
     recover_failed_raw_boundary: bool = False
+    # Refine a successful coarse polygon from raw pixels before creating masks.
+    raw_gradient_refinement_enabled: bool = False
 
     def __post_init__(self):
         if self.outer_edge_extend is None:
@@ -172,6 +175,7 @@ def panel_boundary_config_for_station(profile: str, *, for_training: bool = Fals
         "large_panel_min_width_ratio": 0.75 if profile == "capi" else 0.85,
         "large_panel_min_height_ratio": 0.60 if profile == "capi" else 0.80,
         "raw_boundary_max_edge_residual_p95_ratio": 0.04 if profile == "capi" else 0.03,
+        "raw_gradient_refinement_enabled": profile == "capi",
     }
     if for_training:
         settings["recover_failed_raw_boundary"] = profile in ("capi", "aapi")
@@ -187,6 +191,15 @@ def image_preprocess_pipeline_for_zone(
     if zone in ("inner", "edge") and zone in pipelines:
         return list(pipelines[zone] or [])
     return list(getattr(config, "image_preprocess_pipeline", None) or [])
+
+
+def _refine_raw_polygon(image, polygon, config, *, source_name=""):
+    # Small products have a separate dim-band recovery path; its outer edge
+    # must not be pulled back to a stronger inner brightness transition.
+    if (config.enable_panel_polygon and config.raw_gradient_refinement_enabled
+            and not _use_robust_panel_boundary(config)):
+        return refine_panel_polygon_from_raw(image, polygon, source_name=source_name)
+    return polygon
 
 
 @dataclass
@@ -655,6 +668,8 @@ def detect_panel_boundary(
         polygon[:, 0] /= scale_x
         polygon[:, 1] /= scale_y
 
+    polygon = _refine_raw_polygon(image, polygon, config, source_name=source_name)
+
     if polygon is not None:
         status = "ok"
     elif not config.enable_panel_polygon and bbox is not None:
@@ -788,6 +803,7 @@ def detect_panel_geometry(
     bbox, polygon = detect_panel_polygon(
         processed_image if processed_image is not None else image, config,
     )
+    polygon = _refine_raw_polygon(image, polygon, config, source_name=source_name)
     if polygon is None and _can_recover_raw_boundary(config, recovery_polygon, bbox):
         polygon = recovery_polygon.copy()
         logger.info("[boundary] raw recovery source=%s reason=legacy_polygon_failed", source_name or "-")
@@ -1273,6 +1289,9 @@ def preprocess_panel_image(
             polygon = reference_polygon
         else:
             bbox, polygon = detect_panel_polygon(img, config)
+            polygon = _refine_raw_polygon(
+                original_img, polygon, config, source_name=image_path.name,
+            )
     else:
         polygon = (
             reference_polygon
