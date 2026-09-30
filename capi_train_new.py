@@ -62,6 +62,7 @@ SUPPORTED_LIGHTINGS = (
     "W0F00010",
     "WGF50500",
     "U0F00000",
+    "PWM00000",
     "STANDARD",
 )
 ZONE_INNER = "inner"

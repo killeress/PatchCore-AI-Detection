@@ -117,6 +117,7 @@ def _default_within_spec_judgment_rules() -> Dict[str, Any]:
                 "U0F00000": standard_screen("U0F00000"),
                 "WGF25250": standard_screen("WGF25250"),
                 "W0F00010": standard_screen("W0F00010"),
+                "PWM00000": standard_screen("PWM00000"),
                 "WGF50500": standard_screen("WGF50500(50灰)"),
                 "G0F00000": standard_screen("G0F00000(綠畫面)"),
                 "R0F00000": standard_screen("R0F00000(紅畫面)"),
@@ -318,6 +319,9 @@ class CAPIConfig:
     image_abnormal_wgf50500_mean_upper: int = 92
     image_abnormal_w0f00010_mean_lower: int = 72
     image_abnormal_w0f00010_mean_upper: int = 92
+    # PWM brightness is not calibrated yet; configure its own range on site.
+    image_abnormal_pwm00000_mean_lower: int = 0
+    image_abnormal_pwm00000_mean_upper: int = 255
     image_abnormal_g0f00000_mean_lower: int = 67
     image_abnormal_g0f00000_mean_upper: int = 87
     image_abnormal_r0f00000_mean_lower: int = 71
@@ -643,6 +647,8 @@ class CAPIConfig:
                     data.get("image_abnormal_wgf50500_mean_threshold", 92),
                 ),
             ),
+            image_abnormal_pwm00000_mean_lower=data.get("image_abnormal_pwm00000_mean_lower", 0),
+            image_abnormal_pwm00000_mean_upper=data.get("image_abnormal_pwm00000_mean_upper", 255),
             image_abnormal_g0f00000_mean_lower=data.get("image_abnormal_g0f00000_mean_lower", 67),
             image_abnormal_g0f00000_mean_upper=data.get(
                 "image_abnormal_g0f00000_mean_upper",
@@ -789,6 +795,8 @@ class CAPIConfig:
             "image_abnormal_wgf50500_mean_upper": self.image_abnormal_wgf50500_mean_upper,
             "image_abnormal_w0f00010_mean_lower": self.image_abnormal_w0f00010_mean_lower,
             "image_abnormal_w0f00010_mean_upper": self.image_abnormal_w0f00010_mean_upper,
+            "image_abnormal_pwm00000_mean_lower": self.image_abnormal_pwm00000_mean_lower,
+            "image_abnormal_pwm00000_mean_upper": self.image_abnormal_pwm00000_mean_upper,
             "image_abnormal_g0f00000_mean_lower": self.image_abnormal_g0f00000_mean_lower,
             "image_abnormal_g0f00000_mean_upper": self.image_abnormal_g0f00000_mean_upper,
             "image_abnormal_r0f00000_mean_lower": self.image_abnormal_r0f00000_mean_lower,
@@ -911,6 +919,8 @@ class CAPIConfig:
             "image_abnormal_wgf50500_mean_upper": self.image_abnormal_wgf50500_mean_upper,
             "image_abnormal_w0f00010_mean_lower": self.image_abnormal_w0f00010_mean_lower,
             "image_abnormal_w0f00010_mean_upper": self.image_abnormal_w0f00010_mean_upper,
+            "image_abnormal_pwm00000_mean_lower": self.image_abnormal_pwm00000_mean_lower,
+            "image_abnormal_pwm00000_mean_upper": self.image_abnormal_pwm00000_mean_upper,
             "image_abnormal_g0f00000_mean_lower": self.image_abnormal_g0f00000_mean_lower,
             "image_abnormal_g0f00000_mean_upper": self.image_abnormal_g0f00000_mean_upper,
             "image_abnormal_r0f00000_mean_lower": self.image_abnormal_r0f00000_mean_lower,
@@ -1115,6 +1125,8 @@ class CAPIConfig:
             "image_abnormal_wgf50500_mean_upper",
             "image_abnormal_w0f00010_mean_lower",
             "image_abnormal_w0f00010_mean_upper",
+            "image_abnormal_pwm00000_mean_lower",
+            "image_abnormal_pwm00000_mean_upper",
             "image_abnormal_g0f00000_mean_lower",
             "image_abnormal_g0f00000_mean_upper",
             "image_abnormal_r0f00000_mean_lower",

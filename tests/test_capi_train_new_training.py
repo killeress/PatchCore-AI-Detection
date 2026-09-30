@@ -44,15 +44,19 @@ def test_normalize_training_units_accepts_all_aapi_model_families():
         "WGF50500-edge",
         "U0F00000-inner",
         "U0F00000-edge",
+        "PWM00000-inner",
+        "PWM00000-edge",
         "STANDARD-inner",
         "STANDARD-edge",
     ])
 
-    assert len(units) == 16
+    assert len(units) == 18
     assert ("WGF25250", "inner") in units
     assert ("W0F00010", "inner") in units
     assert ("WGF50500", "inner") in units
     assert ("U0F00000", "edge") in units
+    assert ("PWM00000", "inner") in units
+    assert ("PWM00000", "edge") in units
 
 
 def test_normalize_training_units_default_remains_capi_ten_units():

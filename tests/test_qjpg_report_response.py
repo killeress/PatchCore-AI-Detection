@@ -394,6 +394,7 @@ def test_qjpg_response_keeps_aapi_reserved_model_prefixes_independent():
     cases = (
         ("YQ52TR205A41WGF25250073954.tif", "WGF25250"),
         ("YQ52TR205A41U0F00000073953.tif", "U0F00000"),
+        ("T863MF77AD50PWM00000000626.tif", "PWM00000"),
     )
 
     for image_name, expected_prefix in cases:
@@ -503,7 +504,7 @@ def test_qjpg_response_uses_bomb_code_for_bomb_defect_even_when_internal_ok():
     assert response == "@QJPG-G1;OK;EJ;NGBMB990096000540W0F00000,"
 
 
-@pytest.mark.parametrize("screen", ["W0F00000", "G0F00000"])
+@pytest.mark.parametrize("screen", ["W0F00000", "G0F00000", "PWM00000"])
 def test_qjpg_response_uses_image_abnormal_code_for_hy(screen):
     response = build_qjpg_response(
         {"glass_id": "G1", "resolution": (2000, 1000), "image_dir": "D:/panels/W0F00000_114438.tif"},

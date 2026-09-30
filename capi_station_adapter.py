@@ -116,6 +116,7 @@ class AAPIStationAdapter(StationAdapter):
         "W0F00010",
         "WGF50500",
         "U0F00000",
+        "PWM00000",
         "WINDOWS_BG",
     )
     boundary_reference_priority = (
@@ -127,6 +128,7 @@ class AAPIStationAdapter(StationAdapter):
         "WGF25250",
         "W0F00010",
         "WGF50500",
+        "PWM00000",
     )
 
     _SOURCE_PREFIXES: Tuple[Tuple[str, str], ...] = (
@@ -135,6 +137,7 @@ class AAPIStationAdapter(StationAdapter):
         ("WINDOWS_BG", "WINDOWS_BG"),
         ("STANDARD", "WINDOWS_BG"),
         ("W0F00010", "W0F00010"),
+        ("PWM00000", "PWM00000"),
         ("WGF25250", "WGF25250"),
         ("WGF50500", "WGF50500"),
         ("G0F00000", "G0F00000"),
@@ -142,14 +145,16 @@ class AAPIStationAdapter(StationAdapter):
         ("W0F00000", "W0F00000"),
         ("U0F00000", "U0F00000"),
         ("B0F00000", "B0F00000"),
+        ("B8F00000", "B0F00000"),
         ("PINIGBI0", "PINIGBI"),
     )
     _MODEL_ALIASES = {
         "WINDOWS_BG": "STANDARD",
+        "B8F00000": "B0F00000",
     }
     _REPORT_RECORD = re.compile(
-        r"(White_Frame|BWFRAME0|Windows_BG|STANDARD|W0F00010|WGF25250|"
-        r"WGF50500|G0F00000|R0F00000|W0F00000|U0F00000|B0F00000),"
+        r"(White_Frame|BWFRAME0|Windows_BG|STANDARD|W0F00010|PWM00000|WGF25250|"
+        r"WGF50500|G0F00000|R0F00000|W0F00000|U0F00000|B0F00000|B8F00000),"
         r"([A-Za-z0-9]+)\((\d+),(\d+)\)",
         re.IGNORECASE,
     )
@@ -157,6 +162,9 @@ class AAPIStationAdapter(StationAdapter):
     def image_prefix(self, image_name: str) -> str:
         stem = Path(str(image_name)).stem
         upper = stem.upper()
+        # Client bomb coordinates and CLI lookups can pass a bare screen code.
+        if upper == "B8F00000":
+            return "B0F00000"
         for source, internal in self._SOURCE_PREFIXES:
             marker = source.upper()
             index = upper.rfind(marker)
