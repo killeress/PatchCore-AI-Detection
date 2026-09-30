@@ -66,8 +66,10 @@ def test_failed_candidates_reused_only_without_a_new_reference(
     calls.clear()
     after = pre.preprocess_panel_folder(tmp_path, replace(cfg, aoi_only_fast_path_enabled=True))
     if success_at is None and not generate_grid and not canonical:
-        assert before_calls == 9
-        assert len(calls) == 5
+        # Legacy retries every lighting except the selected first reference;
+        # the fast path reuses each failed candidate regardless of list size.
+        assert before_calls == 2 * len(prefixes) - 1
+        assert len(calls) == len(prefixes)
     else:
         assert len(calls) == before_calls
     assert list(after) == list(before)
