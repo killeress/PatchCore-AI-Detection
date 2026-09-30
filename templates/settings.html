@@ -2179,6 +2179,7 @@
         {% if station_name|default('CAPI')|upper == 'AAPI' %}
         ['WGF25250', 'WGF25250'],
         ['W0F00010', 'W0F00010'],
+        ['PWM00000', 'PWM00000'],
         {% endif %}
     ];
     const WITHIN_SPEC_DOT_TYPES = [
@@ -4066,6 +4067,9 @@
             {% endif %}
             ['WGF50500', '50 灰畫面', 'image_abnormal_wgf50500_mean_lower', 'image_abnormal_wgf50500_mean_upper'],
             ['W0F00010', 'W0F00010 畫面', 'image_abnormal_w0f00010_mean_lower', 'image_abnormal_w0f00010_mean_upper'],
+            {% if station_name|default('CAPI')|upper == 'AAPI' %}
+            ['PWM00000', 'PWM00000 畫面', 'image_abnormal_pwm00000_mean_lower', 'image_abnormal_pwm00000_mean_upper'],
+            {% endif %}
             ['G0F00000', '綠畫面', 'image_abnormal_g0f00000_mean_lower', 'image_abnormal_g0f00000_mean_upper'],
             ['R0F00000', '紅畫面', 'image_abnormal_r0f00000_mean_lower', 'image_abnormal_r0f00000_mean_upper'],
             ['W0F00000', '白畫面', 'image_abnormal_w0f00000_mean_lower', 'image_abnormal_w0f00000_mean_upper'],
@@ -4216,6 +4220,7 @@
                     U0F00000: standardScreen('U0F00000'),
                     WGF25250: standardScreen('WGF25250'),
                     W0F00010: standardScreen('W0F00010'),
+                    PWM00000: standardScreen('PWM00000'),
                     WGF50500: standardScreen('WGF50500(50灰)'),
                     G0F00000: standardScreen('G0F00000(綠畫面)'),
                     R0F00000: standardScreen('R0F00000(紅畫面)'),
@@ -4738,6 +4743,8 @@
         'image_abnormal_wgf50500_mean_upper': 'WGF50500 產品區平均亮度上限',
         'image_abnormal_w0f00010_mean_lower': 'W0F00010 產品區平均亮度下限',
         'image_abnormal_w0f00010_mean_upper': 'W0F00010 產品區平均亮度上限',
+        'image_abnormal_pwm00000_mean_lower': 'PWM00000 產品區平均亮度下限',
+        'image_abnormal_pwm00000_mean_upper': 'PWM00000 產品區平均亮度上限',
         'image_abnormal_g0f00000_mean_lower': 'G0F00000 產品區平均亮度下限',
         'image_abnormal_g0f00000_mean_upper': 'G0F00000 產品區平均亮度上限',
         'image_abnormal_r0f00000_mean_lower': 'R0F00000 產品區平均亮度下限',

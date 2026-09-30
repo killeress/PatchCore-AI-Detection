@@ -1102,11 +1102,16 @@ class CAPIInferencer:
 
         CAPI U0F00000 必須有獨立模型；加入 U0F00000 後，STANDARD 也不能
         使用預設模型代替，避免兩種同片畫面再次共用錯誤模型。
+        AAPI PWM00000 同樣必須有獨立模型。
         """
         prefix = self._get_model_prefix(prefix)
-        independent_capi_screen = self.station_adapter.profile == "capi" and (
-            prefix == "U0F00000"
-            or (prefix == "STANDARD" and "U0F00000" in self._model_mapping)
+        independent_screen = (
+            self.station_adapter.profile == "capi" and (
+                prefix == "U0F00000"
+                or (prefix == "STANDARD" and "U0F00000" in self._model_mapping)
+            )
+        ) or (
+            self.station_adapter.profile == "aapi" and prefix == "PWM00000"
         )
         # 查找映射
         if prefix in self._model_mapping:
@@ -1124,12 +1129,12 @@ class CAPIInferencer:
                 self._inferencers[path_key] = inf
                 return inf
             else:
-                if independent_capi_screen:
+                if independent_screen:
                     raise RuntimeError(f"{prefix} 獨立模型載入失敗，請確認 model_mapping")
                 print(f"⚠️ {prefix} 模型載入失敗，fallback 到預設模型")
         
         # Fallback: 使用預設模型
-        if independent_capi_screen:
+        if independent_screen:
             raise RuntimeError(f"{prefix} 缺少獨立模型，請設定 model_mapping 後重新推論")
         return self.inferencer
     
@@ -6479,6 +6484,8 @@ class CAPIInferencer:
             )
             return base_report, 0
 
+        # Forced candidates must use the same station key as AOI records/files.
+        image_prefix = self._get_image_prefix(image_prefix)
         coords: List[Tuple[int, int]] = []
         for coord in raw_coords:
             if len(coord) < 2:

@@ -601,13 +601,14 @@ def _image_prefix_for_report(image_name: str) -> str:
     return source_image_prefix(image_name)
 
 
-_REPORT_SCREEN_PREFIXES = ("W0F00010",) + CANONICAL_IMAGE_PREFIXES
+_REPORT_SCREEN_PREFIXES = ("W0F00010", "PWM00000", "B8F00000") + CANONICAL_IMAGE_PREFIXES
 
 _IMAGE_ABNORMAL_SCREEN_FIELDS = (
     ("STANDARD", "image_abnormal_standard_mean_lower", "image_abnormal_standard_mean_upper"),
     ("U0F00000", "image_abnormal_u0f00000_mean_lower", "image_abnormal_u0f00000_mean_upper"),
     ("WGF50500", "image_abnormal_wgf50500_mean_lower", "image_abnormal_wgf50500_mean_upper"),
     ("W0F00010", "image_abnormal_w0f00010_mean_lower", "image_abnormal_w0f00010_mean_upper"),
+    ("PWM00000", "image_abnormal_pwm00000_mean_lower", "image_abnormal_pwm00000_mean_upper"),
     ("G0F00000", "image_abnormal_g0f00000_mean_lower", "image_abnormal_g0f00000_mean_upper"),
     ("R0F00000", "image_abnormal_r0f00000_mean_lower", "image_abnormal_r0f00000_mean_upper"),
     ("W0F00000", "image_abnormal_w0f00000_mean_lower", "image_abnormal_w0f00000_mean_upper"),
@@ -619,7 +620,7 @@ def _screen_prefix_from_text(value: str) -> str:
     upper_value = str(value or "").upper()
     for prefix in _REPORT_SCREEN_PREFIXES:
         if prefix in upper_value:
-            return prefix
+            return "B0F00000" if prefix == "B8F00000" else prefix
     return ""
 
 

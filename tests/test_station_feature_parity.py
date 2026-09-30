@@ -130,6 +130,7 @@ def test_black_debug_uses_white_reference(station, handler_factory):
 @pytest.mark.parametrize("source,expected", [
     ("W0F00000", "W0F00000"), ("W0F00010", "W0F00010"),
     ("WGF25250", "WGF25250"), ("U0F00000", "U0F00000"),
+    ("PWM00000", "PWM00000"),
     ("Windows_BG", "STANDARD"), ("STANDARD", "STANDARD"),
 ])
 def test_aapi_mes_candidates_and_saved_crop_keep_model_lighting(handler_factory, source, expected, tmp_path):
@@ -160,6 +161,7 @@ def test_aapi_mes_candidates_and_saved_crop_keep_model_lighting(handler_factory,
     ("W0F00000", "W0F00000", "W0F00000"),
     ("Windows_BG", "STANDARD", "STANDARD"),
     ("U0F00000", "U0F00000", "U0F00000"),
+    ("PWM00000", "PWM00000", "PWM00000"),
 ])
 def test_aapi_over_retrain_pool_matches_ric_lighting(handler_factory, tmp_path, source, report, expected):
     handler, image = handler_factory(create_station_adapter("aapi"), source)

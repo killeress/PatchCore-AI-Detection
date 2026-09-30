@@ -109,6 +109,7 @@ def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):
         "YQ52TR205A41WGF25250073954.tif",
         "YQ52TR205A41WGF50500073958.tif",
         "YQ52TR205A41U0F00000073953.tif",
+        "YQ52TR205A41PWM00000073957.tif",
         "YQ52TR205A41Windows_BG073957.tif",
     )
     for image_name in image_names:
@@ -145,13 +146,17 @@ def test_preprocess_panels_to_pool_accepts_aapi_glass_prefixed_images(tmp_path):
     assert stats["panel_success"] == 1
     assert {tile["lighting"] for tile in db.tiles} == {
         "G0F00000", "R0F00000", "W0F00000", "WGF25250",
-        "W0F00010", "WGF50500", "U0F00000", "STANDARD",
+        "W0F00010", "WGF50500", "U0F00000", "PWM00000", "STANDARD",
     }
     tile_names = {Path(tile["source_path"]).name for tile in db.tiles}
     assert any("W0F00010" in name for name in tile_names)
     assert any("WGF25250" in name for name in tile_names)
     assert any("WGF50500" in name for name in tile_names)
     assert any("U0F00000" in name for name in tile_names)
+    assert any("PWM00000" in name for name in tile_names)
+    pwm_tiles = [tile for tile in db.tiles if tile["lighting"] == "PWM00000"]
+    assert {tile["zone"] for tile in pwm_tiles} == {"inner", "edge"}
+    assert all("PWM00000" in Path(tile["source_path"]).name for tile in pwm_tiles)
     w0f00010_tiles = [tile for tile in db.tiles if tile["lighting"] == "W0F00010"]
     wgf50500_tiles = [tile for tile in db.tiles if tile["lighting"] == "WGF50500"]
     assert w0f00010_tiles and wgf50500_tiles

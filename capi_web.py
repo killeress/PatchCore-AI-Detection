@@ -16983,12 +16983,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
             if preprocess_after_tiling:
                 from capi_preprocess import (
-                    LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image,
+                    PreprocessConfig, preprocess_panel_image,
                     panel_boundary_config_for_station,
                 )
 
                 lighting = station_adapter.training_image_prefix(image_path.name)
-                if lighting not in LIGHTING_PREFIXES:
+                if lighting not in station_adapter.training_prefixes:
                     lighting = "STANDARD"
                 pre_cfg = PreprocessConfig(
                     **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
@@ -17057,12 +17057,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             else:
                 if grid_canonicalization["enabled"]:
                     from capi_preprocess import (
-                        LIGHTING_PREFIXES, PreprocessConfig, preprocess_panel_image,
+                        PreprocessConfig, preprocess_panel_image,
                         panel_boundary_config_for_station,
                     )
 
                     lighting = station_adapter.training_image_prefix(image_path.name)
-                    if lighting not in LIGHTING_PREFIXES:
+                    if lighting not in station_adapter.training_prefixes:
                         lighting = "STANDARD"
                     pre_cfg = PreprocessConfig(
                         **panel_boundary_config_for_station(station_adapter.profile, for_training=True),

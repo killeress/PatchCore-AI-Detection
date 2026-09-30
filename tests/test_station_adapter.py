@@ -106,7 +106,7 @@ def test_aapi_filename_mapping_keeps_source_images_distinct():
     assert adapter.training_image_prefix("YQ607S210B12W0F00010164822.tif") == "W0F00010"
     assert adapter.training_prefixes == (
         "G0F00000", "R0F00000", "W0F00000", "WGF25250",
-        "W0F00010", "WGF50500", "U0F00000", "STANDARD",
+        "W0F00010", "WGF50500", "U0F00000", "PWM00000", "STANDARD",
     )
 
 
