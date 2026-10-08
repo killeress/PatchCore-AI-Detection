@@ -116,6 +116,68 @@ def test_parse_request_keeps_standard_no_bomb_image_dir():
     assert parsed["aoi_report_payload"] == ""
 
 
+@pytest.mark.parametrize("with_regular_ng", [False, True])
+def test_server_forwards_csjbl_unchanged_without_within_spec(tmp_path, with_regular_ng):
+    import json
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from capi_inference import AOIReportDefect
+    from capi_server import CAPIServer
+    from capi_station_adapter import create_station_adapter
+
+    report = {"W0F00000": [AOIReportDefect("CSJBL", 130, 1080, "W0F00000")]}
+    result = _image_result("G0F00000_082536.tif", mark_text="MA")
+    if with_regular_ng:
+        tile = _tile(1, 600, 450)
+        result.tiles = [tile]
+        result.anomaly_tiles = [(tile, 0.91, None)]
+    config = CAPIConfig()
+    inferencer = SimpleNamespace(
+        config=config,
+        process_panel=MagicMock(return_value=([result], None, False, "", False, None, report)),
+    )
+    server = CAPIServer.__new__(CAPIServer)
+    server.path_mapping = {}
+    server.cpu_workers = 1
+    server._gpu_lock = threading.Lock()
+    server.station_adapter = create_station_adapter("capi")
+    server._get_or_create_inferencer = lambda _: inferencer
+    server._maybe_clear_cuda_cache_after_panel = MagicMock()
+    server._evaluate_within_spec_for_inference = MagicMock(return_value={"converted": True})
+    parsed = {
+        "glass_id": "YQ72C1223E25", "model_id": "GN160JCA5020S",
+        "machine_no": "CAPI09", "machine_judgment": "NG", "image_dir": str(tmp_path),
+    }
+    judgment, details, results, *_ = server._process_request(parsed)
+    assert judgment == "NG"
+    assert json.loads(details)[-1]["defect_code"] == "CSJBL"
+    server._evaluate_within_spec_for_inference.assert_not_called()
+    response = build_dual_protocol_response(parsed, judgment, results, config)
+    assert response.startswith("AOI@YQ72C1223E25;GN160JCA5020S;CAPI09;NG;NG\r\n")
+    assert response.endswith("CSJBL0013001080W0F00000,")
+    assert ("PCDK2" in response) == with_regular_ng
+    assert "PCDK2" not in response or "G0F00000" in response
+
+
+def test_parse_field_report_preserves_csjbl_for_forwarding(tmp_path):
+    report_dir = tmp_path / "report" / "panel"
+    report_dir.mkdir(parents=True)
+    (report_dir / "082540.TXT").write_text(
+        "YQ72C1223E25\n@QJPG-YQ72C1223E25;OK;MA;"
+        "NGC11110035400233G0F00000C11110107500567G0F00000CSJBL0013001080W0F00000,\n",
+        encoding="utf-8",
+    )
+    worker = CAPIInferencer(CAPIConfig(
+        aoi_report_path_replace_from="yuantu", aoi_report_path_replace_to="report",
+    ))
+    report = worker._parse_aoi_report_txt(tmp_path / "yuantu" / "panel")
+    assert len(report["G0F00000"]) == 2
+    side = report["W0F00000"][0]
+    assert (side.defect_code, side.product_x, side.product_y) == ("CSJBL", 130, 1080)
+    assert set(worker._filter_aoi_report_for_inference(report)) == {"G0F00000"}
+
+
 def test_parse_request_extracts_testing_aoi_coordinates_after_image_dir():
     aoi_payload = (
         "W0F00000,CDK2(01092,00131)"

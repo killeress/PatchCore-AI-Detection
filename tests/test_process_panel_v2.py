@@ -100,6 +100,64 @@ def test_process_panel_v2_returns_compatible_tuple(tmp_path):
     assert isinstance(results, list), "results should be List[ImageResult]"
 
 
+@pytest.mark.parametrize("with_regular", [False, True])
+def test_csjbl_skips_inference_and_preserves_source_report(tmp_path, with_regular):
+    from capi_inference import AOIReportDefect, CAPIInferencer
+
+    cfg = _make_config(tmp_path)
+    cfg.grid_tiling_enabled = False
+    cfg.aoi_coord_inspection_enabled = True
+    _write_grey_panel_image(tmp_path, "W0F00000")
+    _write_grey_panel_image(tmp_path, "G0F00000")
+    side = AOIReportDefect("CSJBL", 130, 1080, "W0F00000")
+    report = {"W0F00000": [side]}
+    if with_regular:
+        report["G0F00000"] = [AOIReportDefect("C1111", 354, 233, "G0F00000")]
+    model = MagicMock()
+    model.predict.return_value = _make_fake_predict_result(0.3)
+    with patch.object(CAPIInferencer, "_get_model_for", return_value=model) as load:
+        worker = CAPIInferencer(cfg)
+        results, *_, original = worker._process_panel_v2(
+            tmp_path, aoi_report_override=report, machine_judgment="NG",
+        )
+    assert original == report
+    assert (side.product_x, side.product_y) == (130, 1080)
+    assert all(t.aoi_defect_code != "CSJBL" for r in results for t in r.tiles)
+    if with_regular:
+        assert load.called
+        assert {c.args[1] for c in load.call_args_list} == {"G0F00000"}
+    else:
+        load.assert_not_called()
+        assert results and all(not r.tiles for r in results)
+
+
+def test_csjbl_filter_keeps_other_defects_on_same_screen(tmp_path):
+    from capi_inference import AOIReportDefect, CAPIInferencer
+
+    worker = CAPIInferencer(_make_config(tmp_path))
+    side = AOIReportDefect("CSJBL", 130, 1080, "W0F00000")
+    regular = AOIReportDefect("C1111", 354, 233, "W0F00000")
+    report = {"W0F00000": [side, regular]}
+    assert worker._filter_aoi_report_for_inference(report) == {"W0F00000": [regular]}
+    assert report["W0F00000"] == [side, regular]
+
+
+def test_csjbl_does_not_suppress_independent_client_bomb(tmp_path):
+    from capi_inference import AOIReportDefect, CAPIInferencer
+
+    cfg = _make_config(tmp_path)
+    cfg.bomb_area_force_detection_enabled = True
+    worker = CAPIInferencer(cfg)
+    side = AOIReportDefect("CSJBL", 130, 1080, "W0F00000")
+    report = {"W0F00000": [side]}
+    forced, count = worker._aoi_report_with_forced_client_bomb_coords(report, {
+        "image_prefix": "W0F00000", "defect_type": "point", "coordinates": [(130, 1080)],
+    })
+    assert count == 1
+    assert [d.defect_code for d in worker._filter_aoi_report_for_inference(forced)["W0F00000"]] == ["BOMB_FORCE"]
+    assert report == {"W0F00000": [side]}
+
+
 @pytest.mark.parametrize("grid", [False, True])
 def test_process_panel_v2_keeps_u0f_and_standard_separate(tmp_path, grid):
     from capi_inference import AOIReportDefect, CAPIInferencer

@@ -43,6 +43,7 @@ import torch
 import logging
 import re
 from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix
+
 from capi_image_orientation import (
     read_detection_image, panel_image_cache, timed_inference_stage,
     use_capi_aoi_fast_path,
@@ -103,6 +104,9 @@ from scratch_filter import ScratchFilter
 
 logger = logging.getLogger("capi.inference")
 _MARK_PATCH_SCORE_LOCK = threading.RLock()
+
+# Side-view AOI records are forwarded to Testing without coordinate inference.
+AOI_PASSTHROUGH_CODES = frozenset({"CSJBL"})
 
 
 # ── 產品解析度映射 ─────────────────────────────────────
@@ -6451,6 +6455,8 @@ class CAPIInferencer:
             if not self._aoi_prefix_matches(str(report_prefix), image_prefix):
                 continue
             for defect in defects:
+                if defect.defect_code in AOI_PASSTHROUGH_CODES:
+                    continue
                 if str(getattr(defect, "coordinate_space", "product")).lower() != "product":
                     continue
                 if (
@@ -6534,7 +6540,7 @@ class CAPIInferencer:
         self,
         aoi_report: Dict[str, List['AOIReportDefect']],
     ) -> Dict[str, List['AOIReportDefect']]:
-        """Exclude screens handled by a dedicated detector from PatchCore routing."""
+        """Exclude dedicated screens and forward-only defects from inference."""
         filtered = {
             prefix: list(defects)
             for prefix, defects in (aoi_report or {}).items()
@@ -6546,7 +6552,14 @@ class CAPIInferencer:
             filtered.setdefault("W0F00000", []).extend(
                 replace(defect) for defect in aoi_report["WHITEFRA"]
             )
-        return filtered
+        return {
+            prefix: retained
+            for prefix, defects in filtered.items()
+            if (retained := [
+                defect for defect in defects
+                if defect.defect_code not in AOI_PASSTHROUGH_CODES
+            ])
+        }
 
     def _apply_aoi_coord_inspection(
         self,
@@ -9614,7 +9627,18 @@ class CAPIInferencer:
             and self.config.aoi_coord_inspection_enabled
             and not aoi_report_for_inference
         )
-        if aoi_ok_skip:
+        passthrough_only_skip = bool(
+            not self.config.grid_tiling_enabled
+            and self.config.aoi_coord_inspection_enabled
+            and not aoi_report_for_inference
+            and aoi_report
+            and all(
+                d.defect_code in AOI_PASSTHROUGH_CODES
+                for defects in aoi_report.values() for d in defects
+            )
+        )
+        if aoi_ok_skip or passthrough_only_skip:
+            skip_reason = "AOI_PASSTHROUGH_SKIP" if passthrough_only_skip else "AOI_OK_SKIP"
             mark_source_name = str(
                 (panel_mark_detection or {}).get("source_image") or ""
             )
@@ -9666,14 +9690,14 @@ class CAPIInferencer:
             )
             total_elapsed = time.time() - t0
             print(
-                "[v2] AOI_OK_SKIP: machine_judgment=OK、Grid Tiling 關閉且無 "
-                "AOI/forced 座標；保留 MARK，跳過 OMIT、影像預處理、模型與後處理"
+                f"[v2] {skip_reason}: Grid Tiling 關閉且無待推論 AOI/forced 座標；"
+                "保留 MARK，跳過 OMIT、影像預處理、模型與後處理"
             )
             print(
                 f"📊 Panel {panel_path.name} 總耗時 {total_elapsed:.2f}s | "
                 f"前置={total_elapsed:.2f}s, 預處理=0.00s, Tile準備=0.00s, "
                 f"GPU推論=0.00s, 後處理/收尾=0.00s | "
-                f"{len(mark_results)} MARK result(s), 0 NG, AOI_OK_SKIP"
+                f"{len(mark_results)} MARK result(s), 0 NG, {skip_reason}"
             )
             return (
                 mark_results,
