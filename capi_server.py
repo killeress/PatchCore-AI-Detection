@@ -65,7 +65,7 @@ from capi_image_naming import (
     canonical_image_prefix,
     source_image_prefix,
 )
-from capi_inference import CAPIInferencer, ImageResult, TileInfo, resolve_product_resolution
+from capi_inference import AOI_PASSTHROUGH_CODES, CAPIInferencer, ImageResult, TileInfo, resolve_product_resolution
 from capi_preprocess import (
     BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_geometry,
     panel_boundary_config_for_station,
@@ -1277,6 +1277,8 @@ def build_qjpg_response(
         config,
         bomb_only=ai_judgment in ("OK", "OK-i"),
     )
+    if not ai_judgment.startswith("ERR:"):
+        records.extend((parsed or {}).get("aoi_passthrough_records", []))
 
     if ai_judgment.startswith("ERR:HY"):
         defect_field = "NG" + _format_qjpg_defect_record(
@@ -3635,6 +3637,16 @@ class CAPIServer:
                 is_duplicate = panel_result[4]
                 omit_image_raw = panel_result[5] if len(panel_result) > 5 else None
                 aoi_report = panel_result[6] if len(panel_result) > 6 else {}
+                passthrough_defects = [
+                    defect for defects in (aoi_report or {}).values()
+                    for defect in defects
+                    if defect.defect_code in AOI_PASSTHROUGH_CODES
+                ]
+                # Side views keep source coordinates, without front-view mapping.
+                parsed["aoi_passthrough_records"] = [
+                    f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}"
+                    for d in passthrough_defects
+                ]
 
                 try:
                     white_frame_path = station_adapter.find_white_frame_image(panel_dir)
@@ -3700,7 +3712,24 @@ class CAPIServer:
 
                 within_spec_info = None
                 white_frame_ng = _has_white_frame_ng(results)
-                if ai_judgment.startswith("NG") and white_frame_ng:
+                if passthrough_defects:
+                    ai_judgment = "NG"
+                    details = json.loads(ng_details)
+                    details.extend({
+                        "image": d.image_prefix,
+                        "type": "aoi_passthrough",
+                        "defect_code": d.defect_code,
+                        "product_x": d.product_x,
+                        "product_y": d.product_y,
+                    } for d in passthrough_defects)
+                    ng_details = json.dumps(details, ensure_ascii=False)
+                    logger.info(
+                        "[AOI_PASSTHROUGH] Glass=%s records=%s; forwarded without "
+                        "inference; bypass within-spec OK-i conversion",
+                        parsed.get("glass_id", ""),
+                        ",".join(parsed["aoi_passthrough_records"]),
+                    )
+                elif ai_judgment.startswith("NG") and white_frame_ng:
                     logger.info(
                         "[WHITE_FRAME] Glass=%s formal NG bypasses within-spec OK-i conversion",
                         parsed.get("glass_id", ""),
