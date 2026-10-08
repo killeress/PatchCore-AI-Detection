@@ -7384,6 +7384,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]] = None,
         bomb_list: Optional[List] = None,
         skip_shape_check: bool = False,
+        product_coords: Optional[Tuple[int, int]] = None,
     ) -> Tuple[bool, str]:
         """
         檢查異常 tile 是否匹配炸彈系統的已知座標
@@ -7394,6 +7395,8 @@ class CAPIInferencer:
             tile_center_y: 異常 tile 中心 y (圖片座標)
             raw_bounds: 原始 Otsu 邊界 (用於座標轉換)
             anomaly_map: 該 tile 的 anomaly map (用於 line 型形態驗證)
+            product_coords: 已知的原始 AOI 產品座標；直接比對以免 Polygon 校正後
+                的圖片座標與 raw_bounds 線性映射不一致
             
         Returns:
             (is_bomb, defect_code) - 是否為炸彈, 對應的 Defect Code
@@ -7414,10 +7417,13 @@ class CAPIInferencer:
                 # 線型: 將 tile 位置轉回產品座標，判斷是否在線段容忍帶內
                 pt1 = bomb.coordinates[0]
                 pt2 = bomb.coordinates[1]
-                product_width, product_height = product_resolution
-                x_start, y_start, x_end, y_end = raw_bounds
-                product_x = (tile_center_x - x_start) * product_width / (x_end - x_start)
-                product_y = (tile_center_y - y_start) * product_height / (y_end - y_start)
+                if product_coords is not None:
+                    product_x, product_y = product_coords
+                else:
+                    product_width, product_height = product_resolution
+                    x_start, y_start, x_end, y_end = raw_bounds
+                    product_x = (tile_center_x - x_start) * product_width / (x_end - x_start)
+                    product_y = (tile_center_y - y_start) * product_height / (y_end - y_start)
 
                 if self._point_within_line_segment_tolerance(
                     product_x, product_y, pt1, pt2, tolerance
@@ -7435,6 +7441,14 @@ class CAPIInferencer:
                     
             elif bomb.defect_type == "point":
                 # 點型: 判斷 tile 中心是否在任一炸彈點座標 ± tolerance 範圍內
+                if product_coords is not None:
+                    product_x, product_y = product_coords
+                    for coord in bomb.coordinates:
+                        if (abs(product_x - coord[0]) <= tolerance and
+                            abs(product_y - coord[1]) <= tolerance):
+                            return True, bomb.defect_code
+                    continue
+
                 product_width, product_height = product_resolution
                 x_start, y_start, x_end, y_end = raw_bounds
                 scale_x = (x_end - x_start) / product_width
@@ -8397,7 +8411,7 @@ class CAPIInferencer:
                             anomaly_map=anomaly_map, product_resolution=product_resolution,
                             bomb_list=active_bombs,
                         )
-                        # AOI fallback 使用原始座標；向內平移後 tile 中心不再是 AOI 位置。
+                        # AOI fallback 優先用原始產品座標，避開 Polygon 校正及向內平移的誤差。
                         if not is_bomb and tile.is_aoi_coord_tile:
                             tile_cx, tile_cy = (
                                 (tile.aoi_image_x, tile.aoi_image_y)
@@ -8408,6 +8422,11 @@ class CAPIInferencer:
                                 img_prefix, tile_cx, tile_cy, result.raw_bounds,
                                 anomaly_map=anomaly_map, product_resolution=product_resolution,
                                 bomb_list=active_bombs,
+                                product_coords=(
+                                    (tile.aoi_product_x, tile.aoi_product_y)
+                                    if tile.aoi_product_x >= 0 and tile.aoi_product_y >= 0
+                                    else None
+                                ),
                             )
                         # AOI coord tile 保護: peak 可能被鄰近炸彈亮點吸引，
                         # 需驗證原始 AOI 產品座標本身也在炸彈容忍範圍內
@@ -8486,6 +8505,11 @@ class CAPIInferencer:
                                 img_prefix, tile_cx, tile_cy, result.raw_bounds,
                                 anomaly_map=anomaly_map, product_resolution=product_resolution,
                                 bomb_list=[bomb], skip_shape_check=True,
+                                product_coords=(
+                                    (tile.aoi_product_x, tile.aoi_product_y)
+                                    if tile.aoi_product_x >= 0 and tile.aoi_product_y >= 0
+                                    else None
+                                ),
                             )
                         if is_bomb:
                             tile.is_bomb = True
@@ -9261,7 +9285,7 @@ class CAPIInferencer:
                         product_resolution=product_resolution,
                         bomb_list=active_bombs,
                     )
-                    # AOI fallback 使用原始座標；向內平移後 tile 中心不再是 AOI 位置。
+                    # AOI fallback 優先用原始產品座標，避開 Polygon 校正及向內平移的誤差。
                     if not is_bomb and tile.is_aoi_coord_tile:
                         tile_cx, tile_cy = (
                             (tile.aoi_image_x, tile.aoi_image_y)
@@ -9273,6 +9297,11 @@ class CAPIInferencer:
                             anomaly_map=anomaly_map,
                             product_resolution=product_resolution,
                             bomb_list=active_bombs,
+                            product_coords=(
+                                (tile.aoi_product_x, tile.aoi_product_y)
+                                if tile.aoi_product_x >= 0 and tile.aoi_product_y >= 0
+                                else None
+                            ),
                         )
                     # AOI coord tile 保護: peak 可能被鄰近炸彈亮點吸引而誤判，
                     # 需驗證原始 AOI 產品座標本身也在炸彈容忍範圍內
@@ -9399,6 +9428,11 @@ class CAPIInferencer:
                             img_prefix, tile_cx, tile_cy, result.raw_bounds,
                             anomaly_map=anomaly_map, product_resolution=product_resolution,
                             bomb_list=[bomb], skip_shape_check=True,
+                            product_coords=(
+                                (tile.aoi_product_x, tile.aoi_product_y)
+                                if tile.aoi_product_x >= 0 and tile.aoi_product_y >= 0
+                                else None
+                            ),
                         )
                     if is_bomb:
                         tile.is_bomb = True
