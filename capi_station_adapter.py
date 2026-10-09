@@ -147,6 +147,7 @@ class AAPIStationAdapter(StationAdapter):
         ("B0F00000", "B0F00000"),
         ("B8F00000", "B0F00000"),
         ("PINIGBI0", "PINIGBI"),
+        ("PINIGBI", "PINIGBI"),
     )
     _MODEL_ALIASES = {
         "WINDOWS_BG": "STANDARD",
