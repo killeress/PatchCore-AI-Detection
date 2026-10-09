@@ -8503,10 +8503,17 @@ class CAPIInferencer:
                             continue
                         peak_x = getattr(tile, 'anomaly_peak_x', tile.center[0])
                         peak_y = getattr(tile, 'anomaly_peak_y', tile.center[1])
+                        # 共識只放寬線狀形態；AOI 產品座標仍須位於此炸彈線的容忍範圍。
                         is_bomb, bomb_code = self.check_bomb_match(
                             img_prefix, peak_x, peak_y, result.raw_bounds,
                             anomaly_map=anomaly_map, product_resolution=product_resolution,
                             bomb_list=[bomb], skip_shape_check=True,
+                            product_coords=(
+                                (tile.aoi_product_x, tile.aoi_product_y)
+                                if tile.is_aoi_coord_tile
+                                and tile.aoi_product_x >= 0 and tile.aoi_product_y >= 0
+                                else None
+                            ),
                         )
                         if not is_bomb and tile.is_aoi_coord_tile:
                             tile_cx, tile_cy = (
@@ -9426,10 +9433,17 @@ class CAPIInferencer:
                         continue
                     peak_x = getattr(tile, "anomaly_peak_x", tile.center[0])
                     peak_y = getattr(tile, "anomaly_peak_y", tile.center[1])
+                    # 共識只放寬線狀形態；AOI 產品座標仍須位於此炸彈線的容忍範圍。
                     is_bomb, bomb_code = self.check_bomb_match(
                         img_prefix, peak_x, peak_y, result.raw_bounds,
                         anomaly_map=anomaly_map, product_resolution=product_resolution,
                         bomb_list=[bomb], skip_shape_check=True,
+                        product_coords=(
+                            (tile.aoi_product_x, tile.aoi_product_y)
+                            if tile.is_aoi_coord_tile
+                            and tile.aoi_product_x >= 0 and tile.aoi_product_y >= 0
+                            else None
+                        ),
                     )
                     if not is_bomb and tile.is_aoi_coord_tile:
                         tile_cx, tile_cy = (
