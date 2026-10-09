@@ -157,6 +157,75 @@ def test_corrected_aoi_line_bomb_preserves_heatmap_shape_check(version, line_sha
     assert tile.is_bomb is line_shape
 
 
+@pytest.mark.parametrize("source", ["client", "config"])
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("product_point,line_shape,expected", [
+    pytest.param((1053, 1122), True, False, id="tile13-line-peak"),
+    pytest.param((1053, 1122), False, False, id="tile13-point-peak"),
+    pytest.param((980, 1122), False, True, id="at-line-tolerance"),
+    pytest.param((981, 1122), False, False, id="outside-line-tolerance"),
+    pytest.param((960, 1020), False, True, id="at-endpoint-tolerance"),
+    pytest.param((960, 1021), False, False, id="outside-endpoint-tolerance"),
+])
+def test_line_consensus_requires_aoi_position_even_when_peak_matches(
+    source, version, product_point, line_shape, expected, capsys, monkeypatch,
+):
+    from capi_server import results_to_db_data
+
+    inferencer = make_inferencer()
+    # Synthetic endpoints: the incident log contains tile #13's coordinates,
+    # but does not record the client bomb's endpoints.
+    line_end_y = 1000 if product_point[0] == 960 else 1200
+    bomb_points = [(960, 1), (960, line_end_y)]
+    inferencer.config.bomb_defects = (
+        [BombDefect("WGF50500", "B01", "line", bomb_points)]
+        if source == "config" else []
+    )
+    bounds = (828, 902, 5906, 4068)
+    line_map = np.zeros((512, 512), dtype=np.float32)
+    line_map[64:448, 250:262] = 1.0
+    point_map = np.zeros_like(line_map)
+    point_map[250:262, 250:262] = 1.0
+
+    tiles = [
+        make_tile(i, (960, y), inferencer._map_aoi_coords(960, y, bounds, RESOLUTION))
+        for i, y in enumerate((200, 400, 600))
+    ]
+    candidate = make_tile(
+        12, product_point, inferencer._map_aoi_coords(*product_point, bounds, RESOLUTION),
+    )
+    if product_point == (1053, 1122):
+        candidate.x, candidate.y = 3358, 3555
+        candidate.aoi_image_x, candidate.aoi_image_y = 3614, 3867
+        candidate.aoi_tile_shift_dy = -56
+    # All candidates have a nearby peak on the bomb line. Only the original
+    # AOI product position can distinguish #13 from the confirmed line.
+    candidate.anomaly_peak_x, candidate.anomaly_peak_y = inferencer._map_aoi_coords(
+        960, min(product_point[1], line_end_y), bounds, RESOLUTION,
+    )
+    candidate_map = line_map if line_shape else point_map
+    result = make_result(tiles + [candidate])
+    result.image_path = Path("WGF50500_121835.tif")
+    result.raw_bounds = result.otsu_bounds = bounds
+    result.panel_polygon = None
+    result.anomaly_tiles = [(tile, 0.6, line_map) for tile in tiles]
+    result.anomaly_tiles.append((candidate, 0.4594, candidate_map))
+    # Isolate bomb postprocessing from the earlier AOI peak-selection stage.
+    monkeypatch.setattr(inferencer, "_apply_aoi_peak_postprocess", lambda _results: None)
+    bomb_info = dict(image_prefix="WGF50500", defect_type="line", coordinates=bomb_points)
+
+    apply_bomb_postprocess(
+        inferencer, result, bomb_info if source == "client" else None, version, monkeypatch,
+    )
+
+    code = "UNKNOWN" if source == "client" else "B01"
+    assert all(tile.is_bomb and tile.bomb_defect_code == code for tile in tiles)
+    assert candidate.is_bomb is expected
+    assert candidate.bomb_defect_code == (code if expected else "")
+    assert results_to_db_data([result], {})[0]["is_ng"] == int(not expected)
+    assert f"{code}×{3 + int(expected)}" in capsys.readouterr().out
+
+
 def test_missing_aoi_product_coordinates_keeps_image_anchor_fallback():
     inferencer = make_inferencer()
     anchor = inferencer._map_aoi_coords(*BOMB_POINTS[0], RAW_BOUNDS, RESOLUTION)
