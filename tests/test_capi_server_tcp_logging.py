@@ -211,6 +211,27 @@ def test_error_responses_also_have_send_logs(tcp_server, caplog, request_bytes, 
     tcp_server._save_error_record.assert_called_once()
 
 
+def test_missing_cuda_during_model_load_publishes_alert_and_keeps_error_reply(tcp_server):
+    message = "No CUDA GPUs are available"
+    tcp_server._ensure_auto_model_switch_for_request.side_effect = RuntimeError(message)
+    request = b"AOI@G1;MODEL;CAPI09;1920,1200;NG;/images\n"
+    client = make_socket([request, b""])
+
+    tcp_server._handle_client(client, ("192.168.1.3", 20245))
+
+    fault = capi_server.server_status.get_status()["server"]["gpu_error"]
+    assert fault is not None
+    assert fault["message"] == f"RuntimeError: {message}"
+    assert fault["detected_at"]
+    client.sendall.assert_called_once_with(
+        b"AOI@G1;MODEL;CAPI09;NG;ERR:INTERNAL_ERROR (RuntimeError)\r\n"
+        b"@QJPG-G1;NG;00;ERR:INTERNAL_ERROR (RuntimeError),\r\n"
+    )
+    tcp_server._process_request.assert_not_called()
+    tcp_server._save_error_record.assert_called_once()
+    assert tcp_server._save_error_record.call_args.args[3] == message
+
+
 def test_failed_result_and_error_reply_are_both_logged(tcp_server, caplog):
     client = make_socket([b"AOI@G1;MODEL;CAPI33;1920,1200;OK;/images\n"])
     client.sendall.side_effect = ConnectionResetError(104, "reset")
