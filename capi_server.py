@@ -1097,6 +1097,9 @@ def _format_qjpg_product_defect_record(
 
 def _tile_real_defect_points(tile: TileInfo) -> List[Tuple[int, int]]:
     """Return two-stage features or multiple REAL region peaks in image coordinates."""
+    bomb_remaining_points = getattr(tile, "bomb_remaining_points", None)
+    if bomb_remaining_points is not None:
+        return list(bomb_remaining_points)
     features = getattr(tile, "dust_two_stage_features", None)
     two_stage = isinstance(features, (list, tuple)) and bool(features)
     if not two_stage:
