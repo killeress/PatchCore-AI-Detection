@@ -278,3 +278,202 @@ def test_linear_mapping_matches_bombs_before_and_after_aoi_fallback(
     inferencer._apply_bomb_postprocess([result], bomb_info, resolution)
 
     assert [tile.is_bomb for tile in tiles] == expected
+
+
+def make_overlapping_point_bomb_case(source, map_size=512):
+    """YQ6280211D47's two inward crops share the same corner bomb."""
+    inferencer = make_inferencer()
+    bomb_points = [(11, 11), (960, 11), (11, 540), (1909, 540), (960, 1069)]
+    inferencer.config.bomb_defects = (
+        [BombDefect("WGF50500", "B01", "point", bomb_points)]
+        if source == "config" else []
+    )
+    tiles, entries = [], []
+    for tid, origin, product, anchor, score in [
+        (0, (851, 884), (104, 49), (1107, 1017), 0.8156),
+        (10, (861, 884), (11, 11), (861, 917), 0.744),
+    ]:
+        tile = make_tile(tid, product, anchor)
+        tile.x, tile.y = origin
+        tile.zone = "edge"
+        tile.aoi_defect_code = "PCDK2" if tid == 0 else "BOMB_FORCE"
+        tile.aoi_tile_shift_dx = tile.x - (anchor[0] - 256)
+        tile.aoi_tile_shift_dy = tile.y - (anchor[1] - 256)
+        tile.anomaly_peak_source = ""
+        amap = np.zeros((map_size, map_size), dtype=np.float32)
+        px = int((861 - tile.x) * map_size / 512)
+        py = int((917 - tile.y) * map_size / 512)
+        amap[max(0, py - 2):py + 3, max(0, px - 2):px + 3] = score * 0.98
+        amap[py, px] = score
+        tiles.append(tile)
+        entries.append((tile, score, amap))
+    result = make_result(tiles)
+    result.image_path = Path("WGF50500_140955.tif")
+    result.raw_bounds = result.otsu_bounds = (838, 894, 5916, 4058)
+    result.panel_polygon = np.array([
+        [850.9, 883.4], [5911.1, 890.0], [5921.3, 4062.4], [830.1, 4052.4],
+    ], dtype=np.float32)
+    result.anomaly_tiles = entries
+    bomb_info = dict(image_prefix="WGF50500", defect_type="point", coordinates=bomb_points)
+    return inferencer, result, bomb_info if source == "client" else None
+
+
+@pytest.mark.parametrize("source", ["client", "config"])
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("map_size", [128, 512])
+def test_overlapping_aoi_crops_with_only_point_bomb_hotspot_are_bombs(
+    source, version, map_size, monkeypatch, capsys, caplog,
+):
+    from capi_server import _normalize_machine_judgment_for_bomb_only_panel, results_to_db_data
+    from capi_web import _target_tiles_for_within_spec
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case(source, map_size)
+    caplog.set_level("INFO", logger="capi.inference")
+    # Production peak selection falls back to (104,49), away from the bomb.
+    inferencer._apply_aoi_peak_postprocess([result])
+    assert result.tiles[0].anomaly_peak_source == "aoi_report_fallback"
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert all(tile.is_bomb for tile in result.tiles)
+    code = "UNKNOWN" if source == "client" else "B01"
+    assert all(tile.bomb_defect_code == code for tile in result.tiles)
+    stored = results_to_db_data([result], {})[0]
+    assert stored["is_ng"] == 0
+    assert stored["is_bomb"] == 1
+    assert _target_tiles_for_within_spec(stored) == []
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "OK"
+    log = capsys.readouterr().out
+    assert "BOMB_REGIONS" in caplog.text
+    assert f"{code}×2" in log
+
+
+@pytest.mark.parametrize("source", ["client", "config"])
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("cached_regions", [False, True])
+def test_point_bomb_cannot_hide_weaker_aoi_hotspot(
+    source, version, cached_regions, monkeypatch,
+):
+    from capi_server import _iter_qjpg_defect_records, _normalize_machine_judgment_for_bomb_only_panel, results_to_db_data
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case(source)
+    tile, _score, amap = result.anomaly_tiles[0]
+    # This weaker independent defect is below the global top-percent cutoff.
+    amap[130:137, 253:260] = 0.20
+    amap[133, 256] = 0.25
+    if cached_regions:
+        seed, radius, min_score = inferencer._aoi_center_seed_for_tile(tile, amap)
+        _real, _peak, _iou, details, binary, _labels = inferencer.check_dust_per_region(
+            np.zeros_like(amap, dtype=np.uint8), amap,
+            top_percent=inferencer.config.dust_heatmap_top_percent,
+            force_include_yx=seed, force_include_radius=radius,
+            force_include_min_score=min_score,
+        )
+        tile.dust_region_details, tile.dust_heatmap_binary = details, binary
+    inferencer._apply_aoi_peak_postprocess([result])
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is False
+    assert tile.bomb_defect_code == ""
+    assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == (1107, 1017)
+    assert result.tiles[1].is_bomb is True
+    assert results_to_db_data([result], {})[0]["is_ng"] == 1
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "NG"
+    records = _iter_qjpg_defect_records([result], RESOLUTION, inferencer.config)
+    real_records = [record for record in records if record.startswith("PCDK2")]
+    assert real_records == ["PCDK20010200047WGF50500"]
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("on_dust", [False, True])
+def test_point_bomb_aoi_anchor_does_not_hide_other_non_dust_region(
+    version, on_dust, monkeypatch,
+):
+    from capi_server import results_to_db_data
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    tile, score, amap = result.anomaly_tiles[1]
+    amap[300:307, 300:307] = score
+    tile.dust_mask = np.zeros_like(amap, dtype=np.uint8)
+    if on_dust:
+        tile.dust_mask[300:307, 300:307] = 255
+    result.tiles = [tile]
+    result.anomaly_tiles = [(tile, score, amap)]
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is on_dust
+    assert results_to_db_data([result], {})[0]["is_ng"] == int(not on_dust)
+    if not on_dust:
+        assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == (1161, 1184)
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_connected_hot_region_extending_past_point_bomb_tolerance_keeps_ng(version, monkeypatch):
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    tile, score, amap = result.anomaly_tiles[0]
+    # One connected component has both bomb and non-bomb hot pixels.
+    amap[33, 10:257] = score * 0.98
+    amap[33:134, 256] = score * 0.98
+    amap[133, 256] = score * 0.98
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is False
+    assert tile.bomb_defect_code == ""
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_point_bomb_regions_follow_polygon_corrected_coordinates(version, monkeypatch):
+    inferencer = make_inferencer()
+    anchor = inferencer._map_aoi_coords(445, 269, RAW_BOUNDS, RESOLUTION, POLYGON)
+    bomb_anchor = inferencer._map_aoi_coords(350, 231, RAW_BOUNDS, RESOLUTION, POLYGON)
+    tile = make_tile(0, (445, 269), anchor)
+    amap = np.zeros((512, 512), dtype=np.float32)
+    px, py = bomb_anchor[0] - tile.x, bomb_anchor[1] - tile.y
+    amap[py - 2:py + 3, px - 2:px + 3] = 0.8
+    result = make_result([tile])
+    result.anomaly_tiles = [(tile, 0.8, amap)]
+    bomb_info = dict(image_prefix="STANDARD", defect_type="point", coordinates=[(350, 231)])
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is True
+    assert tile.anomaly_peak_source == "bomb_region"
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_point_bomb_regions_do_not_suppress_two_stage_rescued_defect(version, monkeypatch):
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    tile = result.tiles[0]
+    tile.dust_two_stage_features = [{"abs_pos": (256, 133), "is_dust": False, "area": 25}]
+    tile.anomaly_peak_source = "aoi_real_region"
+    tile.anomaly_peak_x, tile.anomaly_peak_y = tile.aoi_image_x, tile.aoi_image_y
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is False
+    assert tile.bomb_remaining_points is None
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("offset,expected", [
+    ((20, 20), True), ((21, 0), False), ((0, 21), False),
+])
+def test_point_bomb_region_coverage_keeps_product_pixel_tolerance(version, offset, expected, monkeypatch):
+    inferencer = make_inferencer()
+    tile = make_tile(0, (104, 49), (104, 49))
+    tile.x = tile.y = 0
+    amap = np.zeros((512, 512), dtype=np.float32)
+    amap[11, 11] = 0.8
+    amap[11 + offset[1], 11 + offset[0]] = 0.8
+    result = make_result([tile])
+    result.raw_bounds = result.otsu_bounds = (0, 0, *RESOLUTION)
+    result.panel_polygon = None
+    result.anomaly_tiles = [(tile, 0.8, amap)]
+    bomb_info = dict(image_prefix="STANDARD", defect_type="point", coordinates=[(11, 11)])
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is expected

@@ -1117,6 +1117,8 @@ def resolve_inward_polygon_tile(
 
     ``shift_axes`` can be "xy", "x", or "y". AOI single-edge samples use this
     to avoid correcting the unrelated axis when only one panel edge is close.
+    If a single-axis attempt cannot fit the polygon, retry both axes: the raw
+    bounding box used for the axis hint may include foreground outside the panel.
 
     Returns: ``(tx, ty, coverage, shifted)``.
     """
@@ -1206,6 +1208,32 @@ def resolve_inward_polygon_tile(
         if (cov, dist) > (best_cov, best_dist):
             best = (tx, ty)
             best_cov, best_dist = cov, dist
+
+    if (not allow_x or not allow_y) and (
+        best_cov < target_coverage or best_dist < -0.5
+    ):
+        fallback_x, fallback_y, fallback_cov, _ = resolve_inward_polygon_tile(
+            anchor_xy=anchor_xy,
+            polygon=poly,
+            image_shape=image_shape,
+            tile_size=tile_size,
+            initial_origin=original,
+            target_coverage=target_coverage,
+            keep_anchor_inside=keep_anchor_inside,
+            shift_axes="xy",
+        )
+        fallback_dist = min(_tile_corner_signed_distances(
+            fallback_x, fallback_y, tile_size, poly,
+        ))
+        if (fallback_cov, fallback_dist) > (best_cov, best_dist):
+            logger.info(
+                "[inward-roi] axes=%s->xy anchor=%s origin=%s->%s "
+                "coverage=%.4f->%.4f",
+                shift_axes, anchor_xy, best, (fallback_x, fallback_y),
+                best_cov, fallback_cov,
+            )
+            best = (fallback_x, fallback_y)
+            best_cov = fallback_cov
 
     return best[0], best[1], best_cov, best != original
 

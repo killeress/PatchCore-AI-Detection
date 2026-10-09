@@ -6,10 +6,134 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np
+import pytest
 
 from capi_config import CAPIConfig
 from capi_inference import AOIReportDefect, CAPIInferencer, ImageResult
-from capi_preprocess import PreprocessConfig, resolve_inward_polygon_tile
+from capi_preprocess import (
+    PreprocessConfig,
+    resolve_aoi_inward_shift_axes,
+    resolve_inward_polygon_tile,
+)
+
+
+@pytest.mark.parametrize("transpose,expected_axes", [(False, "x"), (True, "y")])
+def test_inward_roi_retries_both_axes_when_raw_bounds_miss_polygon_corner(
+    transpose, expected_axes,
+):
+    # Logged WGF50500 polygon/anchor; the synthetic raw box extends below
+    # the real panel, so its axis hint misses the bottom edge.
+    polygon = np.array(
+        [[851.4, 887.6], [5912.0, 893.8], [5920.0, 4066.2], [832.3, 4055.2]],
+        dtype=np.float32,
+    )
+    anchor = (5868, 3990)
+    bounds = (840, 898, 5919, 4366)
+    image_shape = (4384, 6576)
+    if transpose:
+        polygon = polygon[:, ::-1].copy()
+        anchor = anchor[::-1]
+        bounds = (bounds[1], bounds[0], bounds[3], bounds[2])
+        image_shape = image_shape[::-1]
+
+    axes = resolve_aoi_inward_shift_axes(*anchor, bounds, 512)
+    assert axes == expected_axes
+    tx, ty, coverage, shifted = resolve_inward_polygon_tile(
+        anchor_xy=anchor,
+        polygon=polygon,
+        image_shape=image_shape,
+        tile_size=512,
+        keep_anchor_inside=True,
+        shift_axes=axes,
+    )
+
+    assert shifted
+    assert tx < anchor[0] - 256 and ty < anchor[1] - 256
+    assert coverage >= 0.999
+    assert tx <= anchor[0] <= tx + 511
+    assert ty <= anchor[1] <= ty + 511
+    for corner in ((tx, ty), (tx + 511, ty), (tx + 511, ty + 511), (tx, ty + 511)):
+        assert cv2.pointPolygonTest(polygon, corner, True) >= -0.5
+
+
+@pytest.mark.parametrize("transpose,axes", [(False, "x"), (True, "y")])
+def test_inward_roi_preserves_single_axis_when_it_fits(transpose, axes):
+    polygon = np.array(
+        [[500, 500], [1900, 500], [1900, 1500], [500, 1500]],
+        dtype=np.float32,
+    )
+    anchor = (550, 1000)
+    image_shape = (2000, 2400)
+    if transpose:
+        polygon = polygon[:, ::-1].copy()
+        anchor = anchor[::-1]
+        image_shape = image_shape[::-1]
+
+    tx, ty, coverage, shifted = resolve_inward_polygon_tile(
+        anchor_xy=anchor,
+        polygon=polygon,
+        image_shape=image_shape,
+        tile_size=512,
+        keep_anchor_inside=True,
+        shift_axes=axes,
+    )
+
+    assert shifted
+    assert coverage >= 0.999
+    if axes == "x":
+        assert tx >= 500 and ty == anchor[1] - 256
+    else:
+        assert ty >= 500 and tx == anchor[0] - 256
+
+
+def test_v2_aoi_logged_bottom_right_tile_fits_polygon_with_extended_raw_bounds():
+    cfg = CAPIConfig()
+    cfg.is_new_architecture = True
+    cfg.tile_size = 512
+    cfg.enable_panel_polygon = True
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+
+    polygon = np.array(
+        [[851.4, 887.6], [5912.0, 893.8], [5920.0, 4066.2], [832.3, 4055.2]],
+        dtype=np.float32,
+    )
+    image = np.zeros((4384, 6576), dtype=np.uint8)
+    cv2.fillConvexPoly(image, polygon.astype(np.int32), 180)
+    result = ImageResult(
+        image_path=Path("WGF50500_152418.tif"),
+        image_size=(6576, 4384),
+        otsu_bounds=(838, 898, 5914, 4062),
+        exclusion_regions=[],
+        tiles=[],
+        excluded_tile_count=0,
+        processed_tile_count=0,
+        processing_time=0.0,
+        raw_bounds=(840, 898, 5919, 4366),
+        panel_polygon=polygon,
+    )
+
+    created = inferencer._create_aoi_centered_tiles_v2(
+        image=image,
+        result=result,
+        defects=[AOIReportDefect(
+            defect_code="PCDCL", product_x=1901, product_y=1070,
+            image_prefix="WGF50500",
+        )],
+        product_resolution=(1920, 1200),
+        pre_cfg=PreprocessConfig(tile_size=512),
+    )
+
+    assert created == 1
+    tile = result.tiles[0]
+    assert (tile.aoi_product_x, tile.aoi_product_y) == (1901, 1070)
+    assert (tile.aoi_image_x, tile.aoi_image_y) == (5868, 3990)
+    assert tile.aoi_tile_shift_dx < 0 and tile.aoi_tile_shift_dy < 0
+    assert tile.x <= tile.aoi_image_x <= tile.x + 511
+    assert tile.y <= tile.aoi_image_y <= tile.y + 511
+    assert tile.zone == "edge"
+    assert tile.image.shape == (512, 512)
+    assert np.mean(tile.image == 0) < 0.001
 
 
 def test_resolve_inward_polygon_tile_pushes_edge_roi_inside_product():

@@ -243,6 +243,7 @@ class TileInfo:
     dust_two_stage_association_mask: Optional[np.ndarray] = field(default=None, repr=False)  # 規格內檢查使用的灰塵暈圈關聯 mask
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
+    bomb_remaining_points: Optional[List[Tuple[int, int]]] = field(default=None, repr=False)  # 點炸彈排除後的真異常圖片座標
     is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
     anomaly_peak_x: int = -1    # 熱力圖峰值 x (圖片座標, -1=未計算)
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
@@ -291,7 +292,7 @@ class TileInfo:
     # Scratch classifier post-filter (over-review reduction)
     scratch_score: float = 0.0              # 0 = 未跑 classifier
     scratch_filtered: bool = False          # True = 被翻回 OK
-    anomaly_peak_source: str = ""           # heatmap_argmax | aoi_real_region | aoi_report_fallback
+    anomaly_peak_source: str = ""           # heatmap_argmax | aoi_real_region | aoi_report_fallback | bomb_region
     edge_light_leak_result: Optional[dict] = field(default=None, repr=False)
     edge_light_leak_debug_image: Optional[np.ndarray] = field(default=None, repr=False)
 
@@ -8400,6 +8401,7 @@ class CAPIInferencer:
             for result in results:
                 if result.anomaly_tiles and result.raw_bounds is not None:
                     img_prefix = self._get_image_prefix(result.image_path.name)
+                    point_bomb_geometry = {}
                     for tile, score, anomaly_map in result.anomaly_tiles:
                         if getattr(tile, "is_aoi_coord_below_threshold", False):
                             continue
@@ -8465,9 +8467,16 @@ class CAPIInferencer:
                                     else None
                                 ),
                             )
-                        # AOI coord tile 保護: peak 可能被鄰近炸彈亮點吸引，
-                        # 需驗證原始 AOI 產品座標本身也在炸彈容忍範圍內
-                        if is_bomb and tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
+                        region_match = self._match_aoi_point_bomb_regions(
+                            result, tile, anomaly_map, active_bombs,
+                            product_resolution, point_bomb_geometry,
+                        )
+                        if region_match is not None:
+                            is_bomb, bomb_code = region_match
+                            tile.is_bomb = is_bomb
+                            tile.bomb_defect_code = bomb_code
+                        # 無逐區域證據時，仍需驗證原始 AOI 產品座標。
+                        elif is_bomb and tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
                             aoi_matches_bomb = False
                             tolerance = self.config.bomb_match_tolerance
                             for bomb in active_bombs:
@@ -9234,6 +9243,144 @@ class CAPIInferencer:
                     distance_text,
                 )
 
+    def _match_aoi_point_bomb_regions(
+        self,
+        result: ImageResult,
+        tile: TileInfo,
+        anomaly_map: Optional[np.ndarray],
+        active_bombs: List[BombDefect],
+        product_resolution: Optional[Tuple[int, int]],
+        geometry_cache: Dict[str, list],
+    ) -> Optional[Tuple[bool, str]]:
+        """Resolve point-bomb contamination using every non-dust hot core.
+
+        A crop can contain a neighboring bomb even though its AOI anchor is
+        elsewhere. Only suppress it when the entire non-dust core fits the
+        known point-bomb tolerance areas. Keep weaker AOI-seed regions and
+        hot pixels outside those areas as NG. Without overlapping bomb-core
+        evidence, retain the existing AOI-coordinate fallback and guard.
+        """
+        if (
+            not tile.is_aoi_coord_tile
+            or tile.is_bright_spot_detection
+            or tile.width <= 0 or tile.height <= 0
+            or getattr(tile, "is_aoi_coord_below_threshold", False)
+            or tile.dust_two_stage_features is not None
+            or anomaly_map is None
+            or result.raw_bounds is None
+        ):
+            return None
+        amap = np.asarray(anomaly_map, dtype=np.float32)
+        if amap.ndim != 2 or amap.size == 0 or not np.isfinite(amap).all() or np.max(amap) <= 0:
+            return None
+        img_prefix = self._get_image_prefix(result.image_path.name)
+        bombs = [bomb for bomb in active_bombs
+                 if self._aoi_prefix_matches(img_prefix, bomb.image_prefix)]
+        if not bombs or any(bomb.defect_type != "point" for bomb in bombs):
+            return None
+
+        binary = tile.dust_heatmap_binary
+        if (
+            tile.dust_region_details is not None
+            and binary is not None
+            and binary.shape == amap.shape
+        ):
+            details = tile.dust_region_details
+            _count, labels = cv2.connectedComponents((binary > 0).astype(np.uint8), connectivity=8)
+        else:
+            seed, radius, min_score = self._aoi_center_seed_for_tile(tile, amap)
+            dust_mask = tile.dust_mask
+            if dust_mask is None:
+                dust_mask = np.zeros(amap.shape, dtype=np.uint8)
+            _real, _peak, _iou, details, binary, labels = self.check_dust_per_region(
+                dust_mask, amap,
+                top_percent=self.config.dust_heatmap_top_percent,
+                metric=self.config.dust_heatmap_metric,
+                iou_threshold=self.config.dust_heatmap_iou_threshold,
+                force_include_yx=seed,
+                force_include_radius=radius,
+                force_include_min_score=min_score,
+            )
+        if labels is None or not details:
+            return None
+        dust_labels = [detail["label_id"] for detail in details if detail.get("is_dust")]
+        real_core = (labels > 0) & ~np.isin(labels, dust_labels)
+        if not np.any(real_core):
+            return None
+
+        if img_prefix not in geometry_cache:
+            product_w, product_h = product_resolution or DEFAULT_PRODUCT_RESOLUTION
+            tolerance = self.config.bomb_match_tolerance
+            geometry = []
+            for bomb in bombs:
+                polygons = []
+                for bx, by in bomb.coordinates:
+                    x1, x2 = max(0, bx - tolerance), min(product_w, bx + tolerance)
+                    y1, y2 = max(0, by - tolerance), min(product_h, by + tolerance)
+                    if x1 > x2 or y1 > y2:
+                        continue
+                    polygons.append(np.array([
+                        self._map_aoi_coords(x, y, result.raw_bounds, product_resolution,
+                                             panel_polygon=result.panel_polygon)
+                        for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+                    ], dtype=np.float32))
+                geometry.append((bomb.defect_code, polygons))
+            geometry_cache[img_prefix] = geometry
+
+        map_h, map_w = amap.shape
+        scale = np.array([map_w / tile.width, map_h / tile.height], dtype=np.float32)
+        origin = np.array([tile.x, tile.y], dtype=np.float32)
+        bomb_core = np.zeros(amap.shape, dtype=np.uint8)
+        code_masks = []
+        for code, polygons in geometry_cache[img_prefix]:
+            mask = np.zeros(amap.shape, dtype=np.uint8)
+            for polygon in polygons:
+                contour = np.rint((polygon - origin) * scale).astype(np.int32)
+                cv2.fillConvexPoly(mask, cv2.convexHull(contour), 1)
+            bomb_core |= mask
+            code_masks.append((code, mask))
+        if not np.any(real_core & (bomb_core > 0)):
+            return None
+
+        remaining = real_core & (bomb_core == 0)
+        real_ids = np.unique(labels[real_core])
+        remaining_ids = np.unique(labels[remaining])
+        remaining_points = []
+        for label_id in remaining_ids:
+            region = remaining & (labels == label_id)
+            py, px = np.unravel_index(np.argmax(np.where(region, amap, -np.inf)), amap.shape)
+            remaining_points.append((
+                -float(amap[py, px]),
+                tile.x + int(px * tile.width / map_w),
+                tile.y + int(py * tile.height / map_h),
+            ))
+        tile.bomb_remaining_points = [(x, y) for _score, x, y in sorted(remaining_points)]
+        is_bomb = not np.any(remaining)
+        selected_core = real_core if is_bomb else remaining
+        current_x = int((tile.anomaly_peak_x - tile.x) * map_w / tile.width)
+        current_y = int((tile.anomaly_peak_y - tile.y) * map_h / tile.height)
+        keep_current = (
+            not is_bomb
+            and 0 <= current_x < map_w and 0 <= current_y < map_h
+            and selected_core[current_y, current_x]
+        )
+        if not keep_current:
+            py, px = np.unravel_index(np.argmax(np.where(selected_core, amap, -np.inf)), amap.shape)
+            tile.anomaly_peak_x = tile.x + int(px * tile.width / map_w)
+            tile.anomaly_peak_y = tile.y + int(py * tile.height / map_h)
+            tile.anomaly_peak_source = "bomb_region" if is_bomb else "aoi_real_region"
+        else:
+            py, px = current_y, current_x
+        code = next((code for code, mask in code_masks if mask[py, px]), "") if is_bomb else ""
+        logger.info(
+            "[BOMB_REGIONS] image=%s tile=(%s,%s) aoi=(%s,%s) "
+            "bomb_regions=%s remaining_regions=%s peak=(%s,%s) result=%s",
+            result.image_path.name, tile.x, tile.y, tile.aoi_product_x, tile.aoi_product_y,
+            len(real_ids) - len(remaining_ids), len(remaining_ids),
+            tile.anomaly_peak_x, tile.anomaly_peak_y, "BOMB" if is_bomb else "NG",
+        )
+        return is_bomb, code
+
     def _apply_bomb_postprocess(
         self,
         results: List[ImageResult],
@@ -9295,6 +9442,7 @@ class CAPIInferencer:
         for result in results:
             if result.anomaly_tiles and result.raw_bounds is not None:
                 img_prefix = self._get_image_prefix(result.image_path.name)
+                point_bomb_geometry = {}
                 for tile, _score, anomaly_map in result.anomaly_tiles:
                     if getattr(tile, "is_aoi_coord_below_threshold", False):
                         continue
@@ -9347,9 +9495,16 @@ class CAPIInferencer:
                                 else None
                             ),
                         )
-                    # AOI coord tile 保護: peak 可能被鄰近炸彈亮點吸引而誤判，
-                    # 需驗證原始 AOI 產品座標本身也在炸彈容忍範圍內
-                    if is_bomb and tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
+                    region_match = self._match_aoi_point_bomb_regions(
+                        result, tile, anomaly_map, active_bombs,
+                        product_resolution, point_bomb_geometry,
+                    )
+                    if region_match is not None:
+                        is_bomb, bomb_code = region_match
+                        tile.is_bomb = is_bomb
+                        tile.bomb_defect_code = bomb_code
+                    # 無逐區域證據時，仍需驗證原始 AOI 產品座標。
+                    elif is_bomb and tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
                         aoi_matches_bomb = False
                         tolerance = self.config.bomb_match_tolerance
                         for bomb in active_bombs:
@@ -9385,7 +9540,8 @@ class CAPIInferencer:
                         tile.is_bomb = True
                         tile.bomb_defect_code = bomb_code
                     if point_coord_count:
-                        if tile.is_aoi_coord_tile and tile.aoi_product_x >= 0:
+                        if (tile.is_aoi_coord_tile and tile.aoi_product_x >= 0
+                                and tile.anomaly_peak_source != "bomb_region"):
                             product_x = tile.aoi_product_x
                             product_y = tile.aoi_product_y
                             coord_source = "aoi"
