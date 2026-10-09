@@ -88,12 +88,16 @@ def test_gpu_probe_success_clears_driver_alert():
     assert recovered["state"] == "healthy"
 
 
-def test_first_fatal_cuda_error_survives_successful_hardware_probe():
+@pytest.mark.parametrize("message", [
+    "[v2] tile: CUDA error: unspecified launch failure",
+    "No CUDA GPUs are available",
+])
+def test_first_fatal_cuda_error_survives_successful_hardware_probe(message):
     tracker = ServerStatusTracker()
-    tracker.record_gpu_error(RuntimeError("[v2] tile: CUDA error: unspecified launch failure"))
+    tracker.record_gpu_error(RuntimeError(message))
     tracker.record_gpu_error(RuntimeError("CUDA error: an illegal memory access was encountered"))
     fault = tracker.get_status()["server"]["gpu_error"]
-    assert "unspecified launch failure" in fault["message"]
+    assert fault["message"] == f"RuntimeError: {message}"
     assert fault["detected_at"]
     health = capi_web._build_gpu_health({"available": True}, "auto", ["cuda"], fault)
     assert health["active"] is True
@@ -110,7 +114,11 @@ def test_ordinary_errors_do_not_latch_fatal_gpu_fault(message):
     assert tracker.gpu_error is None
 
 
-def test_inference_failure_publishes_gpu_alert_without_changing_client_protocol(tmp_path, monkeypatch):
+@pytest.mark.parametrize("message", [
+    "CUDA error: unspecified launch failure",
+    "No CUDA GPUs are available",
+])
+def test_inference_failure_publishes_gpu_alert_without_changing_client_protocol(tmp_path, monkeypatch, message):
     import capi_server
     from capi_config import CAPIConfig
 
@@ -118,7 +126,7 @@ def test_inference_failure_publishes_gpu_alert_without_changing_client_protocol(
     monkeypatch.setattr(capi_server, "server_status", tracker)
     inferencer = SimpleNamespace(
         config=CAPIConfig(), device="cuda",
-        process_panel=MagicMock(side_effect=RuntimeError("CUDA error: unspecified launch failure")),
+        process_panel=MagicMock(side_effect=RuntimeError(message)),
     )
     server = capi_server.CAPIServer.__new__(capi_server.CAPIServer)
     server.path_mapping = {}
@@ -130,7 +138,7 @@ def test_inference_failure_publishes_gpu_alert_without_changing_client_protocol(
     })
     assert result[0].startswith("ERR:INFERENCE_FAILED")
     assert result[2] == []
-    assert "unspecified launch failure" in tracker.get_status()["server"]["gpu_error"]["message"]
+    assert tracker.get_status()["server"]["gpu_error"]["message"] == f"RuntimeError: {message}"
 
 
 def test_device_snapshot_uses_current_server_not_stale_web_inferencer():

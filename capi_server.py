@@ -165,6 +165,7 @@ class ServerStatusTracker:
             "cuda error: unknown error", "cuda initialization: cuda unknown error",
             "cuda_error_launch_failed", "cuda_error_illegal_address", "cuda_error_assert",
             "cuda_error_context_is_destroyed", "gpu has fallen off the bus",
+            "no cuda gpus are available",
         )
         if not any(marker in message.lower() for marker in fatal_markers):
             return

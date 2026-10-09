@@ -3528,6 +3528,7 @@ class CAPIInferencer:
         # Step 3.5: 明顯亮區救回 — Top-Hat 會吃掉寬度>kernel 的大面積污染/刮痕
         # 對 CLAHE 增強後的原圖做高閾值直接檢測，把肉眼明顯的亮區補回來
         bright_rescue_thr = self.config.dust_bright_rescue_threshold
+        bright_binary = None
         if bright_rescue_thr > 0:
             _, bright_binary = cv2.threshold(enhanced, bright_rescue_thr, 255, cv2.THRESH_BINARY)
             binary = cv2.bitwise_or(binary, bright_binary)
@@ -3569,6 +3570,27 @@ class CAPIInferencer:
                 scratch_count += 1
             else:
                 particle_count += 1
+
+        # 高亮區是屏蔽依據，不受一般灰塵顆粒的最大面積限制。
+        # 獨立處理高亮來源，避免把與大片白區相連的低亮訊號一併救回。
+        bright_rescue_count = 0
+        if bright_binary is not None:
+            bright_binary = cv2.morphologyEx(
+                bright_binary, cv2.MORPH_OPEN, open_kernel, iterations=1
+            )
+            if extension > 0:
+                bright_binary = cv2.dilate(bright_binary, dilate_kernel, iterations=1)
+            b_num, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bright_binary)
+            for i in range(1, b_num):
+                if b_stats[i, cv2.CC_STAT_AREA] < area_min:
+                    continue
+                component = b_labels == i
+                added_area = int(np.count_nonzero(component & (dust_mask == 0)))
+                if added_area == 0:
+                    continue
+                dust_mask[component] = 255
+                total_dust_area += added_area
+                bright_rescue_count += 1
         
         # Step 6: 暗色顆粒偵測 — 偵測暗色 MARK 等暗色圖案
         # 某些機種 MARK 樣式偏黑，在 OMIT 圖上呈現暗色顆粒
@@ -3649,7 +3671,7 @@ class CAPIInferencer:
         
         # 計算灰塵面積佔比
         bright_ratio = float(np.sum(dust_mask > 0)) / dust_mask.size if dust_mask.size > 0 else 0.0
-        is_dust = (total_particle + total_scratch + bubble_count) > 0
+        is_dust = (total_particle + total_scratch + bubble_count + bright_rescue_count) > 0
         
         dark_info = f" DkP:{dark_particle_count} DkS:{dark_scratch_count}" if (dark_particle_count + dark_scratch_count) > 0 else ""
         bubble_info = f" Bub:{bubble_count}" if bubble_detection_enabled else ""
@@ -3657,6 +3679,8 @@ class CAPIInferencer:
                        f"Area:{total_area} Ratio:{bright_ratio:.4f}{dark_info}{bubble_info}")
         if pixel_grid_filter_active:
             detail_text += f" PxGridBlur:{pixel_grid_blur_kernel}"
+        if bright_rescue_count:
+            detail_text += f" BrightRescue:{bright_rescue_count}"
         
         return is_dust, dust_mask, bright_ratio, detail_text
 
