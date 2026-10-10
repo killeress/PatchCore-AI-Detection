@@ -854,6 +854,22 @@ def _dot_hysteresis_kwargs(dot_cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _components_intersecting_roi(mask, evaluation_mask):
+    """Select whole components, so an ROI border never reduces measured size."""
+    if evaluation_mask is None:
+        return mask
+    import cv2
+    import numpy as np
+
+    allowed = np.asarray(evaluation_mask, dtype=bool)
+    if allowed.shape != mask.shape:
+        raise ValueError("AOI ROI and dot mask shapes differ")
+    _, labels = cv2.connectedComponents((mask > 0).astype(np.uint8), 8)
+    keep = np.unique(labels[allowed])
+    keep = keep[keep != 0]
+    return np.where(np.isin(labels, keep), mask, 0).astype(np.uint8)
+
+
 def _detect_dot_components(
     image_bgr,
     *,
@@ -881,6 +897,7 @@ def _detect_dot_components(
     hysteresis_second_max_count: int = 5,
     hysteresis_edge_suppress_percent: float = 0.0,
     include_visuals: bool = True,
+    evaluation_mask=None,
 ) -> dict:
     """Detect dot-like dark/bright components and measure their visible size."""
     import cv2
@@ -1009,7 +1026,7 @@ def _detect_dot_components(
                 if border_y > 0:
                     count_mask[:border_y, :] = 0
                     count_mask[h - border_y:, :] = 0
-            return count_mask
+            return _components_intersecting_roi(count_mask, evaluation_mask)
 
         def count_mask_components(mask_to_count):
             count_mask = _hysteresis_count_mask(mask_to_count)
@@ -1122,6 +1139,7 @@ def _detect_dot_components(
         kernel = np.ones((morph_open, morph_open), dtype=np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
+    mask = _components_intersecting_roi(mask, evaluation_mask)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
     min_area = max(1, int(min_area))
     max_area = int(max_area or 0)
@@ -1170,6 +1188,12 @@ def _detect_dot_components(
         x, y, w, h, area = [int(v) for v in stats[label]]
         bbox_max = float(max(w, h))
         aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
+        if evaluation_mask is not None and (
+            x == 0 or y == 0 or x + w == gray.shape[1] or y + h == gray.shape[0]
+        ):
+            add_rejected(reason="aoi_roi_incomplete_component", label=label,
+                         x=x, y=y, w=w, h=h, area=area, aspect_ratio=aspect_ratio)
+            continue
         if area < min_area:
             add_rejected(
                 reason="area_too_small",
@@ -1380,6 +1404,7 @@ def _detect_white_halo_components(
     min_aspect_ratio: float = 0.0,
     edge_margin: int = 0,
     include_visuals: bool = True,
+    evaluation_mask=None,
 ) -> dict:
     """Detect broad bright halo around the strongest dark seed."""
     import cv2
@@ -1399,6 +1424,7 @@ def _detect_white_halo_components(
         min_aspect_ratio=max(0.45, min_aspect_ratio),
         edge_margin=edge_margin,
         include_visuals=False,
+        **({"evaluation_mask": evaluation_mask} if evaluation_mask is not None else {}),
     )
     if image_bgr.ndim == 2:
         gray = image_bgr
@@ -1414,6 +1440,8 @@ def _detect_white_halo_components(
             "diff": blank,
             "mask": blank,
             "candidates": [],
+            "rejected_candidates": [c for c in dark.get("rejected_candidates", [])
+                                    if c.get("reason") == "aoi_roi_incomplete_component"],
             "calibrated": unit_per_px > 0,
             "segmentation_method": "halo",
             "thresholds": {
@@ -1469,6 +1497,12 @@ def _detect_white_halo_components(
         if area < min_area or area > max_area:
             continue
         if not (x <= cx <= x + w and y <= cy <= y + h):
+            continue
+        if evaluation_mask is not None and (
+            x == 0 or y == 0 or x + w == gray.shape[1] or y + h == gray.shape[0]
+        ):
+            rejected_candidates.append({"reason": "aoi_roi_incomplete_component",
+                                        "x": x, "y": y, "w": w, "h": h, "area_px": area})
             continue
         bbox_max = float(max(w, h))
         aspect_ratio = float(min(w, h) / bbox_max) if bbox_max > 0 else 0.0
@@ -1596,6 +1630,7 @@ def _detect_dot_components_auto(
     hysteresis_second_max_count: int = 5,
     hysteresis_edge_suppress_percent: float = 0.0,
     include_visuals: bool = True,
+    evaluation_mask=None,
 ) -> dict:
     """Select the best dot detector for the configured mode."""
     mode = str(segmentation_method or "background_diff").strip().lower()
@@ -1612,6 +1647,8 @@ def _detect_dot_components_auto(
         "edge_margin": edge_margin,
         "include_visuals": include_visuals,
     }
+    if evaluation_mask is not None:
+        common["evaluation_mask"] = evaluation_mask
     hysteresis_common = {
         "hysteresis_low_threshold": hysteresis_low_threshold,
         "hysteresis_high_threshold": hysteresis_high_threshold,
@@ -1665,6 +1702,7 @@ def _detect_dot_components_auto(
             min_aspect_ratio=min(min_aspect_ratio, 0.25) if min_aspect_ratio > 0 else 0.25,
             edge_margin=edge_margin,
             include_visuals=include_visuals,
+            **({"evaluation_mask": evaluation_mask} if evaluation_mask is not None else {}),
         )
         candidates.append(halo)
 
@@ -1916,6 +1954,33 @@ def _dot_rule_limits(rule: Dict[str, Any]) -> Tuple[float, int, int]:
     return threshold_mm, screen_limit, tile_limit
 
 
+def _within_spec_aoi_roi_for_tile(tile, shape, crop_box):
+    """Restore the inference-time polygon, including shifted/clipped tile origins."""
+    import cv2
+    import numpy as np
+
+    context = tile.get("decision_context") or {}
+    if isinstance(context, str):
+        context = json.loads(context)
+    if not isinstance(context, dict):
+        raise ValueError("Invalid tile decision context")
+    roi = context.get("aoi_judgment_roi") or {}
+    if not roi.get("enabled"):
+        return None, None
+    polygon = np.array(roi.get("tile_polygon"), dtype=np.float64, copy=True)
+    if polygon.shape != (4, 2) or not np.isfinite(polygon).all():
+        raise ValueError("Missing or invalid saved AOI ROI polygon")
+    x1, y1, x2, y2 = crop_box
+    # Saved polygon is in source-image pixels relative to the actual tile origin.
+    polygon += [float(tile.get("x", 0)) - x1, float(tile.get("y", 0)) - y1]
+    polygon *= [shape[1] / max(1, x2 - x1), shape[0] / max(1, y2 - y1)]
+    mask = np.zeros(shape, dtype=np.uint8)
+    cv2.fillConvexPoly(mask, cv2.convexHull(np.rint(polygon).astype(np.int32)), 1)
+    if not np.any(mask):
+        raise ValueError("Saved AOI ROI does not intersect the within-spec crop")
+    return mask > 0, dict(roi, measurement_policy="whole_intersecting_component")
+
+
 def _non_dot_residue_config(dot_cfg: Dict[str, Any]) -> Dict[str, Any]:
     reasons = dot_cfg.get("non_dot_residue_reasons")
     if not isinstance(reasons, list):
@@ -1940,6 +2005,8 @@ def _non_dot_residue_match(
     cfg: Dict[str, Any],
     crop_box: Tuple[int, int, int, int],
 ) -> Optional[Dict[str, Any]]:
+    if rejected.get("reason") == "aoi_roi_incomplete_component":
+        return dict(rejected)
     if not cfg.get("enabled"):
         return None
     reason = str(rejected.get("reason") or "")
@@ -2509,6 +2576,8 @@ def _save_within_spec_dot_visuals(
     dot_cfg: Dict[str, Any],
     runtime_dust_mask=None,
     no_detect_mask=None,
+    evaluation_mask=None,
+    aoi_roi=None,
     non_dot_residues: Optional[List[Dict[str, Any]]] = None,
     output_dir: Optional[Path],
     url_prefix: str,
@@ -2545,6 +2614,7 @@ def _save_within_spec_dot_visuals(
             edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
             **_dot_hysteresis_kwargs(dot_cfg),
             include_visuals=True,
+            **({"evaluation_mask": evaluation_mask} if evaluation_mask is not None else {}),
         )
         detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
         detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
@@ -2641,8 +2711,36 @@ def _save_within_spec_dot_visuals(
         files["no_detect_mask_url"] = f"{prefix}_no_detect_mask.png"
     if no_detect_overlay is not None:
         files["no_detect_overlay_url"] = f"{prefix}_no_detect_overlay.png"
-    cv2.imwrite(str(output_dir / files["crop_url"]), tile_crop)
-    cv2.imwrite(str(output_dir / files["preprocessed_url"]), processed_crop)
+    def scope_visual(canvas):
+        if evaluation_mask is None or canvas is None:
+            return canvas
+        import numpy as np
+
+        canvas = canvas.copy()
+        if canvas.ndim == 2:
+            canvas = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+        outside = ~np.asarray(evaluation_mask, dtype=bool)
+        gray = cv2.cvtColor(cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+        canvas[outside] = (gray[outside] * 0.7).astype(np.uint8)
+        contours, _ = cv2.findContours(evaluation_mask.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                      cv2.CHAIN_APPROX_SIMPLE)
+        frame = canvas.copy()
+        cv2.drawContours(frame, contours, -1, (200, 200, 120), 1)
+        canvas = cv2.addWeighted(canvas, 0.8, frame, 0.2, 0)
+        # Put the mode above the image; never cover the defect with text or a cross.
+        canvas = cv2.copyMakeBorder(canvas, 24, 0, 0, 0, cv2.BORDER_CONSTANT)
+        radius = (aoi_roi or {}).get("radius_product_px", "?")
+        cv2.putText(canvas, f"AOI +/-{radius}px | whole intersecting defects", (4, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1, cv2.LINE_AA)
+        return canvas
+
+    for key in ("overlay", "mask_color", "diff_color"):
+        detected[key] = scope_visual(detected.get(key))
+    dust_mask_color, dust_overlay = scope_visual(dust_mask_color), scope_visual(dust_overlay)
+    no_detect_mask_color = scope_visual(no_detect_mask_color)
+    no_detect_overlay = scope_visual(no_detect_overlay)
+    cv2.imwrite(str(output_dir / files["crop_url"]), scope_visual(tile_crop))
+    cv2.imwrite(str(output_dir / files["preprocessed_url"]), scope_visual(processed_crop))
     cv2.imwrite(str(output_dir / files["overlay_url"]), detected["overlay"])
     cv2.imwrite(str(output_dir / files["mask_url"]), detected["mask_color"])
     cv2.imwrite(str(output_dir / files["diff_url"]), detected["diff_color"])
@@ -2657,6 +2755,7 @@ def _save_within_spec_dot_visuals(
 
     return {
         "image_name": image_name,
+        "aoi_judgment_roi": aoi_roi,
         "tile_id": tile_id,
         "dot_type": chosen["dot_type"],
         "dot_label": chosen["label"],
@@ -2728,14 +2827,14 @@ def _evaluate_within_spec_suggestion_detail(
             return _save_within_spec_dot_visuals(**kwargs)
         kwargs["detected"] = kwargs["chosen"]["_detected"]
         kwargs["chosen"] = {k: v for k, v in kwargs["chosen"].items() if k != "_detected"}
-        arrays = [kwargs.get(k) for k in ("tile_crop", "processed_crop", "runtime_dust_mask", "no_detect_mask")]
+        arrays = [kwargs.get(k) for k in ("tile_crop", "processed_crop", "runtime_dust_mask", "no_detect_mask", "evaluation_mask")]
         arrays.extend(kwargs["detected"].values())
         size = sum(value.nbytes for value in arrays if hasattr(value, "nbytes"))
         # Bound queued raster memory; unusually large panels save overflow inline.
         if deferred_bytes + size > 64 * 1024 * 1024:
             return _save_within_spec_dot_visuals(**kwargs)
         deferred_bytes += size
-        for key in ("tile_crop", "processed_crop", "runtime_dust_mask", "no_detect_mask"):
+        for key in ("tile_crop", "processed_crop", "runtime_dust_mask", "no_detect_mask", "evaluation_mask"):
             if kwargs.get(key) is not None:
                 kwargs[key] = kwargs[key].copy()
         pending = {"pending": True}
@@ -2919,6 +3018,19 @@ def _evaluate_within_spec_suggestion_detail(
                 method=str(dot_cfg.get("preprocess_method") or DOT_PREPROCESS_METHOD),
                 params=preprocess_params,
             )
+            try:
+                evaluation_mask, aoi_roi = _within_spec_aoi_roi_for_tile(
+                    tile, processed_crop.shape[:2], crop_box)
+            except (ValueError, TypeError, AttributeError) as exc:
+                invalid_roi = {"image": image.get("image_name") or image_path.name,
+                               "tile_id": tile.get("tile_id"), "reason": str(exc)}
+                result["missed_dot_tiles"].append(invalid_roi)
+                add_step("AOI 判定範圍無法還原：保留 NG，不轉規格內", **invalid_roi)
+                continue
+            if aoi_roi is not None:
+                add_step("規格內沿用 AOI 範圍；跨框缺陷保留完整尺寸",
+                         image=image.get("image_name") or image_path.name,
+                         tile_id=tile.get("tile_id"), aoi_judgment_roi=aoi_roi)
             runtime_dust_mask = _runtime_dust_mask_for_tile(tile, processed_crop.shape[:2])
             no_detect_mask = _within_spec_no_detect_mask_for_tile(
                 image,
@@ -2960,6 +3072,7 @@ def _evaluate_within_spec_suggestion_detail(
                     edge_margin=max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
                     **_dot_hysteresis_kwargs(dot_cfg),
                     include_visuals=reuse_visual_detection,
+                    **({"evaluation_mask": evaluation_mask} if evaluation_mask is not None else {}),
                 )
                 detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
                 detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
@@ -3119,6 +3232,8 @@ def _evaluate_within_spec_suggestion_detail(
                         dot_cfg=dot_cfg,
                         runtime_dust_mask=runtime_dust_mask,
                         no_detect_mask=no_detect_mask,
+                        evaluation_mask=evaluation_mask,
+                        aoi_roi=aoi_roi,
                         non_dot_residues=tile_non_dot_residues,
                         output_dir=visual_output_dir,
                         url_prefix=visual_url_prefix,
@@ -3160,6 +3275,8 @@ def _evaluate_within_spec_suggestion_detail(
                     dot_cfg=dot_cfg,
                     runtime_dust_mask=runtime_dust_mask,
                     no_detect_mask=no_detect_mask,
+                    evaluation_mask=evaluation_mask,
+                    aoi_roi=aoi_roi,
                     non_dot_residues=tile_non_dot_residues,
                     output_dir=visual_output_dir,
                     url_prefix=visual_url_prefix,
@@ -3199,6 +3316,7 @@ def _evaluate_within_spec_suggestion_detail(
                 state["aoi_defect_codes"].add(str(tile.get("aoi_defect_code")))
             tile_detail = {
                 "tile_id": tile.get("tile_id"),
+                "aoi_judgment_roi": aoi_roi,
                 "count": chosen["count"],
                 "max_size_mm": round(float(chosen["max_size_mm"]), 4),
                 "segmentation_method": chosen["segmentation_method"],
@@ -3214,6 +3332,8 @@ def _evaluate_within_spec_suggestion_detail(
                 dot_cfg=dot_cfg,
                 runtime_dust_mask=runtime_dust_mask,
                 no_detect_mask=no_detect_mask,
+                evaluation_mask=evaluation_mask,
+                aoi_roi=aoi_roi,
                 non_dot_residues=tile_non_dot_residues,
                 output_dir=visual_output_dir,
                 url_prefix=visual_url_prefix,

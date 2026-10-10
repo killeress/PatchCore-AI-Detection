@@ -681,6 +681,46 @@ class HeatmapManager:
             except (TypeError, ValueError):
                 pass
 
+        roi = (getattr(tile_info, 'decision_context', None) or {}).get('aoi_judgment_roi', {})
+        roi_mask = getattr(tile_info, 'aoi_roi_mask', None)
+
+        def _draw_roi(panel):
+            if not roi.get('enabled') or roi_mask is None:
+                return panel
+            panel = panel.copy()
+            allowed = cv2.resize(roi_mask, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST) > 0
+            gray = cv2.cvtColor(panel, cv2.COLOR_BGR2GRAY)
+            dim = cv2.cvtColor((gray * 0.30).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+            panel[~allowed] = dim[~allowed]
+            contours, _ = cv2.findContours(allowed.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            outline = panel.copy()
+            cv2.drawContours(outline, contours, -1, (200, 200, 120), 1)
+            # Keep 80% of the underlying image visible, including border defects.
+            panel = cv2.addWeighted(panel, 0.8, outline, 0.2, 0)
+            cv2.putText(panel, "CYAN BOX = EVALUATED", (12, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (255, 255, 0), 2)
+            cv2.putText(panel, "DIMMED = OUTSIDE / IGNORED", (12, tile_size - 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+            return panel
+
+        def _roi_banner(composite):
+            if not roi.get('enabled'):
+                return composite
+            result = "BOMB -> OK" if getattr(tile_info, 'is_bomb', False) else (
+                "DUST -> OK" if getattr(tile_info, 'is_suspected_dust_or_scratch', False) else (
+                "OK" if getattr(tile_info, 'is_aoi_coord_below_threshold', False)
+                or getattr(tile_info, 'scratch_filtered', False)
+                or getattr(tile_info, 'is_in_exclude_zone', False) else "NG"))
+            banner = np.full((88, composite.shape[1], 3), (48, 40, 14), dtype=np.uint8)
+            ax, ay = roi['aoi_product_xy']
+            headline = (f"AOI ONLY +/-{roi['radius_product_px']} product px | "
+                        f"AOI ({ax}, {ay}) | ROI RESULT: {result}")
+            cv2.putText(banner, headline, (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 0), 2)
+            detail = (f"ROI score: {score:.4f} | THR: {score_threshold:.4f} | "
+                      f"Full tile score: {roi['full_tile_score']:.4f} (reference only) | OUTSIDE IGNORED")
+            cv2.putText(banner, detail, (14, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (240, 240, 240), 1)
+            return np.vstack([banner, composite])
+
         def _to_bgr_panel(img: np.ndarray) -> np.ndarray:
             panel = img.copy()
             if len(panel.shape) == 2:
@@ -717,7 +757,7 @@ class HeatmapManager:
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
             labels = ["Original", "Preprocessed", "Binarization"]
-            panels = [orig, preprocessed, binary_panel]
+            panels = [_draw_roi(p) for p in (orig, preprocessed, binary_panel)]
 
             # --- 橫向拼接 ---
             composite = np.hstack(panels)
@@ -758,7 +798,7 @@ class HeatmapManager:
             cv2.putText(header, detail_line, (10, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
-            final = np.vstack([header, composite, label_bar])
+            final = _roi_banner(np.vstack([header, composite, label_bar]))
 
             filename = f"heatmap_{image_name}_tile{tile_id}.{self.save_format}"
             filepath = save_dir / filename
@@ -767,7 +807,10 @@ class HeatmapManager:
 
         # --- Panel 2: Heatmap Overlay ---
         if anomaly_map is not None:
-            norm_map = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            display_map = getattr(tile_info, 'aoi_roi_full_map', None)
+            if display_map is None:
+                display_map = anomaly_map
+            norm_map = cv2.normalize(display_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             heatmap_color = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
             heatmap_color = cv2.resize(heatmap_color, (tile_size, tile_size))
             heatmap_panel = cv2.addWeighted(preprocessed, 0.5, heatmap_color, 0.5, 0)
@@ -924,6 +967,8 @@ class HeatmapManager:
             labels = ["Original", "Preprocessed", "Heatmap"]
             panels = [orig, preprocessed, heatmap_panel]
 
+        # First five panels share full tile coordinates; debug/zoom panels do not.
+        panels[:5 if has_omit else 3] = [_draw_roi(p) for p in panels[:5 if has_omit else 3]]
         # --- 橫向拼接 ---
         composite = np.hstack(panels)
         comp_h, comp_w = composite.shape[:2]
@@ -1016,7 +1061,7 @@ class HeatmapManager:
         cv2.putText(header, detail_line, (10, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
-        final = np.vstack([header, composite, label_bar])
+        final = _roi_banner(np.vstack([header, composite, label_bar]))
 
         filename = f"heatmap_{image_name}_tile{tile_id}.{self.save_format}"
         filepath = save_dir / filename

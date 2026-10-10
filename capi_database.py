@@ -6956,7 +6956,8 @@ class CAPIDatabase:
             ("aoi_coord_inspection_enabled", True, "bool", "啟用 AOI 機檢座標推論"),
             ("aoi_heatmap_center_seed_enabled", config.aoi_heatmap_center_seed_enabled, "bool", "啟用 AOI 中心 seed 保護，Top% heatmap 額外保留 AOI 座標附近弱熱區"),
             ("bomb_area_force_detection_enabled", config.bomb_area_force_detection_enabled, "bool", "炸彈區域強制偵測：AOI Report 未給 Client 炸彈座標時補切 tile 偵測"),
-            ("aoi_bomb_priority_enabled", config.aoi_bomb_priority_enabled, "bool", "AOI 炸彈優先判定：AOI 位置及其主要熱點命中同一點型炸彈時，整個 Tile 判 BOMB；其他熱區不參與判定。預設關閉。"),
+            ("aoi_judgment_roi_enabled", config.aoi_judgment_roi_enabled, "bool", "AOI 限定範圍判定：只使用 AOI 產品座標判定範圍內的熱區；範圍外不參與判定。預設關閉。"),
+            ("aoi_judgment_radius_px", config.aoi_judgment_radius_px, "int", "AOI 判定半徑：產品座標 X、Y 各 ±此數值（px），預設 25；與炸彈匹配容忍度分開設定。"),
             ("aoi_report_path_replace_from", "yuantu", "string", "報告路徑替換來源字串"),
             ("aoi_report_path_replace_to", "Report", "string", "報告路徑替換目標字串"),
         ]
@@ -6986,6 +6987,7 @@ class CAPIDatabase:
             if name.startswith("image_abnormal_")
         }
         description_refresh_param_names = image_abnormal_param_names | {
+            "aoi_judgment_roi_enabled",
             "inference_rotate_180_enabled",
             "dust_pixel_grid_filter_enabled",
             "dust_pixel_grid_blur_kernel",
@@ -7000,6 +7002,15 @@ class CAPIDatabase:
             try:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 for name, value, ptype, desc in params_def:
+                    if name == "aoi_judgment_roi_enabled":
+                        # Preserve the machine's old switch once; an explicit new value wins.
+                        conn.execute(
+                            "UPDATE config_params SET param_name = ? WHERE param_name = ? "
+                            "AND NOT EXISTS (SELECT 1 FROM config_params WHERE param_name = ?)",
+                            (name, "aoi_bomb_priority_enabled", name),
+                        )
+                        conn.execute("DELETE FROM config_params WHERE param_name = ?",
+                                     ("aoi_bomb_priority_enabled",))
                     # 只在 DB 中尚無此參數時才新增
                     existing = conn.execute(
                         "SELECT id, param_value, param_type FROM config_params WHERE param_name = ?",

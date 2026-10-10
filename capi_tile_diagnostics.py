@@ -227,6 +227,13 @@ def decision_evidence(item, is_cv=False):
         if is_cv and item.get("patchcore_ok_reason"):
             notes.append(str(item["patchcore_ok_reason"]))
     detail = str(item.get("dust_detail_text") or "")
+    roi = ctx.get("aoi_judgment_roi") or {}
+    if roi.get("enabled"):
+        title = "AOI 範圍內：" + title
+        notes.append(f"僅判定 AOI 產品座標 X、Y 各 ±{roi.get('radius_product_px')} px；範圍外不參與判定。")
+        if roi.get("score_method") == "max_ratio":
+            notes.append("範圍內分數依區內／全 Tile 熱圖最大值比例換算，使用原模型門檻。")
+        metrics.append(_metric("完整 Tile 分數（參考）", roi.get("full_tile_score"), digits=4))
     flow = [label] + filters + ["最終 " + status]
     return dict(kind="general", status=status, title=title, rule_label=label,
                 metrics=metrics, notes=list(dict.fromkeys(notes)), flow=" → ".join(flow),

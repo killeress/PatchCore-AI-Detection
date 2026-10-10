@@ -365,7 +365,8 @@ class CAPIConfig:
     bomb_match_tolerance: int = 50  # 座標匹配容忍度 (產品座標系像素)
     bomb_line_min_aspect_ratio: float = 3.0  # Line 型炸彈 heatmap 最小長寬比
     bomb_area_force_detection_enabled: bool = False  # AOI 漏給炸彈座標時，使用 Client 炸彈座標補切 tile 偵測
-    aoi_bomb_priority_enabled: bool = False  # AOI 位置及主要熱點命中點型炸彈時，整個 Tile 排除
+    aoi_judgment_roi_enabled: bool = False  # 只判定 AOI 產品座標附近的區域
+    aoi_judgment_radius_px: int = 25  # 產品座標 X/Y 各 ±radius（非圖片像素）
     
     # 機種第六碼 → 產品解析度映射表 (寬, 高)
     # 例: {'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200], 'K': [2560, 1440], 'G': [2560, 1600]}
@@ -691,7 +692,8 @@ class CAPIConfig:
             bomb_match_tolerance=data.get("bomb_match_tolerance", 50),
             bomb_line_min_aspect_ratio=data.get("bomb_line_min_aspect_ratio", 3.0),
             bomb_area_force_detection_enabled=data.get("bomb_area_force_detection_enabled", False),
-            aoi_bomb_priority_enabled=data.get("aoi_bomb_priority_enabled", False),
+            aoi_judgment_roi_enabled=data.get("aoi_judgment_roi_enabled", data.get("aoi_bomb_priority_enabled", False)),
+            aoi_judgment_radius_px=max(1, int(data.get("aoi_judgment_radius_px", 25))),
             model_resolution_map=data.get("model_resolution_map", {
                 'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
                 'K': [2560, 1440], 'G': [2560, 1600],
@@ -826,7 +828,8 @@ class CAPIConfig:
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
             "bomb_area_force_detection_enabled": self.bomb_area_force_detection_enabled,
-            "aoi_bomb_priority_enabled": self.aoi_bomb_priority_enabled,
+            "aoi_judgment_roi_enabled": self.aoi_judgment_roi_enabled,
+            "aoi_judgment_radius_px": self.aoi_judgment_radius_px,
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
@@ -950,7 +953,8 @@ class CAPIConfig:
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
             "bomb_area_force_detection_enabled": self.bomb_area_force_detection_enabled,
-            "aoi_bomb_priority_enabled": self.aoi_bomb_priority_enabled,
+            "aoi_judgment_roi_enabled": self.aoi_judgment_roi_enabled,
+            "aoi_judgment_radius_px": self.aoi_judgment_radius_px,
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
@@ -1010,6 +1014,8 @@ class CAPIConfig:
             db_params: get_all_config_params() 回傳的列表
         """
         param_map = {p["param_name"]: p["decoded_value"] for p in db_params}
+        if "aoi_judgment_roi_enabled" not in param_map and "aoi_bomb_priority_enabled" in param_map:
+            param_map["aoi_judgment_roi_enabled"] = param_map["aoi_bomb_priority_enabled"]
 
         if "anomaly_threshold" in param_map:
             self.anomaly_threshold = float(param_map["anomaly_threshold"])
@@ -1165,9 +1171,11 @@ class CAPIConfig:
         if "bomb_area_force_detection_enabled" in param_map:
             val = param_map["bomb_area_force_detection_enabled"]
             self.bomb_area_force_detection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
-        if "aoi_bomb_priority_enabled" in param_map:
-            val = param_map["aoi_bomb_priority_enabled"]
-            self.aoi_bomb_priority_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "aoi_judgment_roi_enabled" in param_map:
+            val = param_map["aoi_judgment_roi_enabled"]
+            self.aoi_judgment_roi_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "aoi_judgment_radius_px" in param_map:
+            self.aoi_judgment_radius_px = max(1, int(param_map["aoi_judgment_radius_px"]))
         if "bright_spot_threshold" in param_map:
             self.bright_spot_threshold = int(param_map["bright_spot_threshold"])
         if "bright_spot_min_area" in param_map:

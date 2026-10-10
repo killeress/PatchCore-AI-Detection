@@ -211,27 +211,27 @@ def test_aoi_heatmap_center_seed_enabled_serialization():
         assert loaded["bomb_area_force_detection_enabled"] is True
 
 
-def test_aoi_bomb_priority_defaults_round_trip_and_persistence(tmp_path):
+def test_aoi_judgment_roi_defaults_round_trip_and_persistence(tmp_path):
     from capi_database import CAPIDatabase
 
-    assert CAPIConfig().aoi_bomb_priority_enabled is False
-    cfg = CAPIConfig.from_dict({"aoi_bomb_priority_enabled": True})
-    assert CAPIConfig.from_dict(cfg.to_dict()).aoi_bomb_priority_enabled is True
+    assert CAPIConfig().aoi_judgment_roi_enabled is False
+    cfg = CAPIConfig.from_dict({"aoi_judgment_roi_enabled": True})
+    assert CAPIConfig.from_dict(cfg.to_dict()).aoi_judgment_roi_enabled is True
     path = tmp_path / "config.yaml"
     cfg.to_yaml(str(path))
-    assert yaml.safe_load(path.read_text(encoding="utf-8"))["aoi_bomb_priority_enabled"] is True
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["aoi_judgment_roi_enabled"] is True
     for value, expected in [("false", False), (True, True), ("true", True), (False, False)]:
-        cfg.apply_db_overrides([{"param_name": "aoi_bomb_priority_enabled", "decoded_value": value}])
-        assert cfg.aoi_bomb_priority_enabled is expected
+        cfg.apply_db_overrides([{"param_name": "aoi_judgment_roi_enabled", "decoded_value": value}])
+        assert cfg.aoi_judgment_roi_enabled is expected
 
     db = CAPIDatabase(str(tmp_path / "config.db"))
     db.init_config_from_yaml(CAPIConfig())
-    assert db.update_config_param("aoi_bomb_priority_enabled", True)
+    assert db.update_config_param("aoi_judgment_roi_enabled", True)
     # Restart/model YAML initialization must preserve this machine's saved choice.
     db = CAPIDatabase(str(tmp_path / "config.db"))
     db.init_config_from_yaml(CAPIConfig())
     cfg.apply_db_overrides(db.get_all_config_params())
-    assert cfg.aoi_bomb_priority_enabled is True
+    assert cfg.aoi_judgment_roi_enabled is True
 
 
 def test_dust_two_stage_association_settings_round_trip_and_db_clamp():

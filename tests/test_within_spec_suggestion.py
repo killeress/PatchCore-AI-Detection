@@ -129,6 +129,164 @@ def _write_white_dot_image(path, centers):
     cv2.imwrite(str(path), image)
 
 
+def _with_aoi_roi(detail, bounds=(38, 38, 58, 58), *, enabled=True):
+    x1, y1, x2, y2 = bounds
+    detail["images"][0]["tiles"][0]["decision_context"] = json.dumps({
+        "aoi_judgment_roi": {"enabled": enabled, "radius_product_px": (x2-x1)//2,
+                             "tile_polygon": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]}
+    })
+    return detail
+
+
+@pytest.mark.parametrize("mode", ["background_diff", "hysteresis", "morph_hat", "adaptive_mean", "auto"])
+@pytest.mark.parametrize("white", [False, True])
+def test_within_spec_aoi_roi_ignores_outside_dot_counts(tmp_path, mode, white):
+    path = tmp_path / "W0F00000.png"
+    writer = _write_white_dot_image if white else _write_black_dot_image
+    writer(path, [(48, 48), (16, 16), (78, 78)])
+    rules = _rules(white_enabled=white, segmentation_method=mode, threshold_mm=1)
+    if white:
+        rules["default"]["screens"]["W0F00000"]["black_dot"]["enabled"] = False
+    full = _evaluate_within_spec_suggestion_detail(_with_aoi_roi(_detail(path), enabled=False), rules)
+    scoped = _evaluate_within_spec_suggestion_detail(_with_aoi_roi(_detail(path)), rules)
+    assert full["panel_totals"][0]["total_count"] == 3
+    assert scoped["panel_totals"][0]["total_count"] == 1
+    assert scoped["suggestion"] is not None
+
+
+def test_within_spec_aoi_roi_outside_only_does_not_convert_ng(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(16, 16)])
+    result = _evaluate_within_spec_suggestion_detail(_with_aoi_roi(_detail(path)), _rules())
+    assert result["suggestion"] is None
+    assert len(result["missed_dot_tiles"]) == 1
+
+
+def test_within_spec_aoi_roi_keeps_full_crossing_defect_size(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    image = np.full((96, 96, 3), 128, np.uint8)
+    cv2.circle(image, (58, 48), 9, (30, 30, 30), -1)
+    cv2.imwrite(str(path), image)
+    rules = _rules(threshold_mm=.25)
+    full = _evaluate_within_spec_suggestion_detail(_detail(path), rules)
+    scoped = _evaluate_within_spec_suggestion_detail(_with_aoi_roi(_detail(path), (40, 40, 52, 56)), rules)
+    assert scoped["panel_totals"][0]["max_size_mm"] == full["panel_totals"][0]["max_size_mm"]
+    assert scoped["panel_totals"][0]["max_size_mm"] > .25
+    assert scoped["suggestion"] is None
+
+
+@pytest.mark.parametrize("crosses", [False, True])
+def test_within_spec_aoi_roi_scopes_non_dot_residues(tmp_path, crosses):
+    path = tmp_path / "W0F00000.png"
+    image = np.full((96, 96, 3), 128, np.uint8)
+    cv2.circle(image, (48, 48), 3, (60, 60, 60), -1)
+    cv2.rectangle(image, (5, 56 if crosses else 75), (90, 60 if crosses else 79), (20, 20, 20), -1)
+    cv2.imwrite(str(path), image)
+    rules = _rules()
+    rules["default"]["dot_detection"]["non_dot_residue_min_area_px"] = 100
+    result = _evaluate_within_spec_suggestion_detail(_with_aoi_roi(_detail(path)), rules)
+    assert bool(result["non_dot_residues"]) is crosses
+    assert (result["suggestion"] is None) is crosses
+
+
+def test_within_spec_aoi_roi_invalid_polygon_blocks_panel_conversion(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path))
+    good = dict(detail["images"][0]["tiles"][0])
+    detail["images"][0]["tiles"].append(good)
+    detail["images"][0]["tiles"][0]["decision_context"] = json.dumps({
+        "aoi_judgment_roi": {"enabled": True}})
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules())
+    assert result["evaluated_tile_count"] == 1
+    assert len(result["missed_dot_tiles"]) == 1
+    assert result["suggestion"] is None
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_within_spec_aoi_roi_visuals_match_decision(tmp_path, deferred):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48), (16, 16)])
+    jobs = [] if deferred else None
+    result = _evaluate_within_spec_suggestion_detail(
+        _with_aoi_roi(_detail(path)), _rules(), visual_output_dir=tmp_path / "visuals",
+        visual_url_prefix="/test", deferred_visual_jobs=jobs)
+    if deferred:
+        _flush_within_spec_visual_jobs(jobs)
+    visual = result["visuals"][0]
+    assert visual["aoi_judgment_roi"]["radius_product_px"] == 10
+    mask = cv2.imread(str(tmp_path / "visuals" / Path(visual["urls"]["mask_url"]).name))
+    assert mask.shape == (120, 96, 3)
+    assert np.max(mask[24+16, 16]) == 0
+    assert np.min(mask[24+48, 48]) == 255
+    crop = cv2.imread(str(tmp_path / "visuals" / Path(visual["urls"]["crop_url"]).name))
+    original = cv2.imread(str(path))
+    # No cross, tint or caption over the central defect.
+    assert np.array_equal(crop[24+45:24+52, 45:52], original[45:52, 45:52])
+
+
+def test_within_spec_aoi_roi_restores_shifted_scaled_polygon():
+    from capi_web import _within_spec_aoi_roi_for_tile
+    tile = {"x": -10, "y": 100, "decision_context": {"aoi_judgment_roi": {
+        "enabled": True, "radius_product_px": 25,
+        "tile_polygon": [[10, 5], [30, 5], [30, 25], [10, 25]]}}}
+    mask, roi = _within_spec_aoi_roi_for_tile(tile, (50, 50), (0, 100, 100, 200))
+    assert mask[5, 0] and mask[5, 10]
+    assert not mask[5, 11] and not mask[25, 25]
+    assert roi["radius_product_px"] == 25
+
+
+def test_within_spec_aoi_roi_selects_component_pixels_not_bbox():
+    from capi_web import _components_intersecting_roi
+    mask = np.zeros((64, 64), np.uint8)
+    cv2.circle(mask, (32, 32), 20, 255, 1)
+    roi = np.zeros_like(mask)
+    roi[30:35, 30:35] = 1
+    assert not np.any(_components_intersecting_roi(mask, roi))
+
+
+def test_within_spec_aoi_roi_incomplete_edge_component_blocks_conversion(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    image = np.full((96, 96, 3), 128, np.uint8)
+    cv2.circle(image, (48, 48), 3, (60, 60, 60), -1)
+    cv2.rectangle(image, (0, 55), (50, 60), (20, 20, 20), -1)
+    cv2.imwrite(str(path), image)
+    rules = _rules(threshold_mm=2)
+    rules["default"]["dot_detection"]["non_dot_residue_enabled"] = False
+    result = _evaluate_within_spec_suggestion_detail(_with_aoi_roi(_detail(path)), rules)
+    assert result["suggestion"] is None
+    assert any(r["reason"] == "aoi_roi_incomplete_component" for r in result["non_dot_residues"])
+
+
+def test_within_spec_aoi_roi_hysteresis_switch_counts_only_inside():
+    image = np.full((128, 128, 3), 128, np.uint8)
+    for xy in [(64, 64), (20, 20), (60, 20), (100, 20), (20, 100), (100, 100)]:
+        cv2.circle(image, xy, 4, (60, 60, 60), -1)
+    roi = np.zeros((128, 128), np.uint8)
+    roi[50:78, 50:78] = 1
+    detected = _detect_dot_components_auto(
+        image, polarity="black", segmentation_method="hysteresis", diff_threshold=8,
+        background_kernel=31, min_area=2, max_area=5000, morph_open=0,
+        size_metric="bbox_max", unit_per_px=.02, defect_threshold=.3,
+        hysteresis_switch_count_threshold=2, evaluation_mask=roi, include_visuals=False)
+    assert detected["thresholds"]["hysteresis_group1_count"] == 1
+    assert not detected["thresholds"]["hysteresis_group2_attempted"]
+
+
+def test_within_spec_aoi_roi_halo_ignores_outside_seed():
+    image = np.full((128, 128, 3), 128, np.uint8)
+    cv2.circle(image, (24, 24), 16, (160, 160, 160), -1)
+    cv2.circle(image, (24, 24), 4, (30, 30, 30), -1)
+    roi = np.zeros((128, 128), np.uint8)
+    roi[55:75, 55:75] = 1
+    detected = _detect_dot_components_auto(
+        image, polarity="white", segmentation_method="halo", diff_threshold=4,
+        background_kernel=31, min_area=2, max_area=5000, morph_open=0,
+        size_metric="bbox_max", unit_per_px=.02, defect_threshold=.3,
+        evaluation_mask=roi, include_visuals=False)
+    assert not detected["candidates"]
+
+
 def test_within_spec_suggestion_does_not_filter_by_defect_code(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     _write_black_dot_image(image_path, [(48, 48)])
