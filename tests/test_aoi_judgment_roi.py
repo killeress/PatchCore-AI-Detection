@@ -226,19 +226,33 @@ def test_two_stage_dilation_does_not_restore_outside_features():
     assert not any(f['feature_bbox'][0] >= 42 for f in features)
 
 
-def test_scratch_classifier_only_sees_roi():
+@pytest.mark.parametrize('has_original', [False, True])
+@pytest.mark.parametrize('scratch_score,filtered', [(.1, False), (.95, True)])
+def test_scratch_classifier_sees_full_tile_with_roi_enabled(has_original, scratch_score, filtered):
     from scratch_filter import ScratchFilter
     from types import SimpleNamespace
     inf, result, tile = case([(256, 256, .8), (400, 400, 1)])
     tile.image[350:, 350:] = 255
+    if has_original:
+        tile.original_image = np.full((512, 512, 3), 80, dtype=np.uint8)
+        tile.original_image[350:, 350:] = 220
+    expected = (tile.original_image if has_original else tile.image).copy()
     inf._apply_aoi_judgment_roi([result], RESOLUTION)
+    roi_mask = tile.aoi_roi_mask.copy()
+    limited_map = result.anomaly_tiles[0][2].copy()
     seen = []
     def predict(image):
         seen.append(image)
-        return .1
+        return scratch_score
     ScratchFilter(SimpleNamespace(conformal_threshold=.7, predict=predict)).apply_to_image_result(result)
-    assert seen[0].shape == (51, 51)
-    assert np.max(seen[0]) == 100
+    assert len(seen) == 1
+    assert seen[0].shape[:2] == (512, 512)
+    np.testing.assert_array_equal(seen[0], expected)
+    np.testing.assert_array_equal(tile.aoi_roi_mask, roi_mask)
+    np.testing.assert_array_equal(result.anomaly_tiles[0][2], limited_map)
+    assert tile.scratch_filtered is filtered
+    assert tile.scratch_score == scratch_score
+    assert results_to_db_data([result], {})[0]['is_ng'] == int(not filtered)
 
 
 def test_edge_rescue_only_uses_roi_evidence():

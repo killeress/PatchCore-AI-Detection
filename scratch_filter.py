@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import logging
 import time
-import cv2
-import numpy as np
 from capi_cuda_diagnostics import cuda_stage, trace_call
 from typing import TYPE_CHECKING
 
@@ -51,16 +49,8 @@ class ScratchFilter:
                 classifier_image = getattr(tile, "original_image", None)
                 if classifier_image is None:
                     classifier_image = tile.image
-                roi_mask = getattr(tile, "aoi_roi_mask", None)
-                if roi_mask is not None:
-                    h, w = classifier_image.shape[:2]
-                    roi_mask = cv2.resize(roi_mask, (w, h), interpolation=cv2.INTER_NEAREST) > 0
-                    ys, xs = np.where(roi_mask)
-                    if not len(xs):
-                        continue
-                    classifier_image = classifier_image.copy()
-                    classifier_image[~roi_mask] = np.median(classifier_image[roi_mask], axis=0)
-                    classifier_image = classifier_image[ys.min():ys.max()+1, xs.min():xs.max()+1]
+                # Keep the full tile context and scale for scratch classification,
+                # even when anomaly judgment is restricted to an AOI ROI.
                 with cuda_stage("scratch-tile", tile=getattr(tile, "tile_id", None),
                                 input_shape=list(classifier_image.shape), batch=1):
                     score = float(self._classifier.predict(classifier_image))
