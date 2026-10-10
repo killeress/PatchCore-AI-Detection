@@ -119,16 +119,20 @@ def _region_display_tag(region: dict) -> str:
         return "NG (partial BOMB)"
     if status == "BOMB":
         return "BOMB"
+    if status == "IGNORED_BY_AOI_BOMB":
+        return "IGNORED (AOI BOMB)"
     return "DUST" if region.get("is_dust") else "REAL_NG"
 
 
 def _bomb_region_summary(regions: list) -> str:
     statuses = [region["bomb_status"] for region in regions]
-    return (
+    summary = (
         f"BOMB:{statuses.count('BOMB')} Partial:{statuses.count('PARTIAL_BOMB')} "
         f"Remaining NG:{sum(s in ('REAL_NG', 'PARTIAL_BOMB') for s in statuses)} "
         f"Dust:{statuses.count('DUST')}"
     )
+    ignored = statuses.count('IGNORED_BY_AOI_BOMB')
+    return summary + (f" Ignored:{ignored}" if ignored else "")
 
 
 def build_bomb_region_debug_panel(diagnostics: dict, tile_size: int) -> np.ndarray:
@@ -139,6 +143,8 @@ def build_bomb_region_debug_panel(diagnostics: dict, tile_size: int) -> np.ndarr
     for region in diagnostics["regions"]:
         color = (0, 255, 0) if region.get("is_dust") else (0, 0, 255)
         panel[labels == region["label_id"]] = color
+    if diagnostics.get("ignored_mask") is not None:
+        panel[diagnostics["ignored_mask"] > 0] = (128, 128, 128)
     panel[diagnostics["excluded_mask"] > 0] = (255, 0, 255)
     panel = cv2.resize(panel, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
     cv2.putText(panel, _bomb_region_summary(diagnostics["regions"]), (10, 20),
@@ -157,6 +163,8 @@ def build_region_zoom_panels(
     max_panels: int = 3,
     method_label: str = "",
     bomb_excluded_mask: Optional[np.ndarray] = None,
+    bomb_ignored_mask: Optional[np.ndarray] = None,
+    bomb_priority_applied: bool = False,
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
 
@@ -179,7 +187,8 @@ def build_region_zoom_panels(
     sorted_regions = sorted(
         region_details,
         key=lambda r: (
-            2 if r.get("is_dust", False) else 1 if r.get("bomb_status") == "BOMB" else 0,
+            3 if r.get("is_dust", False) else 2 if r.get("bomb_status") == "IGNORED_BY_AOI_BOMB"
+            else 1 if r.get("bomb_status") == "BOMB" else 0,
             -float(r.get("max_score", 0.0)),
             int(r.get("label_id", 0)),
         ),
@@ -194,6 +203,10 @@ def build_region_zoom_panels(
     if bomb_excluded_mask is not None:
         bomb_resized = cv2.resize(bomb_excluded_mask, (tile_size, tile_size),
                                   interpolation=cv2.INTER_NEAREST)
+    ignored_resized = None
+    if bomb_ignored_mask is not None:
+        ignored_resized = cv2.resize(bomb_ignored_mask, (tile_size, tile_size),
+                                     interpolation=cv2.INTER_NEAREST)
 
     dm_resized = None
     if dust_mask is not None:
@@ -236,6 +249,8 @@ def build_region_zoom_panels(
 
             if bomb_resized is not None:
                 base[bomb_resized[y1:y2, x1:x2] > 0] = (255, 0, 255)
+            if ignored_resized is not None:
+                base[ignored_resized[y1:y2, x1:x2] > 0] = (128, 128, 128)
 
             panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
@@ -249,6 +264,8 @@ def build_region_zoom_panels(
             score = float(region.get("max_score", 0.0))
             tag = _region_display_tag(region)
             tag_color = (255, 0, 255) if tag == "BOMB" else (0, 200, 255) if is_dust else (0, 0, 255)
+            if region.get("bomb_status") == "IGNORED_BY_AOI_BOMB":
+                tag_color = (160, 160, 160)
 
             cv2.putText(panel, f"{tag}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
@@ -263,7 +280,11 @@ def build_region_zoom_panels(
             peak_in = region.get("peak_in_dust", True)
             sub_rescue = region.get("dust_sub_peak_rescue", False)
             thr_str = f"Thr:{iou_threshold:.3f}"
-            if tag == "BOMB":
+            if region.get("bomb_status") == "IGNORED_BY_AOI_BOMB":
+                reason = "Not evaluated: AOI bomb priority"
+            elif tag == "BOMB" and bomb_priority_applied:
+                reason = "AOI bomb priority: region excluded"
+            elif tag == "BOMB":
                 reason = f"BOMB excluded: {region['bomb_excluded_px']} px"
             elif region.get("bomb_status") == "PARTIAL_BOMB":
                 reason = (f"BOMB: {region['bomb_excluded_px']} px; "
@@ -294,6 +315,8 @@ def build_region_zoom_panels(
             legend_y = tile_size - 15
             legend = ("White=Heat Yellow=Dust Green=Overlap Magenta=BOMB"
                       if bomb_resized is not None else "White=Heat  Yellow=Dust  Green=Overlap")
+            if bomb_priority_applied:
+                legend = "Magenta=BOMB Gray=Ignored Yellow=Dust Green=Overlap"
             cv2.putText(panel, legend, (10, legend_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
@@ -852,6 +875,8 @@ class HeatmapManager:
                 iou_threshold=iou_threshold,
                 high_cov_threshold=dust_high_cov_threshold,
                 bomb_excluded_mask=bomb_diagnostics['excluded_mask'],
+                bomb_ignored_mask=bomb_diagnostics.get('ignored_mask'),
+                bomb_priority_applied=bomb_diagnostics.get('priority_applied', False),
             )
         elif has_omit and ts_features:
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
@@ -883,7 +908,9 @@ class HeatmapManager:
         if has_omit:
             is_two_stage = "TWO_STAGE" in dust_detail
             if bomb_diagnostics:
-                debug_label = "Final: M=BOMB R=NG G=DUST"
+                debug_label = ("Final: M=BOMB Gray=Ignored G=DUST"
+                               if bomb_diagnostics.get('priority_applied')
+                               else "Final: M=BOMB R=NG G=DUST")
             elif is_two_stage:
                 debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
@@ -931,6 +958,8 @@ class HeatmapManager:
 
         if is_bomb:
             verdict = f"BOMB: {bomb_code} (Filtered as OK)"
+            if bomb_diagnostics and bomb_diagnostics.get('priority_applied'):
+                verdict = "BOMB: AOI priority (Filtered as OK)"
             verdict_color = (255, 0, 255)  # 洋紅色
         elif is_dust:
             if "TWO_STAGE" in str(dust_detail):

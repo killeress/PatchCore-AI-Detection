@@ -9244,6 +9244,61 @@ class CAPIInferencer:
                     distance_text,
                 )
 
+    def _aoi_bomb_priority_match(self, tile, amap, details, bombs, result, product_resolution):
+        """Match the nearest non-dust region peak to the SAME bomb as the AOI anchor.
+
+        Use the original image anchor after inward cropping, not tile center or
+        global argmax. The association distance follows AOI peak postprocessing.
+        Never use an AOI-coordinate fallback as evidence of a detected hot spot.
+        """
+        if not getattr(self.config, "aoi_bomb_priority_enabled", False):
+            return None
+        if min(tile.aoi_product_x, tile.aoi_product_y, tile.aoi_image_x, tile.aoi_image_y) < 0:
+            return None
+        if not (tile.x <= tile.aoi_image_x < tile.x + tile.width
+                and tile.y <= tile.aoi_image_y < tile.y + tile.height):
+            return None
+        map_h, map_w = amap.shape
+        candidates = []
+        for detail in details:
+            if detail.get("is_dust") or detail.get("peak_yx") is None:
+                continue
+            py, px = map(int, detail["peak_yx"])
+            if not (0 <= py < map_h and 0 <= px < map_w) or amap[py, px] <= 0:
+                continue
+            ix = tile.x + px * tile.width / map_w
+            iy = tile.y + py * tile.height / map_h
+            distance = float(np.hypot(ix - tile.aoi_image_x, iy - tile.aoi_image_y))
+            candidates.append((distance, -float(amap[py, px]), int(detail["label_id"]), py, px))
+        if not candidates:
+            return None
+        distance, _score, label_id, py, px = min(candidates)
+        if distance > max(32.0, min(tile.width, tile.height) * 0.25):
+            return None
+        product_w, product_h = product_resolution or DEFAULT_PRODUCT_RESOLUTION
+        tolerance = self.config.bomb_match_tolerance
+        scale = np.array([map_w / tile.width, map_h / tile.height], dtype=np.float32)
+        origin = np.array([tile.x, tile.y], dtype=np.float32)
+        for bomb in bombs:
+            for bx, by in bomb.coordinates:
+                if abs(tile.aoi_product_x - bx) > tolerance or abs(tile.aoi_product_y - by) > tolerance:
+                    continue
+                x1, x2 = max(0, bx - tolerance), min(product_w, bx + tolerance)
+                y1, y2 = max(0, by - tolerance), min(product_h, by + tolerance)
+                if x1 > x2 or y1 > y2:
+                    continue
+                polygon = np.array([
+                    self._map_aoi_coords(x, y, result.raw_bounds, product_resolution,
+                                         panel_polygon=result.panel_polygon)
+                    for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+                ], dtype=np.float32)
+                contour = np.rint((polygon - origin) * scale).astype(np.int32)
+                mask = np.zeros(amap.shape, dtype=np.uint8)
+                cv2.fillConvexPoly(mask, cv2.convexHull(contour), 1)
+                if mask[py, px]:
+                    return bomb.defect_code, label_id, py, px
+        return None
+
     def _match_aoi_point_bomb_regions(
         self,
         result: ImageResult,
@@ -9260,6 +9315,8 @@ class CAPIInferencer:
         known point-bomb tolerance areas. Keep weaker AOI-seed regions and
         hot pixels outside those areas as NG. Without overlapping bomb-core
         evidence, retain the existing AOI-coordinate fallback and guard.
+        When AOI bomb priority is enabled, an AOI anchor and its associated
+        peak matching the same bomb instead exclude this entire tile.
         """
         tile.bomb_region_diagnostics = None
         if (
@@ -9345,26 +9402,42 @@ class CAPIInferencer:
             return None
 
         remaining = real_core & (bomb_core == 0)
-        real_ids = np.unique(labels[real_core])
         remaining_ids = np.unique(labels[remaining])
+        priority_match = self._aoi_bomb_priority_match(
+            tile, amap, details, bombs, result, product_resolution,
+        )
+        excluded_mask = real_core & (bomb_core > 0)
+        ignored_mask = np.zeros(amap.shape, dtype=bool)
+        if priority_match is not None:
+            _priority_code, priority_label, _py, _px = priority_match
+            excluded_mask = real_core & (labels == priority_label)
+            ignored_mask = real_core & (labels != priority_label)
+            remaining = np.zeros(amap.shape, dtype=bool)
+            remaining_ids = np.array([], dtype=labels.dtype)
         # Keep dust-stage evidence intact; rendering consumes a separate snapshot
         # of the exact masks used for this decision, without rematching bombs.
         display_regions = []
         for detail in details:
             region = labels == detail["label_id"]
-            excluded_px = int(np.count_nonzero(region & real_core & (bomb_core > 0)))
+            excluded_px = int(np.count_nonzero(region & excluded_mask))
             remaining_px = int(np.count_nonzero(region & remaining))
+            ignored_px = int(np.count_nonzero(region & ignored_mask))
             status = ("DUST" if detail.get("is_dust") else
+                      "IGNORED_BY_AOI_BOMB" if ignored_px else
                       "PARTIAL_BOMB" if excluded_px and remaining_px else
                       "BOMB" if excluded_px else "REAL_NG")
             display_regions.append(dict(
                 detail, bomb_status=status, bomb_excluded_px=excluded_px,
                 bomb_remaining_px=remaining_px,
+                bomb_ignored_px=ignored_px,
             ))
         tile.bomb_region_diagnostics = {
             "regions": display_regions,
             "heatmap_binary": binary,
-            "excluded_mask": (real_core & (bomb_core > 0)).astype(np.uint8),
+            "excluded_mask": excluded_mask.astype(np.uint8),
+            "ignored_mask": ignored_mask.astype(np.uint8),
+            "priority_applied": priority_match is not None,
+            "tolerance_product_px": self.config.bomb_match_tolerance,
         }
         remaining_points = []
         for label_id in remaining_ids:
@@ -9378,6 +9451,10 @@ class CAPIInferencer:
         tile.bomb_remaining_points = [(x, y) for _score, x, y in sorted(remaining_points)]
         is_bomb = not np.any(remaining)
         selected_core = real_core if is_bomb else remaining
+        if priority_match is not None:
+            # Report the confirmed bomb peak even if an ignored region is stronger.
+            selected_core = np.zeros(amap.shape, dtype=bool)
+            selected_core[priority_match[2], priority_match[3]] = True
         current_x = int((tile.anomaly_peak_x - tile.x) * map_w / tile.width)
         current_y = int((tile.anomaly_peak_y - tile.y) * map_h / tile.height)
         keep_current = (
@@ -9393,11 +9470,20 @@ class CAPIInferencer:
         else:
             py, px = current_y, current_x
         code = next((code for code, mask in code_masks if mask[py, px]), "") if is_bomb else ""
+        if priority_match is not None:
+            code = priority_match[0]
+            logger.info(
+                "[BOMB_AOI_PRIORITY] image=%s tile=(%s,%s) aoi=(%s,%s) "
+                "peak=(%s,%s) ignored_regions=%s tolerance=%s result=BOMB",
+                result.image_path.name, tile.x, tile.y, tile.aoi_product_x, tile.aoi_product_y,
+                tile.anomaly_peak_x, tile.anomaly_peak_y,
+                len(np.unique(labels[ignored_mask])), self.config.bomb_match_tolerance,
+            )
         logger.info(
             "[BOMB_REGIONS] image=%s tile=(%s,%s) aoi=(%s,%s) "
             "bomb_regions=%s remaining_regions=%s peak=(%s,%s) result=%s",
             result.image_path.name, tile.x, tile.y, tile.aoi_product_x, tile.aoi_product_y,
-            len(real_ids) - len(remaining_ids), len(remaining_ids),
+            sum(r["bomb_status"] == "BOMB" for r in display_regions), len(remaining_ids),
             tile.anomaly_peak_x, tile.anomaly_peak_y, "BOMB" if is_bomb else "NG",
         )
         return is_bomb, code

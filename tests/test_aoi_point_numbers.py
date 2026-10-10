@@ -75,3 +75,30 @@ def test_missing_report_does_not_invent_a_point_number(raw):
     detail["aoi_machine_coords"] = raw
     CAPIWebHandler._decorate_record_aoi_point_numbers(detail)
     assert tile["aoi_point_number"] is None
+
+
+@pytest.mark.parametrize("template", ["record_detail.html", "record_detail_v3.html"])
+@pytest.mark.parametrize("is_bomb,is_anomaly", [(False, True), (True, True), (True, False)])
+def test_bomb_force_source_is_not_a_bomb_verdict(template, is_bomb, is_anomaly):
+    tile = _tile(6, 11, 11, code="BOMB_FORCE")
+    tile.update(is_bomb=is_bomb, is_anomaly=is_anomaly, bomb_code="UNKNOWN")
+    detail = _detail([], [tile])
+    CAPIWebHandler._decorate_record_aoi_point_numbers(detail)
+    CAPIWebHandler.init_jinja()
+    html = CAPIWebHandler.jinja_env.get_template(template).render(
+        detail=detail, heatmap_base_dir="/heatmaps")
+    assert "BOMB_FORCE" in html  # The source is still shown in the code column.
+    assert (" | 炸彈" in html) is (is_bomb and is_anomaly)
+    if template == "record_detail_v3.html":
+        from capi_web import tile_info
+        _, info = tile_info(tile)
+        color = "#DC2626" if is_bomb and is_anomaly else "#64748B"
+        assert f'<span style="color: {color};">{info}</span>' in html
+        return
+    assert ("[BOMB 已排除]" in html) is (is_bomb and is_anomaly)
+    if is_bomb and is_anomaly:
+        assert "炸彈排除 OK" in html
+        assert "[AI: NG]" not in html
+    elif is_anomaly:
+        assert "AI 也判 NG" in html
+        assert "[AI: NG]" in html

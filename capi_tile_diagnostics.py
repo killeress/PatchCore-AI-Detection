@@ -119,6 +119,14 @@ def tile_decision_context(tile):
     context = dict(_context(getattr(tile, "decision_context", None)))
     context["detector"] = "bright_spot" if getattr(tile, "is_bright_spot_detection", False) else "patchcore"
     context["score_threshold"] = _number(getattr(tile, "score_threshold", None))
+    bomb_diagnostics = getattr(tile, "bomb_region_diagnostics", None) or {}
+    context["aoi_bomb_priority_applied"] = bool(bomb_diagnostics.get("priority_applied"))
+    if context["aoi_bomb_priority_applied"]:
+        context["aoi_bomb_priority_ignored_regions"] = sum(
+            r.get("bomb_status") == "IGNORED_BY_AOI_BOMB"
+            for r in bomb_diagnostics.get("regions", [])
+        )
+        context["aoi_bomb_priority_tolerance_product_px"] = bomb_diagnostics.get("tolerance_product_px")
     if context["detector"] == "bright_spot":
         for name in ("max_diff", "diff_threshold", "area", "min_area"):
             context[name] = _number(getattr(tile, "bright_spot_" + name, None))
@@ -206,6 +214,9 @@ def decision_evidence(item, is_cv=False):
             notes.append("舊紀錄未保存當時的模型門檻，不套用目前設定。")
     if filters:
         title = "、".join(filters) + " → OK"
+        if item.get("is_bomb") and ctx.get("aoi_bomb_priority_applied"):
+            title = "AOI 炸彈優先 → BOMB 排除"
+            notes.append("AOI 位置及主要熱點命中同一炸彈，整個 Tile 排除；其他熱區在此模式下不參與判定。")
         notes.append("此項目已過濾，不計入最終 NG。")
         if item.get("is_bomb") and item.get("bomb_code"):
             notes.append("BOMB 缺陷碼：" + str(item["bomb_code"]))

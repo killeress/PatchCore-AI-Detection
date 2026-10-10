@@ -59,6 +59,8 @@
                     <span style="color: #0D9488; font-size: 0.8rem;"> (score={{ aoi_scr_score | round(3) }})</span>
                     {% elif t.get('decision_evidence') and t.decision_evidence.status == 'OK' %}
                     <span style="color: #0D9488; font-weight: 600;">最終 OK</span>
+                    {% elif t.get('is_bomb') and t.get('is_anomaly') %}
+                    <span style="color: #0D9488; font-weight: 600;">炸彈排除 OK</span>
                     {% elif t.get("is_anomaly") %}
                     <span style="color: #EF4444; font-weight: 600;">AI 也判 NG</span>
                     {% else %}
@@ -67,8 +69,8 @@
                     {% if 'DUST' in t_info or '灰塵' in t_info %}
                     <span style="color: #D97706; font-size: 0.8rem;"> | 灰塵</span>
                     {% endif %}
-                    {% if 'BOMB' in t_info or '炸彈' in t_info %}
-                    <span style="color: #DC2626; font-size: 0.8rem;"> | 炸彈</span>
+                    {% if t.get('is_bomb') and t.get('is_anomaly') %}
+                    <span style="color: #C026D3; font-size: 0.8rem;"> | 炸彈已排除</span>
                     {% endif %}
                     {% if aoi_scr_score >= 0.001 and not aoi_is_scratch %}
                     <span style="color: var(--text-muted); font-size: 0.8rem;"> | SCR:{{ aoi_scr_score | round(3) }}</span>
@@ -111,6 +113,8 @@
                 <span style="color: #38BDF8;">shift({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }},{% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})</span>
                 {% if t.get("scratch_filtered") %}
                 <span style="color: #0D9488;">[🧽 Scratch 救回 OK]</span>
+                {% elif t.get('is_bomb') and t.get('is_anomaly') %}
+                <span style="color: #C026D3;">[BOMB 已排除]</span>
                 {% elif t.get("is_anomaly") %}
                 <span style="color: #EF4444;">[AI: NG]</span>
                 {% else %}

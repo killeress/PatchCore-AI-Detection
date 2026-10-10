@@ -570,7 +570,7 @@
                         <span style="color: #0D9488; font-weight: 600;">{{ t_info }}</span>
                         {% elif 'DUST' in t_info or '灰塵' in t_info %}
                         <span style="color: #D97706;">{{ t_info }}</span>
-                        {% elif 'BOMB' in t_info or '炸彈' in t_info %}
+                        {% elif t.get('is_bomb') and t.get('is_anomaly') %}
                         <span style="color: #DC2626;">{{ t_info }}</span>
                         {% else %}
                         {{ t_info }}
