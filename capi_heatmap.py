@@ -113,6 +113,39 @@ def render_pc_overlay(
     return panel
 
 
+def _region_display_tag(region: dict) -> str:
+    status = region.get("bomb_status")
+    if status == "PARTIAL_BOMB":
+        return "NG (partial BOMB)"
+    if status == "BOMB":
+        return "BOMB"
+    return "DUST" if region.get("is_dust") else "REAL_NG"
+
+
+def _bomb_region_summary(regions: list) -> str:
+    statuses = [region["bomb_status"] for region in regions]
+    return (
+        f"BOMB:{statuses.count('BOMB')} Partial:{statuses.count('PARTIAL_BOMB')} "
+        f"Remaining NG:{sum(s in ('REAL_NG', 'PARTIAL_BOMB') for s in statuses)} "
+        f"Dust:{statuses.count('DUST')}"
+    )
+
+
+def build_bomb_region_debug_panel(diagnostics: dict, tile_size: int) -> np.ndarray:
+    """Show final region evidence instead of the cached dust-only verdicts."""
+    binary = diagnostics["heatmap_binary"]
+    _count, labels = cv2.connectedComponents((binary > 0).astype(np.uint8), connectivity=8)
+    panel = np.zeros((*binary.shape, 3), dtype=np.uint8)
+    for region in diagnostics["regions"]:
+        color = (0, 255, 0) if region.get("is_dust") else (0, 0, 255)
+        panel[labels == region["label_id"]] = color
+    panel[diagnostics["excluded_mask"] > 0] = (255, 0, 255)
+    panel = cv2.resize(panel, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+    cv2.putText(panel, _bomb_region_summary(diagnostics["regions"]), (10, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    return panel
+
+
 def build_region_zoom_panels(
     heatmap_binary: Optional[np.ndarray],
     dust_mask: Optional[np.ndarray],
@@ -123,6 +156,7 @@ def build_region_zoom_panels(
     high_cov_threshold: Optional[float] = None,
     max_panels: int = 3,
     method_label: str = "",
+    bomb_excluded_mask: Optional[np.ndarray] = None,
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
 
@@ -141,12 +175,11 @@ def build_region_zoom_panels(
     if not region_details or heatmap_binary is None:
         return []
 
-    # REAL_NG region 是最終 NG 的依據，debug 顯示時優先排在前面；
-    # 同類 region 內再按 max_score 降序，避免高分 dust 把 real region 擠掉。
+    # 保留的 NG 優先，再顯示已排除的 BOMB/DUST；同類依分數排序。
     sorted_regions = sorted(
         region_details,
         key=lambda r: (
-            bool(r.get("is_dust", False)),
+            2 if r.get("is_dust", False) else 1 if r.get("bomb_status") == "BOMB" else 0,
             -float(r.get("max_score", 0.0)),
             int(r.get("label_id", 0)),
         ),
@@ -157,6 +190,10 @@ def build_region_zoom_panels(
     if len(heat_bin.shape) == 3:
         heat_bin = heat_bin[:, :, 0]
     heat_resized = cv2.resize(heat_bin, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+    bomb_resized = None
+    if bomb_excluded_mask is not None:
+        bomb_resized = cv2.resize(bomb_excluded_mask, (tile_size, tile_size),
+                                  interpolation=cv2.INTER_NEAREST)
 
     dm_resized = None
     if dust_mask is not None:
@@ -197,6 +234,9 @@ def build_region_zoom_panels(
                 base[dust_only] = (0, 255, 255)   # 黃色 (BGR) = 僅灰塵
                 base[overlap] = (0, 255, 0)        # 綠色 = 重疊
 
+            if bomb_resized is not None:
+                base[bomb_resized[y1:y2, x1:x2] > 0] = (255, 0, 255)
+
             panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
             # 標註計算過程
@@ -207,8 +247,8 @@ def build_region_zoom_panels(
             metric_denominator = region.get("metric_denominator", area)
             is_dust = region["is_dust"]
             score = float(region.get("max_score", 0.0))
-            tag = "DUST" if is_dust else "REAL_NG"
-            tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
+            tag = _region_display_tag(region)
+            tag_color = (255, 0, 255) if tag == "BOMB" else (0, 200, 255) if is_dust else (0, 0, 255)
 
             cv2.putText(panel, f"{tag}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, tag_color, 2)
@@ -223,7 +263,12 @@ def build_region_zoom_panels(
             peak_in = region.get("peak_in_dust", True)
             sub_rescue = region.get("dust_sub_peak_rescue", False)
             thr_str = f"Thr:{iou_threshold:.3f}"
-            if is_dust and peak_in:
+            if tag == "BOMB":
+                reason = f"BOMB excluded: {region['bomb_excluded_px']} px"
+            elif region.get("bomb_status") == "PARTIAL_BOMB":
+                reason = (f"BOMB: {region['bomb_excluded_px']} px; "
+                          f"remaining NG: {region['bomb_remaining_px']} px")
+            elif is_dust and peak_in:
                 reason = f"PeakInDust {metric_name}>={thr_str} -> DUST"
             elif is_dust and sub_rescue:
                 reason = f"SubPeakRescue {metric_name}>={thr_str} -> DUST"
@@ -247,7 +292,9 @@ def build_region_zoom_panels(
 
             # 圖例
             legend_y = tile_size - 15
-            cv2.putText(panel, "White=Heat  Yellow=Dust  Green=Overlap", (10, legend_y),
+            legend = ("White=Heat Yellow=Dust Green=Overlap Magenta=BOMB"
+                      if bomb_resized is not None else "White=Heat  Yellow=Dust  Green=Overlap")
+            cv2.putText(panel, legend, (10, legend_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
             method_suffix = f" [{method_label}]" if method_label else ""
@@ -794,8 +841,19 @@ class HeatmapManager:
         # 優先用 TWO_STAGE features (與 Original 上的 D/R 圈一一對應)；
         # 沒跑 two_stage 時才退回 PER_REGION region_details。
         zoom_results = []
+        bomb_diagnostics = getattr(tile_info, 'bomb_region_diagnostics', None) if tile_info else None
         ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
-        if has_omit and ts_features:
+        if has_omit and bomb_diagnostics:
+            iou_debug_panel = build_bomb_region_debug_panel(bomb_diagnostics, tile_size)
+            zoom_results = build_region_zoom_panels(
+                bomb_diagnostics['heatmap_binary'], dust_mask, bomb_diagnostics['regions'],
+                tile_size=tile_size,
+                metric_name=metric_name,
+                iou_threshold=iou_threshold,
+                high_cov_threshold=dust_high_cov_threshold,
+                bomb_excluded_mask=bomb_diagnostics['excluded_mask'],
+            )
+        elif has_omit and ts_features:
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
             ts_dust_mask = getattr(tile_info, 'dust_two_stage_dust_mask', None)
             if ts_dust_mask is None:
@@ -824,7 +882,9 @@ class HeatmapManager:
         # --- 底部獨立標籤列（不蓋到面板內容）---
         if has_omit:
             is_two_stage = "TWO_STAGE" in dust_detail
-            if is_two_stage:
+            if bomb_diagnostics:
+                debug_label = "Final: M=BOMB R=NG G=DUST"
+            elif is_two_stage:
                 debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
                 debug_label = f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"
@@ -846,8 +906,10 @@ class HeatmapManager:
         label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
         for i, lbl in enumerate(labels):
             lx = i * tile_size + 10
+            text_width = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0][0]
+            label_scale = 0.7 * min(1.0, (tile_size - 20) / max(1, text_width))
             cv2.putText(label_bar, lbl, (lx, 28),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, label_scale, (200, 200, 200), 2)
 
         # --- 頂部 Header ---
         header_h = 60
@@ -909,6 +971,8 @@ class HeatmapManager:
                 f"length={edge_evidence['continuous_length']} "
                 f"dust={edge_evidence['dust_overlap']}"
             )
+        elif bomb_diagnostics:
+            detail_line = _bomb_region_summary(bomb_diagnostics['regions'])
         elif dust_detail:
             detail_line = str(dust_detail)[:120].replace('\u2192', '->').replace('\u2190', '<-')
             for metric_token in ("COV", "IOU"):
