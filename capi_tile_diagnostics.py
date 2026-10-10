@@ -122,6 +122,7 @@ def tile_decision_context(tile):
     bomb_diagnostics = getattr(tile, "bomb_region_diagnostics", None) or {}
     context["aoi_bomb_priority_applied"] = bool(bomb_diagnostics.get("priority_applied"))
     if context["aoi_bomb_priority_applied"]:
+        context["aoi_bomb_priority_basis"] = bomb_diagnostics.get("priority_basis")
         context["aoi_bomb_priority_ignored_regions"] = sum(
             r.get("bomb_status") == "IGNORED_BY_AOI_BOMB"
             for r in bomb_diagnostics.get("regions", [])
@@ -216,7 +217,10 @@ def decision_evidence(item, is_cv=False):
         title = "、".join(filters) + " → OK"
         if item.get("is_bomb") and ctx.get("aoi_bomb_priority_applied"):
             title = "AOI 炸彈優先 → BOMB 排除"
-            notes.append("AOI 位置及主要熱點命中同一炸彈，整個 Tile 排除；其他熱區在此模式下不參與判定。")
+            if ctx.get("aoi_bomb_priority_basis") == "aoi_coordinate":
+                notes.append("原始 AOI 產品座標命中炸彈容忍範圍，這筆 AOI 判為炸彈；熱區延伸或其他熱點不再改判 NG。")
+            else:
+                notes.append("AOI 位置及主要熱點命中同一炸彈，整個 Tile 排除；其他熱區在此模式下不參與判定。")
         notes.append("此項目已過濾，不計入最終 NG。")
         if item.get("is_bomb") and item.get("bomb_code"):
             notes.append("BOMB 缺陷碼：" + str(item["bomb_code"]))

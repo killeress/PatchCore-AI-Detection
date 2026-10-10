@@ -689,18 +689,10 @@ class HeatmapManager:
                 return panel
             panel = panel.copy()
             allowed = cv2.resize(roi_mask, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST) > 0
-            gray = cv2.cvtColor(panel, cv2.COLOR_BGR2GRAY)
-            dim = cv2.cvtColor((gray * 0.30).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-            panel[~allowed] = dim[~allowed]
-            contours, _ = cv2.findContours(allowed.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            outline = panel.copy()
-            cv2.drawContours(outline, contours, -1, (200, 200, 120), 1)
-            # Keep 80% of the underlying image visible, including border defects.
-            panel = cv2.addWeighted(panel, 0.8, outline, 0.2, 0)
-            cv2.putText(panel, "CYAN BOX = EVALUATED", (12, 24), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (255, 255, 0), 2)
-            cv2.putText(panel, "DIMMED = OUTSIDE / IGNORED", (12, tile_size - 16),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+            # Keep full-tile brightness/colors; draw outside the ROI so defects
+            # on the evaluated boundary remain unobstructed.
+            expanded = cv2.dilate(allowed.astype(np.uint8), np.ones((5, 5), dtype=np.uint8)) > 0
+            panel[expanded & ~allowed] = (255, 255, 0)
             return panel
 
         def _roi_banner(composite):
@@ -717,7 +709,8 @@ class HeatmapManager:
                         f"AOI ({ax}, {ay}) | ROI RESULT: {result}")
             cv2.putText(banner, headline, (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 0), 2)
             detail = (f"ROI score: {score:.4f} | THR: {score_threshold:.4f} | "
-                      f"Full tile score: {roi['full_tile_score']:.4f} (reference only) | OUTSIDE IGNORED")
+                      f"Full tile score: {roi['full_tile_score']:.4f} (reference only) | "
+                      "CYAN BOX = EVALUATED | OUTSIDE IGNORED")
             cv2.putText(banner, detail, (14, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (240, 240, 240), 1)
             return np.vstack([banner, composite])
 
