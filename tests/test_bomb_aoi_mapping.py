@@ -405,6 +405,9 @@ def test_point_bomb_aoi_anchor_does_not_hide_other_non_dust_region(
 
     assert tile.is_bomb is on_dust
     assert results_to_db_data([result], {})[0]["is_ng"] == int(not on_dust)
+    assert {r["bomb_status"] for r in tile.bomb_region_diagnostics["regions"]} == (
+        {"BOMB", "DUST"} if on_dust else {"BOMB", "REAL_NG"}
+    )
     if not on_dust:
         assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == (1161, 1184)
 
@@ -477,3 +480,73 @@ def test_point_bomb_region_coverage_keeps_product_pixel_tolerance(version, offse
     apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
 
     assert tile.is_bomb is expected
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("cached_regions", [False, True])
+@pytest.mark.parametrize("case", ["bomb_only", "mixed", "partial"])
+def test_point_bomb_heatmap_displays_final_region_decisions(
+    version, cached_regions, case, monkeypatch, tmp_path,
+):
+    import cv2
+    from copy import deepcopy
+    from capi_heatmap import HeatmapManager
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    tile, score, amap = result.anomaly_tiles[0]
+    if case == "mixed":
+        amap[300:307, 300:307] = score
+    elif case == "partial":
+        # A connected bomb core extends outside the tolerance box.
+        amap[33, 10:257] = score
+    tile.omit_crop_image = tile.image.copy()
+    tile.dust_mask = np.zeros_like(amap, dtype=np.uint8)
+    tile.dust_detail_text = "PER_REGION: stale dust-stage result -> REAL_NG"
+    if cached_regions:
+        seed, radius, min_score = inferencer._aoi_center_seed_for_tile(tile, amap)
+        _, _, _, details, binary, _ = inferencer.check_dust_per_region(
+            tile.dust_mask, amap,
+            top_percent=inferencer.config.dust_heatmap_top_percent,
+            force_include_yx=seed, force_include_radius=radius,
+            force_include_min_score=min_score,
+        )
+        tile.dust_region_details, tile.dust_heatmap_binary = details, binary
+    dust_before = deepcopy(tile.dust_region_details)
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is (case == "bomb_only")
+    assert tile.dust_region_details == dust_before
+    diagnostics = tile.bomb_region_diagnostics
+    statuses = [r["bomb_status"] for r in diagnostics["regions"]]
+    assert sorted(statuses) == {
+        "bomb_only": ["BOMB"], "mixed": ["BOMB", "REAL_NG"],
+        "partial": ["PARTIAL_BOMB"],
+    }[case]
+    assert bool(tile.bomb_remaining_points) is (case != "bomb_only")
+
+    captured = []
+    real_put_text = cv2.putText
+
+    def capture(img, text, *args, **kwargs):
+        captured.append(str(text))
+        return real_put_text(img, text, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "putText", capture)
+    output = HeatmapManager(tmp_path, save_format="png").save_tile_heatmap(
+        tmp_path, case, tile.tile_id, tile.image, amap, score, tile_info=tile,
+    )
+    assert cv2.imread(output) is not None
+    text = "\n".join(captured)
+    assert "stale dust-stage" not in text
+    assert "Final: M=BOMB R=NG G=DUST" in text
+    if case == "partial":
+        assert "NG (partial BOMB)" in captured
+        assert "BOMB:0 Partial:1 Remaining NG:1 Dust:0" in text
+    else:
+        assert "BOMB" in captured
+        assert "BOMB excluded:" in text
+        assert ("REAL_NG" in captured) is (case == "mixed")
+    # Reusing a tile without point-bomb evidence must not show old diagnostics.
+    inferencer._match_aoi_point_bomb_regions(result, tile, None, [], RESOLUTION, {})
+    assert tile.bomb_region_diagnostics is None

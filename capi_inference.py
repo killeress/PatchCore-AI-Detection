@@ -244,6 +244,7 @@ class TileInfo:
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
     bomb_remaining_points: Optional[List[Tuple[int, int]]] = field(default=None, repr=False)  # 點炸彈排除後的真異常圖片座標
+    bomb_region_diagnostics: Optional[dict] = field(default=None, repr=False)  # 僅供組合圖顯示逐區域炸彈排除結果
     is_in_exclude_zone: bool = False  # 是否位於不檢測排除區域內
     anomaly_peak_x: int = -1    # 熱力圖峰值 x (圖片座標, -1=未計算)
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
@@ -9260,6 +9261,7 @@ class CAPIInferencer:
         hot pixels outside those areas as NG. Without overlapping bomb-core
         evidence, retain the existing AOI-coordinate fallback and guard.
         """
+        tile.bomb_region_diagnostics = None
         if (
             not tile.is_aoi_coord_tile
             or tile.is_bright_spot_detection
@@ -9345,6 +9347,25 @@ class CAPIInferencer:
         remaining = real_core & (bomb_core == 0)
         real_ids = np.unique(labels[real_core])
         remaining_ids = np.unique(labels[remaining])
+        # Keep dust-stage evidence intact; rendering consumes a separate snapshot
+        # of the exact masks used for this decision, without rematching bombs.
+        display_regions = []
+        for detail in details:
+            region = labels == detail["label_id"]
+            excluded_px = int(np.count_nonzero(region & real_core & (bomb_core > 0)))
+            remaining_px = int(np.count_nonzero(region & remaining))
+            status = ("DUST" if detail.get("is_dust") else
+                      "PARTIAL_BOMB" if excluded_px and remaining_px else
+                      "BOMB" if excluded_px else "REAL_NG")
+            display_regions.append(dict(
+                detail, bomb_status=status, bomb_excluded_px=excluded_px,
+                bomb_remaining_px=remaining_px,
+            ))
+        tile.bomb_region_diagnostics = {
+            "regions": display_regions,
+            "heatmap_binary": binary,
+            "excluded_mask": (real_core & (bomb_core > 0)).astype(np.uint8),
+        }
         remaining_points = []
         for label_id in remaining_ids:
             region = remaining & (labels == label_id)
