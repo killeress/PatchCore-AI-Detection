@@ -2123,7 +2123,8 @@
         'grid_tiling_enabled', 'aoi_coord_inspection_enabled',
         'aoi_heatmap_center_seed_enabled',
         'bomb_area_force_detection_enabled',
-        'aoi_bomb_priority_enabled',
+        'aoi_judgment_roi_enabled',
+        'aoi_judgment_radius_px',
         'aoi_report_path_replace_from', 'aoi_report_path_replace_to',
         'aoi_edge_inspector', 'aoi_edge_boundary_band_px',
         'aoi_edge_pc_roi_inward_shift_enabled', 'aoi_edge_aoi_margin_px',
@@ -4757,7 +4758,8 @@
         // AOI coordinate inference
         'aoi_heatmap_center_seed_enabled': 'Top% heatmap 額外保留 AOI 座標附近弱熱區',
         'bomb_area_force_detection_enabled': '炸彈區域強制偵測：AOI 未給 Client 炸彈座標時補切 tile',
-        'aoi_bomb_priority_enabled': 'AOI 炸彈優先判定：AOI 位置及主要熱點命中同一點型炸彈，整個 Tile 判 BOMB；其他熱區不參與判定',
+        'aoi_judgment_roi_enabled': 'AOI 限定範圍判定：只判定 AOI 產品座標附近區域；框外不參與判定',
+        'aoi_judgment_radius_px': 'AOI 判定半徑：產品座標 X、Y 各 ±此值；預設 25 px，與炸彈容忍度獨立',
         // Scratch classifier
         'scratch_classifier_enabled': '啟用刮痕分類器',
         'scratch_safety_multiplier': '刮痕判定安全倍率',

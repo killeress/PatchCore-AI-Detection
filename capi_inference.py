@@ -265,6 +265,8 @@ class TileInfo:
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
     score_threshold: Optional[float] = None # 此 tile 推論時實際使用的門檻（v2 依 zone 不同）
     decision_context: Optional[dict] = field(default=None, repr=False)
+    aoi_roi_mask: Optional[np.ndarray] = field(default=None, repr=False)
+    aoi_roi_full_map: Optional[np.ndarray] = field(default=None, repr=False)
     raw_pred_score: float = 0.0             # 模型 normalized pred_score，未經 mask/edge margin 比率調整
     raw_model_score: Optional[float] = None # 未經 Anomalib image-score normalization 的模型距離
     model_image_min: Optional[float] = None # Anomalib image-score normalization 下界
@@ -4413,6 +4415,8 @@ class CAPIInferencer:
 
         min_peak_ratio = float(getattr(self.config, "aoi_heatmap_center_seed_min_peak_ratio", 0.10))
         min_score = float(np.max(amap)) * max(0.0, min_peak_ratio)
+        if getattr(tile_info, "aoi_roi_mask", None) is not None:
+            min_score = max(min_score, float(np.finfo(np.float32).tiny))
 
         return (seed_y, seed_x), seed_radius, min_score
 
@@ -4655,6 +4659,7 @@ class CAPIInferencer:
         score: float,
         score_threshold: Optional[float] = None,
         candidate_dust_mask: Optional[np.ndarray] = None,
+        evaluation_mask: Optional[np.ndarray] = None,
     ) -> tuple:
         """
         兩階段灰塵判定：
@@ -4697,6 +4702,10 @@ class CAPIInferencer:
         else:
             tile_gray = tile_image.copy()
         tile_h, tile_w = tile_gray.shape
+        allowed_tile = None
+        if evaluation_mask is not None:
+            allowed_tile = cv2.resize(np.asarray(evaluation_mask, dtype=np.uint8),
+                                     (tile_w, tile_h), interpolation=cv2.INTER_NEAREST) > 0
 
         anomaly_f = np.asarray(anomaly_map, dtype=np.float32)
         anomaly_f = np.maximum(anomaly_f, 0.0)
@@ -4769,6 +4778,10 @@ class CAPIInferencer:
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
+        if evaluation_mask is not None:
+            allowed_map = cv2.resize(np.asarray(evaluation_mask, dtype=np.uint8),
+                                    (w_am, h_am), interpolation=cv2.INTER_NEAREST) > 0
+            hot_mask[~allowed_map] = 0
         n_labels, labels = cv2.connectedComponents(hot_mask, connectivity=8)
 
         scale = tile_w / w_am
@@ -4853,13 +4866,16 @@ class CAPIInferencer:
                 (blur.astype(np.float32) - crop_gray.astype(np.float32), "dark"),
                 (crop_gray.astype(np.float32) - blur.astype(np.float32), "bright"),
             ]:
-                diff_pos = diff[diff > 0]
+                allowed_crop = allowed_tile[ty1:ty2, tx1:tx2] if allowed_tile is not None else None
+                diff_pos = diff[(diff > 0) & allowed_crop] if allowed_crop is not None else diff[diff > 0]
                 if len(diff_pos) < 10:
                     continue
                 thr = max(float(np.percentile(diff_pos, diff_pct)), 3.0)
                 binary = (diff >= thr).astype(np.uint8) * 255
                 morph_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, morph_k)
+                if allowed_crop is not None:
+                    binary[~allowed_crop] = 0
 
                 n_feat, feat_labels = cv2.connectedComponents(binary, connectivity=8)
                 for fid in range(1, n_feat):
@@ -7978,6 +7994,7 @@ class CAPIInferencer:
         
         inference_time = time.time() - inference_start
         print(f"🔥 Phase 2 完成: GPU 推論耗時 {inference_time:.2f}s")
+        self._apply_aoi_judgment_roi(preprocessed_results, product_resolution)
         
         # ================================================================
         # Phase 3: 多執行緒平行後處理 (灰塵 IOU 交叉驗證)
@@ -8032,6 +8049,7 @@ class CAPIInferencer:
                                 focus_x=context_focus_x,
                                 product_resolution=product_resolution,
                             )
+                        dust_mask = self._limit_aoi_roi_mask(tile, dust_mask)
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
 
@@ -8050,6 +8068,8 @@ class CAPIInferencer:
                         iou = 0.0
                         heatmap_binary = None
                         top_pct = self.config.dust_heatmap_top_percent
+                        if tile.aoi_roi_mask is not None:
+                            top_pct = 100.0
                         metric_mode = self.config.dust_heatmap_metric
                         metric_name = "COV" if metric_mode == "coverage" else "IOU"
 
@@ -8121,6 +8141,7 @@ class CAPIInferencer:
                                             score,
                                             score_threshold=tile.score_threshold,
                                             candidate_dust_mask=dust_mask,
+                                            **({"evaluation_mask": tile.aoi_roi_mask} if getattr(tile, "aoi_roi_mask", None) is not None else {}),
                                         )
                                     _two_stage_ran = True
                                     _ts_features = ts_features
@@ -8408,10 +8429,10 @@ class CAPIInferencer:
                             continue
                         preserve_aoi_peak = (
                             tile.is_aoi_coord_tile
-                            and tile.anomaly_peak_source in {
+                            and (tile.aoi_roi_mask is not None or tile.anomaly_peak_source in {
                                 "aoi_real_region",
                                 "aoi_report_fallback",
-                            }
+                            })
                             and tile.anomaly_peak_x >= 0
                             and tile.anomaly_peak_y >= 0
                         )
@@ -8775,6 +8796,7 @@ class CAPIInferencer:
                 dust_mask=dust_mask,
                 config=edge_config,
                 generate_debug=generate_debug,
+                **({"evaluation_mask": tile.aoi_roi_mask} if getattr(tile, "aoi_roi_mask", None) is not None else {}),
             )
         except Exception as exc:
             logger.warning("AOI 邊緣漏光檢查失敗: %s", exc, exc_info=True)
@@ -8929,6 +8951,7 @@ class CAPIInferencer:
                         focus_x=context_focus_x,
                         product_resolution=product_resolution,
                     )
+                dust_mask = self._limit_aoi_roi_mask(tile, dust_mask)
                 tile.dust_mask = dust_mask
                 tile.dust_bright_ratio = bright_ratio
 
@@ -8948,6 +8971,8 @@ class CAPIInferencer:
 
                 if is_dust and anomaly_map is not None and dust_mask is not None:
                     top_pct = self.config.dust_heatmap_top_percent
+                    if tile.aoi_roi_mask is not None:
+                        top_pct = 100.0
                     metric_mode = self.config.dust_heatmap_metric
                     anomaly_map_for_dust, exclude_zone_masked = \
                         self._mask_aoi_exclude_zones_for_dust(tile, anomaly_map, model_id)
@@ -9012,6 +9037,7 @@ class CAPIInferencer:
                                     score,
                                     score_threshold=tile.score_threshold,
                                     candidate_dust_mask=dust_mask,
+                                    **({"evaluation_mask": tile.aoi_roi_mask} if getattr(tile, "aoi_roi_mask", None) is not None else {}),
                                 )
                             _two_stage_ran = True
                             _ts_features = ts_features
@@ -9113,6 +9139,105 @@ class CAPIInferencer:
                 except Exception as e:
                     logger.warning("灰塵檢測失敗 (%s): %s", futures[future].image_path.name, e)
 
+    @staticmethod
+    def _limit_aoi_roi_mask(tile, values):
+        mask = getattr(tile, "aoi_roi_mask", None)
+        if mask is None or values is None:
+            return values
+        h, w = values.shape[:2]
+        allowed = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST) > 0
+        limited = values.copy()
+        limited[~allowed] = 0
+        return limited
+
+    def _apply_aoi_judgment_roi(self, results, product_resolution):
+        """Keep full tiles for inference/display; restrict downstream evidence to AOI ROI.
+
+        The local equivalent score uses the existing max-ratio score convention.
+        Product coordinates are mapped with the same geometry as point bombs.
+        Invalid geometry fails explicitly instead of silently passing the tile.
+        """
+        if not getattr(self.config, "aoi_judgment_roi_enabled", False):
+            return
+        resolution = product_resolution or DEFAULT_PRODUCT_RESOLUTION
+        radius = max(1, int(self.config.aoi_judgment_radius_px))
+        for result in results:
+            entries = []
+            for tile, score, amap in result.anomaly_tiles:
+                if not tile.is_aoi_coord_tile:
+                    entries.append((tile, score, amap))
+                    continue
+                if tile.aoi_roi_mask is not None:
+                    raise RuntimeError("AOI ROI already applied; rerun inference with fresh tiles")
+                if (result.raw_bounds is None or min(tile.aoi_product_x, tile.aoi_product_y) < 0
+                        or tile.width <= 0 or tile.height <= 0 or amap is None):
+                    raise ValueError("AOI ROI requires valid product coordinates, geometry and anomaly map")
+                amap = np.asarray(amap, dtype=np.float32)
+                if amap.ndim != 2 or not amap.size or not np.isfinite(amap).all():
+                    raise ValueError("AOI ROI received invalid anomaly map")
+                ax, ay = tile.aoi_product_x, tile.aoi_product_y
+                x1, y1 = max(0, ax - radius), max(0, ay - radius)
+                x2, y2 = min(resolution[0], ax + radius), min(resolution[1], ay + radius)
+                polygon = np.array([
+                    self._map_aoi_coords(x, y, result.raw_bounds, resolution, result.panel_polygon)
+                    for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+                ], dtype=np.float32)
+                h, w = amap.shape
+                local_polygon = polygon - np.array([tile.x, tile.y], dtype=np.float32)
+                contour = np.rint(local_polygon * [w / tile.width, h / tile.height]).astype(np.int32)
+                mask = np.zeros(amap.shape, dtype=np.uint8)
+                cv2.fillConvexPoly(mask, cv2.convexHull(contour), 1)
+                if x1 > x2 or y1 > y2 or not np.any(mask):
+                    raise ValueError("AOI judgment ROI does not intersect the tile")
+                tile.aoi_roi_mask = mask
+                tile.aoi_roi_full_map = amap.copy()
+                limited = np.where(mask > 0, amap, 0).astype(np.float32)
+                if tile.is_bright_spot_detection:
+                    # Recheck component area after clipping a bright spot at the ROI border.
+                    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                        (limited > 0).astype(np.uint8), connectivity=8)
+                    minimum = max(1, tile.bright_spot_min_area)
+                    keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= minimum]
+                    limited = np.isin(labels, keep).astype(np.float32)
+                    roi_score = float(bool(keep))
+                    tile.bright_spot_area = int(np.count_nonzero(limited))
+                else:
+                    peak = float(np.max(amap))
+                    roi_score = float(score) * float(np.max(limited)) / peak if peak > 0 else 0.0
+                threshold = tile.score_threshold
+                if threshold is None:
+                    threshold = getattr(self, "threshold", self.config.anomaly_threshold)
+                    tile.score_threshold = threshold
+                if not tile.is_bright_spot_detection and score > 0:
+                    # Every above-threshold region inside the ROI participates,
+                    # including weaker defects next to a stronger bomb or dust spot.
+                    minimum_map_score = float(threshold) * float(np.max(amap)) / float(score)
+                    limited[limited < minimum_map_score] = 0
+                tile.is_aoi_coord_below_threshold = roi_score < threshold or np.max(limited) <= 0
+                if np.max(limited) > 0:
+                    py, px = np.unravel_index(np.argmax(limited), limited.shape)
+                    tile.anomaly_peak_x = tile.x + int(px * tile.width / w)
+                    tile.anomaly_peak_y = tile.y + int(py * tile.height / h)
+                    tile.anomaly_peak_source = "aoi_roi"
+                else:
+                    tile.anomaly_peak_x, tile.anomaly_peak_y = tile.aoi_image_x, tile.aoi_image_y
+                    tile.anomaly_peak_source = "aoi_roi_empty"
+                tile.decision_context = dict(tile.decision_context or {}, aoi_judgment_roi={
+                    "enabled": True, "radius_product_px": radius,
+                    "aoi_product_xy": [ax, ay],
+                    "aoi_image_xy": [tile.aoi_image_x, tile.aoi_image_y],
+                    "product_bounds": [x1, y1, x2, y2],
+                    "tile_polygon": local_polygon.tolist(),
+                    "full_tile_score": float(score), "roi_score": roi_score,
+                    "score_method": "binary_roi" if tile.is_bright_spot_detection else "max_ratio",
+                    "outside_ignored": True,
+                })
+                logger.info("[AOI_ROI] image=%s tile=%s aoi=(%s,%s) radius=%s product_px "
+                            "full_score=%.4f roi_score=%.4f threshold=%.4f outside=IGNORED",
+                            result.image_path.name, tile.tile_id, ax, ay, radius, score, roi_score, threshold)
+                entries.append((tile, roi_score, limited))
+            result.anomaly_tiles = entries
+
     def _apply_aoi_peak_postprocess(self, results: List[ImageResult]) -> None:
         """Prefer a valid hot region near the AOI seed for downstream coordinates.
 
@@ -9127,6 +9252,7 @@ class CAPIInferencer:
                     not tile.is_aoi_coord_tile
                     or getattr(tile, "is_aoi_coord_below_threshold", False)
                     or tile.is_bright_spot_detection
+                    or tile.aoi_roi_mask is not None
                 ):
                     continue
 
@@ -9244,61 +9370,6 @@ class CAPIInferencer:
                     distance_text,
                 )
 
-    def _aoi_bomb_priority_match(self, tile, amap, details, bombs, result, product_resolution):
-        """Match the nearest non-dust region peak to the SAME bomb as the AOI anchor.
-
-        Use the original image anchor after inward cropping, not tile center or
-        global argmax. The association distance follows AOI peak postprocessing.
-        Never use an AOI-coordinate fallback as evidence of a detected hot spot.
-        """
-        if not getattr(self.config, "aoi_bomb_priority_enabled", False):
-            return None
-        if min(tile.aoi_product_x, tile.aoi_product_y, tile.aoi_image_x, tile.aoi_image_y) < 0:
-            return None
-        if not (tile.x <= tile.aoi_image_x < tile.x + tile.width
-                and tile.y <= tile.aoi_image_y < tile.y + tile.height):
-            return None
-        map_h, map_w = amap.shape
-        candidates = []
-        for detail in details:
-            if detail.get("is_dust") or detail.get("peak_yx") is None:
-                continue
-            py, px = map(int, detail["peak_yx"])
-            if not (0 <= py < map_h and 0 <= px < map_w) or amap[py, px] <= 0:
-                continue
-            ix = tile.x + px * tile.width / map_w
-            iy = tile.y + py * tile.height / map_h
-            distance = float(np.hypot(ix - tile.aoi_image_x, iy - tile.aoi_image_y))
-            candidates.append((distance, -float(amap[py, px]), int(detail["label_id"]), py, px))
-        if not candidates:
-            return None
-        distance, _score, label_id, py, px = min(candidates)
-        if distance > max(32.0, min(tile.width, tile.height) * 0.25):
-            return None
-        product_w, product_h = product_resolution or DEFAULT_PRODUCT_RESOLUTION
-        tolerance = self.config.bomb_match_tolerance
-        scale = np.array([map_w / tile.width, map_h / tile.height], dtype=np.float32)
-        origin = np.array([tile.x, tile.y], dtype=np.float32)
-        for bomb in bombs:
-            for bx, by in bomb.coordinates:
-                if abs(tile.aoi_product_x - bx) > tolerance or abs(tile.aoi_product_y - by) > tolerance:
-                    continue
-                x1, x2 = max(0, bx - tolerance), min(product_w, bx + tolerance)
-                y1, y2 = max(0, by - tolerance), min(product_h, by + tolerance)
-                if x1 > x2 or y1 > y2:
-                    continue
-                polygon = np.array([
-                    self._map_aoi_coords(x, y, result.raw_bounds, product_resolution,
-                                         panel_polygon=result.panel_polygon)
-                    for x, y in ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
-                ], dtype=np.float32)
-                contour = np.rint((polygon - origin) * scale).astype(np.int32)
-                mask = np.zeros(amap.shape, dtype=np.uint8)
-                cv2.fillConvexPoly(mask, cv2.convexHull(contour), 1)
-                if mask[py, px]:
-                    return bomb.defect_code, label_id, py, px
-        return None
-
     def _match_aoi_point_bomb_regions(
         self,
         result: ImageResult,
@@ -9315,16 +9386,14 @@ class CAPIInferencer:
         known point-bomb tolerance areas. Keep weaker AOI-seed regions and
         hot pixels outside those areas as NG. Without overlapping bomb-core
         evidence, retain the existing AOI-coordinate fallback and guard.
-        When AOI bomb priority is enabled, an AOI anchor and its associated
-        peak matching the same bomb instead exclude this entire tile.
         """
         tile.bomb_region_diagnostics = None
         if (
             not tile.is_aoi_coord_tile
-            or tile.is_bright_spot_detection
+            or (tile.is_bright_spot_detection and tile.aoi_roi_mask is None)
             or tile.width <= 0 or tile.height <= 0
             or getattr(tile, "is_aoi_coord_below_threshold", False)
-            or tile.dust_two_stage_features is not None
+            or (tile.dust_two_stage_features is not None and tile.aoi_roi_mask is None)
             or anomaly_map is None
             or result.raw_bounds is None
         ):
@@ -9339,7 +9408,36 @@ class CAPIInferencer:
             return None
 
         binary = tile.dust_heatmap_binary
-        if (
+        if tile.aoi_roi_mask is not None and tile.dust_two_stage_features is not None:
+            # Two-stage features are the final evidence; do not revert to the
+            # earlier dusty heat core or the AOI-coordinate fallback.
+            binary = np.zeros(amap.shape, dtype=np.uint8)
+            sy, sx = amap.shape[0] / tile.height, amap.shape[1] / tile.width
+            for feature in tile.dust_two_stage_features:
+                if feature.get("is_dust"):
+                    continue
+                contour = feature.get("feature_contour")
+                if contour:
+                    points = np.rint(np.asarray(contour) * [sx, sy]).astype(np.int32)
+                    cv2.fillPoly(binary, [points], 255)
+                else:
+                    fx, fy = feature["abs_pos"]
+                    px, py = int(fx * sx), int(fy * sy)
+                    if 0 <= py < binary.shape[0] and 0 <= px < binary.shape[1]:
+                        binary[py, px] = 255
+            binary[tile.aoi_roi_mask == 0] = 0
+            count, labels = cv2.connectedComponents(binary, connectivity=8)
+            details = []
+            for label in range(1, count):
+                region = labels == label
+                py, px = np.unravel_index(np.argmax(np.where(region, amap, -np.inf)), amap.shape)
+                area = int(np.count_nonzero(region))
+                details.append(dict(label_id=label, area=area, dust_overlap=0,
+                                    metric_denominator=area, coverage=0.0, is_dust=False,
+                                    peak_in_dust=False, max_score=float(amap[py, px]), peak_yx=(py, px)))
+            if not details:
+                return False, ""
+        elif (
             tile.dust_region_details is not None
             and binary is not None
             and binary.shape == amap.shape
@@ -9353,7 +9451,7 @@ class CAPIInferencer:
                 dust_mask = np.zeros(amap.shape, dtype=np.uint8)
             _real, _peak, _iou, details, binary, labels = self.check_dust_per_region(
                 dust_mask, amap,
-                top_percent=self.config.dust_heatmap_top_percent,
+                top_percent=100.0 if tile.aoi_roi_mask is not None else self.config.dust_heatmap_top_percent,
                 metric=self.config.dust_heatmap_metric,
                 iou_threshold=self.config.dust_heatmap_iou_threshold,
                 force_include_yx=seed,
@@ -9399,21 +9497,11 @@ class CAPIInferencer:
             bomb_core |= mask
             code_masks.append((code, mask))
         if not np.any(real_core & (bomb_core > 0)):
-            return None
+            return (False, "") if tile.aoi_roi_mask is not None else None
 
         remaining = real_core & (bomb_core == 0)
         remaining_ids = np.unique(labels[remaining])
-        priority_match = self._aoi_bomb_priority_match(
-            tile, amap, details, bombs, result, product_resolution,
-        )
         excluded_mask = real_core & (bomb_core > 0)
-        ignored_mask = np.zeros(amap.shape, dtype=bool)
-        if priority_match is not None:
-            _priority_code, priority_label, _py, _px = priority_match
-            excluded_mask = real_core & (labels == priority_label)
-            ignored_mask = real_core & (labels != priority_label)
-            remaining = np.zeros(amap.shape, dtype=bool)
-            remaining_ids = np.array([], dtype=labels.dtype)
         # Keep dust-stage evidence intact; rendering consumes a separate snapshot
         # of the exact masks used for this decision, without rematching bombs.
         display_regions = []
@@ -9421,22 +9509,17 @@ class CAPIInferencer:
             region = labels == detail["label_id"]
             excluded_px = int(np.count_nonzero(region & excluded_mask))
             remaining_px = int(np.count_nonzero(region & remaining))
-            ignored_px = int(np.count_nonzero(region & ignored_mask))
             status = ("DUST" if detail.get("is_dust") else
-                      "IGNORED_BY_AOI_BOMB" if ignored_px else
                       "PARTIAL_BOMB" if excluded_px and remaining_px else
                       "BOMB" if excluded_px else "REAL_NG")
             display_regions.append(dict(
                 detail, bomb_status=status, bomb_excluded_px=excluded_px,
                 bomb_remaining_px=remaining_px,
-                bomb_ignored_px=ignored_px,
             ))
         tile.bomb_region_diagnostics = {
             "regions": display_regions,
             "heatmap_binary": binary,
             "excluded_mask": excluded_mask.astype(np.uint8),
-            "ignored_mask": ignored_mask.astype(np.uint8),
-            "priority_applied": priority_match is not None,
             "tolerance_product_px": self.config.bomb_match_tolerance,
         }
         remaining_points = []
@@ -9451,10 +9534,6 @@ class CAPIInferencer:
         tile.bomb_remaining_points = [(x, y) for _score, x, y in sorted(remaining_points)]
         is_bomb = not np.any(remaining)
         selected_core = real_core if is_bomb else remaining
-        if priority_match is not None:
-            # Report the confirmed bomb peak even if an ignored region is stronger.
-            selected_core = np.zeros(amap.shape, dtype=bool)
-            selected_core[priority_match[2], priority_match[3]] = True
         current_x = int((tile.anomaly_peak_x - tile.x) * map_w / tile.width)
         current_y = int((tile.anomaly_peak_y - tile.y) * map_h / tile.height)
         keep_current = (
@@ -9470,15 +9549,6 @@ class CAPIInferencer:
         else:
             py, px = current_y, current_x
         code = next((code for code, mask in code_masks if mask[py, px]), "") if is_bomb else ""
-        if priority_match is not None:
-            code = priority_match[0]
-            logger.info(
-                "[BOMB_AOI_PRIORITY] image=%s tile=(%s,%s) aoi=(%s,%s) "
-                "peak=(%s,%s) ignored_regions=%s tolerance=%s result=BOMB",
-                result.image_path.name, tile.x, tile.y, tile.aoi_product_x, tile.aoi_product_y,
-                tile.anomaly_peak_x, tile.anomaly_peak_y,
-                len(np.unique(labels[ignored_mask])), self.config.bomb_match_tolerance,
-            )
         logger.info(
             "[BOMB_REGIONS] image=%s tile=(%s,%s) aoi=(%s,%s) "
             "bomb_regions=%s remaining_regions=%s peak=(%s,%s) result=%s",
@@ -9555,10 +9625,10 @@ class CAPIInferencer:
                         continue
                     preserve_aoi_peak = (
                         tile.is_aoi_coord_tile
-                        and tile.anomaly_peak_source in {
+                        and (tile.aoi_roi_mask is not None or tile.anomaly_peak_source in {
                             "aoi_real_region",
                             "aoi_report_fallback",
-                        }
+                        })
                         and tile.anomaly_peak_x >= 0
                         and tile.anomaly_peak_y >= 0
                     )
@@ -10456,6 +10526,7 @@ class CAPIInferencer:
         print(f"🔥 Phase 2 完成: GPU 推論耗時 {inference_elapsed:.2f}s")
 
         post_start = time.time()
+        self._apply_aoi_judgment_roi(results, product_resolution)
         self._apply_omit_dust_postprocess(
             results,
             omit_image=omit_image,

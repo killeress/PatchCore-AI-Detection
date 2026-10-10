@@ -698,6 +698,7 @@ def inspect_aoi_edge_light_leak(
     dust_mask: Optional[np.ndarray],
     config: EdgeInspectionConfig,
     generate_debug: bool = False,
+    evaluation_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """檢查 AOI 附近是否有連續的四邊亮帶（泛白）。
 
@@ -800,6 +801,12 @@ def inspect_aoi_edge_light_leak(
     )
 
     warped_dust = None
+    warped_evaluation = None
+    if evaluation_mask is not None:
+        allowed = cv2.resize(np.asarray(evaluation_mask, dtype=np.uint8),
+                             (tile_width, tile_height), interpolation=cv2.INTER_NEAREST)
+        warped_evaluation = cv2.warpPerspective(
+            allowed, tile_to_product, (product_width, product_height), flags=cv2.INTER_NEAREST)
     if dust_mask is not None:
         dust = np.asarray(dust_mask, dtype=np.uint8)
         if dust.ndim == 3:
@@ -935,6 +942,8 @@ def inspect_aoi_edge_light_leak(
         edge_values = warped_gray[ey1:ey2, ex1:ex2].astype(np.float32)
         ref_values = warped_gray[ry1:ry2, rx1:rx2].astype(np.float32)
         edge_valid = warped_valid[ey1:ey2, ex1:ex2] > 0
+        if warped_evaluation is not None:
+            edge_valid &= warped_evaluation[ey1:ey2, ex1:ex2] > 0
         ref_valid = warped_valid[ry1:ry2, rx1:rx2] > 0
         profile_axis = 0 if side in ("top", "bottom") else 1
         valid_profile = (
