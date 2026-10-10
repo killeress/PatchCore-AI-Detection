@@ -550,3 +550,136 @@ def test_point_bomb_heatmap_displays_final_region_decisions(
     # Reusing a tile without point-bomb evidence must not show old diagnostics.
     inferencer._match_aoi_point_bomb_regions(result, tile, None, [], RESOLUTION, {})
     assert tile.bomb_region_diagnostics is None
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("source", ["client", "config"])
+@pytest.mark.parametrize("map_size", [128, 512])
+def test_aoi_bomb_priority_ignores_other_region_in_shifted_crop(
+    version, enabled, source, map_size, monkeypatch,
+):
+    import json
+    from capi_server import (results_to_db_data, _iter_qjpg_defect_records,
+                             _normalize_machine_judgment_for_bomb_only_panel)
+    from capi_tile_diagnostics import decision_evidence
+    from capi_web import _target_tiles_for_within_spec
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case(source, map_size)
+    inferencer.config.aoi_bomb_priority_enabled = enabled
+    tile, score, amap = result.anomaly_tiles[1]
+    lo, hi = int(map_size * .58), int(map_size * .60)
+    # Stronger, unrelated hot spot must not replace the original AOI anchor.
+    amap[lo:hi, lo:hi] = score + .1
+    result.tiles, result.anomaly_tiles = [tile], [(tile, score + .1, amap)]
+    inferencer._apply_aoi_peak_postprocess([result])
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is enabled
+    diagnostics = tile.bomb_region_diagnostics
+    assert diagnostics["priority_applied"] is enabled
+    assert {r["bomb_status"] for r in diagnostics["regions"]} == {
+        "BOMB", "IGNORED_BY_AOI_BOMB" if enabled else "REAL_NG",
+    }
+    assert bool(tile.bomb_remaining_points) is (not enabled)
+    stored = results_to_db_data([result], {})[0]
+    assert stored["is_ng"] == int(not enabled)
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == ("OK" if enabled else "NG")
+    records = _iter_qjpg_defect_records([result], RESOLUTION, inferencer.config)
+    assert any(r.startswith("PCDK2") for r in records) is (not enabled)
+    if enabled:
+        assert abs(tile.anomaly_peak_x - tile.aoi_image_x) <= 4
+        assert abs(tile.anomaly_peak_y - tile.aoi_image_y) <= 4
+        assert _target_tiles_for_within_spec(stored) == []
+        ctx = json.loads(stored["tiles"][0]["decision_context"])
+        assert ctx["aoi_bomb_priority_applied"] is True
+        assert ctx["aoi_bomb_priority_ignored_regions"] == 1
+        assert ctx["aoi_bomb_priority_tolerance_product_px"] == 20
+        assert decision_evidence(stored["tiles"][0])["title"] == "AOI 炸彈優先 → BOMB 排除"
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_aoi_bomb_priority_keeps_ng_on_other_tile(version, monkeypatch):
+    from capi_server import results_to_db_data, _iter_qjpg_defect_records
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    inferencer.config.aoi_bomb_priority_enabled = True
+    # The first tile's AOI point is NOT the bomb; the second one's is.
+    for tile, score, amap in result.anomaly_tiles:
+        amap[130:137, 253:260] = score
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert [t.is_bomb for t in result.tiles] == [False, True]
+    assert results_to_db_data([result], {})[0]["is_ng"] == 1
+    records = _iter_qjpg_defect_records([result], RESOLUTION, inferencer.config)
+    assert sum(r.startswith("PCDK2") for r in records) == 1
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_aoi_bomb_priority_accepts_region_tail_beyond_tolerance(enabled, monkeypatch):
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    inferencer.config.aoi_bomb_priority_enabled = enabled
+    tile, score, amap = result.anomaly_tiles[1]
+    amap[33, :220] = score * .98
+    amap[33, 0] = score
+    apply_bomb_postprocess(inferencer, result, bomb_info, "v2", monkeypatch)
+    assert tile.is_bomb is enabled
+    assert tile.bomb_region_diagnostics["regions"][0]["bomb_status"] == (
+        "BOMB" if enabled else "PARTIAL_BOMB"
+    )
+
+
+@pytest.mark.parametrize("anchor,peak,expected", [
+    ((100, 100), (120, 120), True),  # Inclusive per-axis tolerance, not radius.
+    ((100, 100), (121, 100), False),
+    ((79, 100), (100, 100), False),
+    ((100, 100), (150, 100), False),  # Peak at a DIFFERENT known bomb.
+    ((-1, -1), (100, 100), False),
+])
+def test_aoi_bomb_priority_requires_anchor_and_peak_at_same_bomb(anchor, peak, expected):
+    inferencer = make_inferencer()
+    inferencer.config.aoi_bomb_priority_enabled = True
+    tile = make_tile(0, anchor, anchor)
+    tile.x = tile.y = 0
+    result = make_result([tile])
+    result.raw_bounds, result.panel_polygon = (0, 0, *RESOLUTION), None
+    amap = np.zeros((512, 512), dtype=np.float32)
+    amap[peak[1], peak[0]] = .9
+    details = [{"label_id": 1, "peak_yx": (peak[1], peak[0]), "is_dust": False}]
+    bombs = [BombDefect("STANDARD", "B01", "point", [(100, 100), (150, 100)])]
+    match = inferencer._aoi_bomb_priority_match(tile, amap, details, bombs, result, RESOLUTION)
+    assert (match is not None) is expected
+
+
+def test_aoi_bomb_priority_heatmap_shows_ignored_regions(monkeypatch, tmp_path):
+    import cv2
+    from capi_heatmap import HeatmapManager, build_bomb_region_debug_panel
+
+    inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
+    inferencer.config.aoi_bomb_priority_enabled = True
+    tile, score, amap = result.anomaly_tiles[1]
+    amap[300:307, 300:307] = score
+    tile.omit_crop_image = tile.image.copy()
+    tile.dust_mask = np.zeros_like(amap, dtype=np.uint8)
+    apply_bomb_postprocess(inferencer, result, bomb_info, "v2", monkeypatch)
+    panel = build_bomb_region_debug_panel(tile.bomb_region_diagnostics, 512)
+    assert tuple(panel[303, 303]) == (128, 128, 128)
+    assert tuple(panel[33, 0]) == (255, 0, 255)
+    captured = []
+    original = cv2.putText
+
+    def capture(img, text, *args, **kwargs):
+        captured.append(str(text))
+        return original(img, text, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "putText", capture)
+    output = HeatmapManager(tmp_path, save_format="png").save_tile_heatmap(
+        tmp_path, "priority", tile.tile_id, tile.image, amap, score, tile_info=tile,
+    )
+    assert cv2.imread(output) is not None
+    text = "\n".join(captured)
+    assert "BOMB: AOI priority (Filtered as OK)" in text
+    assert "IGNORED (AOI BOMB)" in text
+    assert "Not evaluated: AOI bomb priority" in text
+    assert "Remaining NG:0 Dust:0 Ignored:1" in text
+    assert "REAL_NG" not in text

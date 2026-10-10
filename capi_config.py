@@ -365,6 +365,7 @@ class CAPIConfig:
     bomb_match_tolerance: int = 50  # 座標匹配容忍度 (產品座標系像素)
     bomb_line_min_aspect_ratio: float = 3.0  # Line 型炸彈 heatmap 最小長寬比
     bomb_area_force_detection_enabled: bool = False  # AOI 漏給炸彈座標時，使用 Client 炸彈座標補切 tile 偵測
+    aoi_bomb_priority_enabled: bool = False  # AOI 位置及主要熱點命中點型炸彈時，整個 Tile 排除
     
     # 機種第六碼 → 產品解析度映射表 (寬, 高)
     # 例: {'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200], 'K': [2560, 1440], 'G': [2560, 1600]}
@@ -690,6 +691,7 @@ class CAPIConfig:
             bomb_match_tolerance=data.get("bomb_match_tolerance", 50),
             bomb_line_min_aspect_ratio=data.get("bomb_line_min_aspect_ratio", 3.0),
             bomb_area_force_detection_enabled=data.get("bomb_area_force_detection_enabled", False),
+            aoi_bomb_priority_enabled=data.get("aoi_bomb_priority_enabled", False),
             model_resolution_map=data.get("model_resolution_map", {
                 'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
                 'K': [2560, 1440], 'G': [2560, 1600],
@@ -824,6 +826,7 @@ class CAPIConfig:
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
             "bomb_area_force_detection_enabled": self.bomb_area_force_detection_enabled,
+            "aoi_bomb_priority_enabled": self.aoi_bomb_priority_enabled,
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
@@ -947,6 +950,7 @@ class CAPIConfig:
             "bomb_match_tolerance": self.bomb_match_tolerance,
             "bomb_line_min_aspect_ratio": self.bomb_line_min_aspect_ratio,
             "bomb_area_force_detection_enabled": self.bomb_area_force_detection_enabled,
+            "aoi_bomb_priority_enabled": self.aoi_bomb_priority_enabled,
             "model_resolution_map": self.model_resolution_map,
             "grid_tiling_enabled": self.grid_tiling_enabled,
             "aoi_coord_inspection_enabled": self.aoi_coord_inspection_enabled,
@@ -1161,6 +1165,9 @@ class CAPIConfig:
         if "bomb_area_force_detection_enabled" in param_map:
             val = param_map["bomb_area_force_detection_enabled"]
             self.bomb_area_force_detection_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "aoi_bomb_priority_enabled" in param_map:
+            val = param_map["aoi_bomb_priority_enabled"]
+            self.aoi_bomb_priority_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
         if "bright_spot_threshold" in param_map:
             self.bright_spot_threshold = int(param_map["bright_spot_threshold"])
         if "bright_spot_min_area" in param_map:
