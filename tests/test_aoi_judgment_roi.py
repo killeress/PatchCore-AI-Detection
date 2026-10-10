@@ -41,8 +41,8 @@ def case(points, *, bombs=(), enabled=True, anchor=(256, 256)):
     ([(256, 256, .3), (400, 400, 1)], [], False, False),
     ([(256, 256, .7), (400, 400, 1)], [(256, 256)], False, True),
     ([(256, 256, .7), (400, 400, 1)], [(400, 400)], True, False),
-    ([(256, 256, 1), (280, 256, .7)], [(256, 256)], True, False),
-    ([(280, 256, .7)], [(256, 256)], True, False),  # no AOI-coordinate bomb fallback
+    ([(256, 256, 1), (280, 256, .7)], [(256, 256)], False, True),
+    ([(280, 256, .7)], [(256, 256)], False, True),  # AOI coordinate has priority
     ([(281, 256, .7)], [], True, False),
     ([(282, 256, .7)], [], False, False),
 ])
@@ -73,6 +73,59 @@ def test_switch_off_keeps_full_tile_and_grid_unaffected():
     tile.is_aoi_coord_tile = False
     inf._apply_aoi_judgment_roi([result], RESOLUTION)
     assert tile.aoi_roi_mask is None
+
+
+@pytest.mark.parametrize('version', ['v1', 'v2'])
+@pytest.mark.parametrize('source', ['client', 'config'])
+def test_five_logged_aoi_bombs_ignore_spreading_heat(version, source, monkeypatch):
+    from capi_web import _target_tiles_for_within_spec
+    aoi_points = [(358, 136), (1569, 326), (289, 552), (1014, 567), (1681, 724)]
+    bomb_points = [(353, 134), (1565, 323), (286, 550), (1011, 565), (1677, 720)]
+    inf, result, _ = case([])
+    result.image_path = Path('WGF50500_134729.tif')
+    result.raw_bounds = (844, 898, 5920, 4062)
+    result.tiles, result.anomaly_tiles = [], []
+    for index, aoi in enumerate(aoi_points):
+        anchor = inf._map_aoi_coords(*aoi, result.raw_bounds, RESOLUTION)
+        tile = make_tile(index, aoi, anchor)
+        tile.score_threshold = .35
+        # Synthetic diffuse heat spanning the ROI exceeds the bomb tolerance.
+        amap = np.full((512, 512), .6, dtype=np.float32)
+        result.tiles.append(tile)
+        result.anomaly_tiles.append((tile, .6, amap))
+    inf.config.bomb_defects = [BombDefect('WGF50500', 'B01', 'point', bomb_points)]
+    bomb_info = dict(image_prefix='WGF50500', defect_type='point', coordinates=bomb_points)
+    if version == 'v2':
+        inf._apply_aoi_judgment_roi([result], RESOLUTION)
+    apply_bomb_postprocess(inf, result, bomb_info if source == 'client' else None,
+                           version, monkeypatch)
+    assert all(t.is_bomb for t in result.tiles)
+    assert all(t.bomb_remaining_points == [] for t in result.tiles)
+    stored = results_to_db_data([result], {})[0]
+    assert stored['is_ng'] == 0
+    assert _target_tiles_for_within_spec(stored) == []
+    assert not any(r.startswith('PCDK2') for r in
+                   _iter_qjpg_defect_records([result], RESOLUTION, inf.config))
+    for row in stored['tiles']:
+        ctx = json.loads(row['decision_context'])
+        assert ctx['aoi_bomb_priority_basis'] == 'aoi_coordinate'
+        assert any('原始 AOI 產品座標' in note for note in decision_evidence(row)['notes'])
+    assert all(r['bomb_remaining_px'] == 0 for t in result.tiles
+               for r in t.bomb_region_diagnostics['regions'])
+
+
+@pytest.mark.parametrize('bomb_x,prefix,expected', [
+    (236, 'STANDARD', True),  # Inclusive 20 px tolerance.
+    (235, 'STANDARD', False),
+    (256, 'WGF50500', False),  # Different lighting cannot match.
+])
+def test_aoi_bomb_priority_respects_tolerance_and_lighting(bomb_x, prefix, expected, monkeypatch):
+    inf, result, tile = case([(280, 256, .8)])
+    inf.config.bomb_defects = [BombDefect(prefix, 'B01', 'point', [(bomb_x, 256)])]
+    inf._apply_aoi_judgment_roi([result], RESOLUTION)
+    apply_bomb_postprocess(inf, result, None, 'v2', monkeypatch)
+    assert tile.is_bomb is expected
+    assert results_to_db_data([result], {})[0]['is_ng'] == int(not expected)
 
 
 @pytest.mark.parametrize('map_size', [128, 512])
@@ -121,12 +174,12 @@ def test_roi_snapshot_reaches_live_within_spec_conversion(tmp_path, radius, expe
     assert scope_step['aoi_judgment_roi']['radius_product_px'] == radius
 
 
-def test_two_stage_bomb_uses_feature_not_old_heat_core(monkeypatch):
+def test_aoi_bomb_coordinate_has_priority_over_two_stage_feature(monkeypatch):
     inf, result, tile = case([(256, 256, 1)], bombs=[(256, 256)])
     inf._apply_aoi_judgment_roi([result], RESOLUTION)
     tile.dust_two_stage_features = [dict(abs_pos=(280, 256), is_dust=False, area=1)]
     apply_bomb_postprocess(inf, result, None, 'v2', monkeypatch)
-    assert not tile.is_bomb
+    assert tile.is_bomb
 
 
 def test_bright_spot_outside_roi_is_not_ng():
@@ -138,14 +191,14 @@ def test_bright_spot_outside_roi_is_not_ng():
     assert tile.is_aoi_coord_below_threshold
 
 
-def test_bright_spot_inside_roi_outside_bomb_stays_ng(monkeypatch):
+def test_bright_spot_aoi_bomb_coordinate_has_priority(monkeypatch):
     inf, result, tile = case([(280, 256, 1)], bombs=[(256, 256)])
     tile.is_bright_spot_detection = True
     tile.bright_spot_min_area = 1
     inf._apply_aoi_judgment_roi([result], RESOLUTION)
     apply_bomb_postprocess(inf, result, None, 'v2', monkeypatch)
-    assert not tile.is_bomb
-    assert results_to_db_data([result], {})[0]['is_ng'] == 1
+    assert tile.is_bomb
+    assert results_to_db_data([result], {})[0]['is_ng'] == 0
 
 
 def test_old_setting_migrates_once_and_radius_persists(tmp_path):
@@ -167,7 +220,7 @@ def test_old_setting_migrates_once_and_radius_persists(tmp_path):
 
 
 @pytest.mark.parametrize('radius', [25, 30])
-def test_roi_heatmap_banner_box_and_dimmed_outside(tmp_path, monkeypatch, radius):
+def test_roi_heatmap_banner_box_preserves_full_tile_display(tmp_path, monkeypatch, radius):
     inf, result, tile = case([(256, 256, .7), (400, 400, 1)], bombs=[(256, 256)])
     inf.config.apply_db_overrides([{'param_name': 'aoi_judgment_radius_px', 'decoded_value': radius}])
     tile.image[240, 256 - radius] = 20  # A dark defect directly under the ROI outline.
@@ -186,12 +239,25 @@ def test_roi_heatmap_banner_box_and_dimmed_outside(tmp_path, monkeypatch, radius
     assert image is not None
     assert any(f'AOI ONLY +/-{radius} product px' in s and 'ROI RESULT: BOMB -> OK' in s for s in captured)
     assert any('Full tile score: 1.0000 (reference only)' in s for s in captured)
-    assert tuple(image[88 + 60 + 400, 400]) == (30, 30, 30)
+    assert not any('DIMMED' in s for s in captured)
+    assert sum('CYAN BOX = EVALUATED' in s for s in captured) == 1
+    assert tuple(image[88 + 60 + 400, 400]) == (100, 100, 100)
     border_defect = image[88 + 60 + 240, 256 - radius]
-    assert np.all(border_defect < 100)  # Still darker than its original-image surroundings.
-    assert border_defect[0] > border_defect[2]  # Faint cyan boundary remains visible.
+    assert tuple(border_defect) == (20, 20, 20)
+    assert tuple(image[88 + 60 + 240, 256 - radius - 1]) == (255, 255, 0)
     # The AOI center remains unobstructed on the original-image panel.
     assert tuple(image[88 + 60 + 256, 256]) == (100, 100, 100)
+    # Compare all full-tile panels against the unannotated rendering, including
+    # the heatmap's colors outside the judgment ROI.
+    tile.decision_context['aoi_judgment_roi']['enabled'] = False
+    plain_path = HeatmapManager(tmp_path, save_format='png').save_tile_heatmap(
+        tmp_path, 'ROI_PLAIN', 0, tile.image, amap, score, tile_info=tile)
+    plain = cv2.imread(plain_path)
+    for panel_index in range(5):
+        x = panel_index * 512 + 400
+        np.testing.assert_array_equal(image[88 + 60 + 400, x], plain[60 + 400, x])
+    heatmap_pixel = image[88 + 60 + 400, 2 * 512 + 400]
+    assert len(set(heatmap_pixel)) > 1
 
 
 @pytest.mark.parametrize('has_inner_ng', [False, True])

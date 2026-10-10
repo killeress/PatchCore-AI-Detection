@@ -9379,7 +9379,7 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]],
         geometry_cache: Dict[str, list],
     ) -> Optional[Tuple[bool, str]]:
-        """Resolve point-bomb contamination using every non-dust hot core.
+        """Prefer an AOI-coordinate bomb match in ROI mode, else inspect hot cores.
 
         A crop can contain a neighboring bomb even though its AOI anchor is
         elsewhere. Only suppress it when the entire non-dust core fits the
@@ -9402,6 +9402,41 @@ class CAPIInferencer:
         if amap.ndim != 2 or amap.size == 0 or not np.isfinite(amap).all() or np.max(amap) <= 0:
             return None
         img_prefix = self._get_image_prefix(result.image_path.name)
+        if tile.aoi_roi_mask is not None and min(tile.aoi_product_x, tile.aoi_product_y) >= 0:
+            # AOI-scoped judgment gives the reported coordinate priority over
+            # heatmap extent. A bomb's diffuse heat must not turn it back into NG.
+            matched, code = self.check_bomb_match(
+                img_prefix, tile.aoi_image_x, tile.aoi_image_y, result.raw_bounds,
+                product_resolution=product_resolution, bomb_list=active_bombs,
+                product_coords=(tile.aoi_product_x, tile.aoi_product_y),
+            )
+            if matched:
+                _real, _peak, _iou, details, binary, _labels = self.check_dust_per_region(
+                    np.zeros(amap.shape, dtype=np.uint8), amap, top_percent=100.0,
+                )
+                tile.bomb_region_diagnostics = {
+                    "regions": [dict(
+                        detail, bomb_status="IGNORED_BY_AOI_BOMB",
+                        bomb_excluded_px=0, bomb_remaining_px=0,
+                        bomb_ignored_px=detail["area"],
+                    ) for detail in details],
+                    "heatmap_binary": binary,
+                    "excluded_mask": np.zeros(amap.shape, dtype=np.uint8),
+                    "ignored_mask": (binary > 0).astype(np.uint8),
+                    "priority_applied": True,
+                    "priority_basis": "aoi_coordinate",
+                    "tolerance_product_px": self.config.bomb_match_tolerance,
+                }
+                tile.bomb_remaining_points = []
+                tile.anomaly_peak_x, tile.anomaly_peak_y = tile.aoi_image_x, tile.aoi_image_y
+                tile.anomaly_peak_source = "aoi_bomb_coordinate"
+                logger.info(
+                    "[AOI_BOMB_COORD] image=%s tile=%s aoi=(%s,%s) tolerance=%s "
+                    "code=%s result=BOMB heat_regions=IGNORED",
+                    result.image_path.name, tile.tile_id, tile.aoi_product_x,
+                    tile.aoi_product_y, self.config.bomb_match_tolerance, code,
+                )
+                return True, code
         bombs = [bomb for bomb in active_bombs
                  if self._aoi_prefix_matches(img_prefix, bomb.image_prefix)]
         if not bombs or any(bomb.defect_type != "point" for bomb in bombs):
