@@ -118,6 +118,7 @@ MODEL_RESOLUTION_MAP = {
     'J': (1920, 1200),
     'K': (2560, 1440),
     'G': (2560, 1600),
+    'N': (1920, 1280),
 }
 
 DEFAULT_PRODUCT_RESOLUTION = (1920, 1080)

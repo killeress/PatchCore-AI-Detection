@@ -1918,6 +1918,7 @@ model_resolution_map:
   J: [1920, 1200]
   K: [2560, 1440]
   G: [2560, 1600]
+  N: [1920, 1280]
 
 # === Scratch classifier 後濾（DINOv2 LoRA + LogReg）===
 # 預設承襲 configs/capi_3f.yaml；缺欄位會走 dataclass 預設空字串，

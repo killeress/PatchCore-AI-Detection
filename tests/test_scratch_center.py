@@ -208,7 +208,8 @@ def test_receive_registered_peer(tmp_path):
 
 
 @pytest.mark.parametrize("valid", [True, False])
-def test_model_install_validates_before_switch_and_keeps_old(tmp_path, monkeypatch, valid):
+@pytest.mark.parametrize("multiplier", [None, 1.5])
+def test_model_install_validates_before_switch_and_keeps_old(tmp_path, monkeypatch, valid, multiplier):
     handler, _, _, _ = make_handler(tmp_path)
     monkeypatch.setattr(center, "__file__", str(tmp_path / "capi_scratch_center.py"))
     deployment = tmp_path / "deployment"
@@ -218,9 +219,13 @@ def test_model_install_validates_before_switch_and_keeps_old(tmp_path, monkeypat
     weights = tmp_path / "weights.pth"
     weights.write_bytes(b"base")
     config = SimpleNamespace(scratch_bundle_path=str(old), scratch_classifier_enabled=True,
+                             scratch_safety_multiplier=1.2,
                              scratch_dinov2_repo_path=str(tmp_path), scratch_dinov2_weights_path=str(weights))
     handler._capi_server_instance.config = config
-    handler._capi_server_instance.inferencers = {}
+    handler.inferencer.config.scratch_safety_multiplier = 1.2
+    other_config = SimpleNamespace(scratch_safety_multiplier=1.2)
+    handler._capi_server_instance.inferencers = {"other": SimpleNamespace(config=other_config)}
+    handler.db.update_config_param("scratch_safety_multiplier", 1.2)
     class Classifier:
         def __init__(self, *args, **kwargs):
             if not valid:
@@ -235,18 +240,29 @@ def test_model_install_validates_before_switch_and_keeps_old(tmp_path, monkeypat
     raw = b"new"
     data = {"name": "scratch_classifier_v1.pkl", "bundle": base64.b64encode(raw).decode(),
             "sha256": hashlib.sha256(raw).hexdigest()}
+    if multiplier is not None:
+        data["scratch_safety_multiplier"] = multiplier
+    expected_multiplier = multiplier if valid and multiplier is not None else 1.2
     if valid:
         result = handler._install_scratch_model(data)
         assert result["success"] and result["previous_bundle"] == str(old)
         assert config.scratch_bundle_path != str(old)
         assert handler.db.get_config_param("scratch_bundle_path")["decoded_value"] == config.scratch_bundle_path
         assert handler.inferencer.config.scratch_bundle_path == config.scratch_bundle_path
+        assert result["scratch_safety_multiplier"] == expected_multiplier
     else:
         with pytest.raises(ValueError, match="bad model"):
             handler._install_scratch_model(data)
         assert config.scratch_bundle_path == str(old)
         assert handler.db.get_config_param("scratch_bundle_path") is None
         assert len(list(deployment.glob("*.pkl"))) == 1
+    for target in (config, handler.inferencer.config, other_config):
+        assert target.scratch_safety_multiplier == expected_multiplier
+    assert handler.db.get_config_param("scratch_safety_multiplier")["decoded_value"] == expected_multiplier
+    if valid and multiplier is not None:
+        history = handler.db.get_config_change_history("scratch_safety_multiplier")
+        assert any(json.loads(row["new_value"]) == multiplier and row["changed_by"] == "central"
+                   for row in history)
     assert old.read_bytes() == b"old"
     assert not list(deployment.glob("*.pending"))
 
@@ -265,7 +281,8 @@ def test_distribute_requires_admin(tmp_path):
     assert not responses
 
 
-def test_distribution_targets_registered_line_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("multiplier", [None, 1.5])
+def test_distribution_targets_registered_line_only(tmp_path, monkeypatch, multiplier):
     handler, _, _, responses = make_handler(tmp_path)
     monkeypatch.setattr(center, "__file__", str(tmp_path / "capi_scratch_center.py"))
     deployment = tmp_path / "deployment"
@@ -274,16 +291,24 @@ def test_distribution_targets_registered_line_only(tmp_path, monkeypatch):
     handler._require_settings_user = lambda **kwargs: {"username": "admin"}
     handler._scratch_lines = lambda: [{"id": "line1", "apiUrl": "http://10.174.1.20:8080/api/status"}]
     data = {"bundle": "scratch_classifier_v2.pkl", "line_id": "line1", "url": "http://10.174.9.99"}
+    if multiplier is not None:
+        data["scratch_safety_multiplier"] = multiplier
     handler._read_json_body = lambda: data
     calls = []
     def post(url, payload, **kwargs):
         calls.append((url, payload))
-        return {"success": True, "message": "loaded"}
+        return {"success": True, "message": "loaded", "scratch_safety_multiplier": multiplier}
     monkeypatch.setattr(center, "post_json", post)
     handler._handle_scratch_distribute()
     assert responses[-1][0] == 200
     assert calls[0][0] == "http://10.174.1.20:8080/api/scratch/model"
     assert hashlib.sha256(base64.b64decode(calls[0][1]["bundle"])).hexdigest() == calls[0][1]["sha256"]
+    assert calls[0][1].get("scratch_safety_multiplier") == multiplier
+    if multiplier is not None:
+        monkeypatch.setattr(center, "post_json", lambda *args, **kwargs: {"success": True})
+        handler._handle_scratch_distribute()
+        assert responses[-1][0] == 502
+        assert "未確認套用安全倍率" in responses[-1][1]["error"]
     data["line_id"] = "unknown"
     handler._handle_scratch_distribute()
     assert responses[-1][0] == 400 and len(calls) == 1
@@ -351,16 +376,51 @@ def test_gallery_stale_batch_selection_falls_back(tmp_path):
     assert rendered["filtered_count"] == 1
 
 
-def test_activation_db_failure_rolls_back_both_settings(tmp_path):
+@pytest.mark.parametrize("failed_param", ["scratch_classifier_enabled", "scratch_safety_multiplier"])
+def test_activation_db_failure_rolls_back_all_settings(tmp_path, failed_param):
     import sqlite3
     db = CAPIDatabase(tmp_path / "settings.db")
     db.update_config_param("scratch_bundle_path", "old.pkl")
     db.update_config_param("scratch_classifier_enabled", False)
+    db.update_config_param("scratch_safety_multiplier", 1.2)
+    history_before = db.get_config_change_history()
     with sqlite3.connect(db.db_path) as connection:
         connection.execute("CREATE TRIGGER reject_activation BEFORE INSERT ON config_change_history "
-                           "WHEN NEW.param_name = 'scratch_classifier_enabled' "
+                           f"WHEN NEW.param_name = '{failed_param}' "
                            "BEGIN SELECT RAISE(ABORT, 'failed'); END")
     with pytest.raises(sqlite3.IntegrityError):
-        db.activate_scratch_bundle("new.pkl", "test")
+        db.activate_scratch_bundle("new.pkl", "test", scratch_safety_multiplier=1.5)
     assert db.get_config_param("scratch_bundle_path")["decoded_value"] == "old.pkl"
     assert db.get_config_param("scratch_classifier_enabled")["decoded_value"] is False
+    assert db.get_config_param("scratch_safety_multiplier")["decoded_value"] == 1.2
+    assert db.get_config_change_history() == history_before
+
+
+@pytest.mark.parametrize("value", [None, True, False, "", "bad", 0, -1, "NaN", "Infinity", float("inf"), [], {}])
+def test_invalid_multiplier_rejected_before_distribution_or_install(tmp_path, monkeypatch, value):
+    handler, _, _, responses = make_handler(tmp_path)
+    handler._require_settings_user = lambda **kwargs: {"username": "admin"}
+    handler._read_json_body = lambda: {"scratch_safety_multiplier": value}
+    monkeypatch.setattr(center, "post_json", lambda *args, **kwargs: pytest.fail("must not send"))
+    handler._handle_scratch_distribute()
+    assert responses[-1][0] == 400
+    assert "安全倍率" in responses[-1][1]["error"]
+    with pytest.raises(ValueError, match="安全倍率"):
+        handler._install_scratch_model({"scratch_safety_multiplier": value})
+    assert handler.db.get_config_param("scratch_safety_multiplier") is None
+
+
+@pytest.mark.parametrize("saved", [None, 1.5])
+def test_management_prefills_saved_multiplier_then_runtime(tmp_path, saved):
+    from jinja2 import Environment, FileSystemLoader
+    handler, _, _, _ = make_handler(tmp_path)
+    handler._capi_server_instance.config = SimpleNamespace(scratch_safety_multiplier=1.3)
+    if saved is not None:
+        handler.db.update_config_param("scratch_safety_multiplier", saved)
+    handler._scratch_lines = lambda: []
+    handler.jinja_env = Environment(loader=FileSystemLoader(Path(__file__).parents[1] / "templates"))
+    handler.jinja_env.globals["app_version"] = {"version": "test"}
+    pages = []
+    handler._send_response = lambda status, html: pages.append(html)
+    handler._handle_scratch_management()
+    assert f'value="{saved if saved is not None else 1.3}"' in pages[0]
