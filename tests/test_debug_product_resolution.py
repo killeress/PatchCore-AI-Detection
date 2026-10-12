@@ -14,6 +14,7 @@ from capi_web import CAPIWebHandler
 @pytest.mark.parametrize("code,resolution", [
     ("B", [1366, 768]), ("H", [1920, 1080]), ("J", [1920, 1200]),
     ("K", [2560, 1440]), ("G", [2560, 1600]), ("j", [1920, 1200]),
+    ("N", [1920, 1280]), ("n", [1920, 1280]),
     ("Z", [1920, 1080]), ("0", [1920, 1080]),
 ])
 def test_debug_resolution_uses_model_folder_not_glass_or_filename(code, resolution):
@@ -54,7 +55,7 @@ def test_debug_resolution_ui_updates_selection_and_clears_stale_warning():
     functions = template.split("    function debugResolutionInfo(", 1)[1].split("    async function runCoordInference", 1)[0]
     script = """
 const assert = require('node:assert/strict');
-const debugResolutionMap = {B:[1366,768], H:[1920,1080], J:[1920,1200], K:[2560,1440], G:[2560,1600]};
+const debugResolutionMap = {B:[1366,768], H:[1920,1080], J:[1920,1200], K:[2560,1440], G:[2560,1600], N:[1920,1280]};
 const debugMachineId = 'GN140HCAL010S';
 const elements = {};
 const document = {

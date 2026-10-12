@@ -19,6 +19,10 @@
       {% for bundle in bundles %}<option value="{{ bundle | e }}">{{ bundle | e }}</option>{% endfor %}
     </select>
     {% if not bundles %}<p>尚未有可下發的刮痕模型，請先訓練。</p>{% endif %}
+    <label for="scratch-safety-multiplier">刮痕判定安全倍率（scratch_safety_multiplier）</label>
+    <input id="scratch-safety-multiplier" type="number" step="any" required
+           value="{{ scratch_safety_multiplier | e }}" style="width:160px;padding:10px;margin:8px 0;">
+    <p>預填中心目前設定，可調整為大於 0 的數值；與模型一起下發至所選線體，下次推論生效。</p>
     <div style="display:flex;gap:16px;align-items:center;margin-bottom:12px;">
       <label><input id="scratch-select-all" type="checkbox" {% if not lines %}disabled{% endif %}> 全部勾選／取消全選</label>
       <span id="scratch-selection-count" style="color:var(--muted);"></span>
@@ -61,6 +65,8 @@ async function distributeScratch() {
   const button = document.getElementById('distribute');
   const bundleSelect = document.getElementById('scratch-bundle');
   const bundle = bundleSelect.value;
+  const multiplierInput = document.getElementById('scratch-safety-multiplier');
+  const multiplier = Number(multiplierInput.value);
   if (button.disabled) return;
   if (!selected.length || !bundle) {
     summary.textContent = '請選擇模型與至少一台線體。';
@@ -68,7 +74,14 @@ async function distributeScratch() {
     output.textContent = '';
     return;
   }
-  const controls = [button, bundleSelect, scratchSelectAll, ...scratchLines];
+  if (!Number.isFinite(multiplier) || multiplier <= 0) {
+    summary.textContent = '刮痕判定安全倍率必須是大於 0 的有限數值。';
+    summary.style.color = '';
+    output.textContent = '';
+    multiplierInput.focus();
+    return;
+  }
+  const controls = [button, bundleSelect, multiplierInput, scratchSelectAll, ...scratchLines];
   const disabledStates = controls.map(control => control.disabled);
   controls.forEach(control => { control.disabled = true; });
   output.textContent = '';
@@ -86,7 +99,7 @@ async function distributeScratch() {
       try {
         const response = await fetch('/api/scratch/distribute', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({bundle, line_id: item.value})
+          body: JSON.stringify({bundle, line_id: item.value, scratch_safety_multiplier: multiplier})
         });
         const data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.error || '下發失敗');
@@ -99,7 +112,7 @@ async function distributeScratch() {
       updateProgress();
     }
     summary.textContent = (failed === 0 ? '✓ 全部下發成功！' : '⚠ 下發完成，請確認失敗線體。') +
-      `\n模型：${bundle}\n共 ${selected.length} 台，成功 ${succeeded} 台，失敗 ${failed} 台。` +
+      `\n模型：${bundle}\n安全倍率：${multiplier}\n共 ${selected.length} 台，成功 ${succeeded} 台，失敗 ${failed} 台。` +
       (failed ? '\n失敗原因請見下方明細，可重新勾選失敗線體再次下發。' : '\n所有已選線體均已驗證並切換設定，下次推論載入新版本。');
     summary.style.color = failed ? '#fbbf24' : '#22c55e';
   } finally {

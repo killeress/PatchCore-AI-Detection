@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import math
 import re
 import threading
 import uuid
@@ -24,6 +25,18 @@ SAMPLE_LIMIT = 8 * 1024 * 1024
 MODEL_LIMIT = 64 * 1024 * 1024
 _LOCK = threading.RLock()
 SAMPLE_MANIFEST_LOCK = threading.RLock()
+
+
+def validate_scratch_safety_multiplier(value):
+    try:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError
+        multiplier = float(value)
+        if not math.isfinite(multiplier) or multiplier <= 0:
+            raise ValueError
+    except (ValueError, OverflowError):
+        raise ValueError("刮痕判定安全倍率必須是大於 0 的有限數值") from None
+    return multiplier
 
 
 def post_json(url: str, payload: dict, timeout: int = 30) -> dict:
@@ -140,9 +153,14 @@ class ScratchCenterMixin:
             self._handle_scratch_center_entry()
             return
         bundles = sorted(p.name for p in (Path(__file__).parent / "deployment").glob("scratch_classifier*.pkl"))
+        saved_multiplier = self.db.get_config_param("scratch_safety_multiplier")
+        config = getattr(self._capi_server_instance, "config", None)
+        multiplier = (saved_multiplier["decoded_value"] if saved_multiplier else
+                      getattr(config, "scratch_safety_multiplier", 1.1))
         self._send_response(200, self.jinja_env.get_template("scratch_management.html").render(
             request_path="/scratch-management", bundles=bundles, lines=self._scratch_lines(),
             dataset_root=str(self._dataset_export_base_dir()),
+            scratch_safety_multiplier=multiplier,
         ))
 
     def _scratch_transfer_body(self, limit):
@@ -231,6 +249,14 @@ class ScratchCenterMixin:
         data = self._read_json_body()
         if not isinstance(data, dict):
             return
+        transfer_settings = {}
+        if "scratch_safety_multiplier" in data:
+            try:
+                transfer_settings["scratch_safety_multiplier"] = validate_scratch_safety_multiplier(
+                    data["scratch_safety_multiplier"])
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
         name = str(data.get("bundle") or "")
         if not re.fullmatch(r"scratch_classifier[A-Za-z0-9_.-]*\.pkl", name):
             self._send_json({"error": "無效模型名稱"}, status=400)
@@ -250,7 +276,11 @@ class ScratchCenterMixin:
                 "name": name, "sha256": hashlib.sha256(raw).hexdigest(),
                 "bundle": base64.b64encode(raw).decode("ascii"),
                 "requested_by": user.get("username", ""),
+                **transfer_settings,
             }, timeout=120)
+            if (transfer_settings and result.get("scratch_safety_multiplier") !=
+                    transfer_settings["scratch_safety_multiplier"]):
+                raise RuntimeError("線體未確認套用安全倍率，模型可能已切換；請更新線體程式後重新下發")
             self._send_json(result)
         except (ValueError, OSError, RuntimeError, http.client.HTTPException) as exc:
             self._send_json({"error": f"下發失敗：{exc}"}, status=502)
@@ -269,6 +299,8 @@ class ScratchCenterMixin:
             self._send_json({"error": f"模型未啟用：{exc}"}, status=400)
 
     def _install_scratch_model(self, data):
+        multiplier = (validate_scratch_safety_multiplier(data["scratch_safety_multiplier"])
+                      if "scratch_safety_multiplier" in data else None)
         from scratch_classifier import ScratchClassifier, load_bundle
         raw = base64.b64decode(data.get("bundle", ""), validate=True)
         digest = hashlib.sha256(raw).hexdigest()
@@ -310,7 +342,8 @@ class ScratchCenterMixin:
             previous = config.scratch_bundle_path
             self.db.activate_scratch_bundle(relative.as_posix(),
                                             f"中心下發 SHA256={digest}; previous={previous}",
-                                            changed_by=str(data.get("requested_by") or "central"))
+                                            changed_by=str(data.get("requested_by") or "central"),
+                                            scratch_safety_multiplier=multiplier)
             configs = [config]
             inferencers = list((getattr(server, "inferencers", None) or {}).values())
             if self.inferencer is not None:
@@ -319,5 +352,10 @@ class ScratchCenterMixin:
             for target in configs:
                 target.scratch_bundle_path = relative.as_posix()
                 target.scratch_classifier_enabled = True
+                if multiplier is not None:
+                    target.scratch_safety_multiplier = multiplier
         return {"success": True, "bundle": relative.as_posix(), "sha256": digest,
-                "previous_bundle": previous, "message": "模型已驗證並切換，下次推論載入新版本"}
+                "previous_bundle": previous,
+                "scratch_safety_multiplier": getattr(config, "scratch_safety_multiplier", 1.1),
+                "message": (f"模型與安全倍率 {multiplier:g} 已套用，下次推論生效" if multiplier is not None
+                            else "模型已驗證並切換，下次推論載入新版本")}

@@ -319,12 +319,26 @@ def test_process_panel_v2_enables_large_panel_raw_boundary_for_aapi(
     assert captured["raw_boundary_max_edge_residual_p95_ratio"] == 0.03
 
 
-def test_grid_model_requires_matching_model_name_resolution(tmp_path, monkeypatch):
+@pytest.mark.parametrize("machine_id,resolution", [
+    ("GN140HCAL010S", (1920, 1080)),
+    ("GN135NCGT120S", (1920, 1280)),
+])
+def test_grid_model_requires_matching_model_name_resolution(tmp_path, monkeypatch, machine_id, resolution):
     _write_grey_panel_image(tmp_path, "G0F00000")
     cfg = _make_config(tmp_path)
     cfg.grid_canonicalization_enabled = True
     cfg.grid_samples_per_cell = 3
-    cfg.grid_product_resolution = (1920, 1080)
+    cfg.machine_id = machine_id
+    cfg.grid_product_resolution = resolution
+    # 模擬 codeonly 更新前訓練的 bundle：磁碟上的映射表尚未包含 N。
+    saved = cfg.to_dict()
+    saved["model_resolution_map"] = {
+        code: value for code, value in cfg.model_resolution_map.items() if code != "N"
+    }
+    import yaml
+    config_path = tmp_path / "machine_config.yaml"
+    config_path.write_text(yaml.safe_dump(saved), encoding="utf-8")
+    cfg = CAPIConfig.from_yaml(str(config_path))
     captured = {}
 
     def fake_preprocess_panel_folder(
@@ -355,7 +369,7 @@ def test_grid_model_requires_matching_model_name_resolution(tmp_path, monkeypatc
     assert captured == {
         "enabled": True,
         "samples": 3,
-        "resolution": (1920, 1080),
+        "resolution": resolution,
         "cache": True,
     }
 

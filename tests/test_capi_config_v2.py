@@ -10,6 +10,37 @@ import yaml
 from capi_config import CAPIConfig
 
 
+@pytest.mark.parametrize("saved_map,expected_map", [
+    ({"H": [1920, 1080], "J": [1000, 500]},
+     {"H": [1920, 1080], "J": [1000, 500], "N": [1920, 1280]}),
+    ({}, {"N": [1920, 1280]}),
+    ({"N": [1600, 1200], "J": [1000, 500]},
+     {"N": [1600, 1200], "J": [1000, 500]}),
+])
+def test_existing_bundle_resolution_map_backfills_only_missing_n(tmp_path, saved_map, expected_map):
+    import copy
+
+    data = {
+        "machine_id": "GN135NCGT120S",
+        "model_mapping": {"G0F00000": {"inner": "g_inner.pt", "edge": "g_edge.pt"}},
+        "model_resolution_map": saved_map,
+        "grid_canonicalization": {
+            "enabled": True, "product_resolution": [1920, 1280],
+        },
+    }
+    original = copy.deepcopy(data)
+    path = tmp_path / "machine_config.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    original_bytes = path.read_bytes()
+
+    for cfg in (CAPIConfig.from_dict(data), CAPIConfig.from_yaml(str(path))):
+        assert cfg.model_resolution_map == expected_map
+        assert cfg.grid_product_resolution == (1920, 1280)
+        assert cfg.model_mapping == original["model_mapping"]
+    assert data == original
+    assert path.read_bytes() == original_bytes
+
+
 def test_u0f_image_abnormal_thresholds_inherit_then_remain_independent():
     cfg = CAPIConfig.from_dict({
         "image_abnormal_standard_mean_lower": 40,

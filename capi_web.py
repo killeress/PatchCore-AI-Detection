@@ -15128,6 +15128,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             "J": (1920, 1200),
             "K": (2560, 1440),
             "G": (2560, 1600),
+            "N": (1920, 1280),
         }
         if server_inst is not None:
             inferencers = getattr(server_inst, "inferencers", None)

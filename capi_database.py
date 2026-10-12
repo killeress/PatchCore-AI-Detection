@@ -6762,15 +6762,19 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-    def activate_scratch_bundle(self, bundle_path: str, reason: str, changed_by: str = ""):
-        """Commit the bundle path, enabled flag and audit history as one transaction."""
+    def activate_scratch_bundle(self, bundle_path: str, reason: str, changed_by: str = "",
+                                scratch_safety_multiplier: Optional[float] = None):
+        """Commit the model settings and audit history as one transaction."""
+        settings = [
+            ("scratch_bundle_path", bundle_path, "str"),
+            ("scratch_classifier_enabled", True, "bool"),
+        ]
+        if scratch_safety_multiplier is not None:
+            settings.append(("scratch_safety_multiplier", scratch_safety_multiplier, "float"))
         with self._lock:
             conn = self._get_conn()
             try:
-                for name, value, kind in (
-                    ("scratch_bundle_path", bundle_path, "str"),
-                    ("scratch_classifier_enabled", True, "bool"),
-                ):
+                for name, value, kind in settings:
                     old = conn.execute("SELECT param_value FROM config_params WHERE param_name = ?",
                                        (name,)).fetchone()
                     encoded = json.dumps(value, ensure_ascii=False)

@@ -369,13 +369,14 @@ class CAPIConfig:
     aoi_judgment_radius_px: int = 25  # 產品座標 X/Y 各 ±radius（非圖片像素）
     
     # 機種第六碼 → 產品解析度映射表 (寬, 高)
-    # 例: {'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200], 'K': [2560, 1440], 'G': [2560, 1600]}
+    # 例: {'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200], 'K': [2560, 1440], 'G': [2560, 1600], 'N': [1920, 1280]}
     model_resolution_map: Dict[str, List[int]] = field(default_factory=lambda: {
         'B': [1366, 768],
         'H': [1920, 1080],
         'J': [1920, 1200],
         'K': [2560, 1440],
         'G': [2560, 1600],
+        'N': [1920, 1280],
     })
     
     # Grid Tiling 推論開關
@@ -697,6 +698,7 @@ class CAPIConfig:
             model_resolution_map=data.get("model_resolution_map", {
                 'B': [1366, 768], 'H': [1920, 1080], 'J': [1920, 1200],
                 'K': [2560, 1440], 'G': [2560, 1600],
+                'N': [1920, 1280],
             }),
             grid_tiling_enabled=data.get("grid_tiling_enabled", True),
             aoi_coord_inspection_enabled=data.get("aoi_coord_inspection_enabled", False),
@@ -709,6 +711,11 @@ class CAPIConfig:
             scratch_dinov2_weights_path=data.get("scratch_dinov2_weights_path", "deployment/dinov2_vitb14.pth"),
             scratch_dinov2_repo_path=data.get("scratch_dinov2_repo_path", ""),
         )
+
+        # 舊 bundle 已明列映射表時，也要支援新增的 N 機種；保留現場自訂值。
+        if isinstance(config.model_resolution_map, dict):
+            config.model_resolution_map = dict(config.model_resolution_map)
+            config.model_resolution_map.setdefault("N", [1920, 1280])
 
         return config
 

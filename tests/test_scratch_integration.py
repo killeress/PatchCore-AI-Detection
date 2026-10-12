@@ -60,6 +60,21 @@ def test_get_scratch_filter_caches_on_success(monkeypatch):
     ]
 
 
+def test_get_scratch_filter_applies_updated_multiplier_to_cached_model():
+    cfg = CAPIConfig()
+    cfg.scratch_classifier_enabled = True
+    cfg.scratch_safety_multiplier = 1.1
+    inferencer = CAPIInferencer(config=cfg, model_path="")
+    with patch("capi_inference.ScratchClassifier", return_value=_FakeClassifier()) as mock_cls:
+        before = inferencer._get_scratch_filter()
+        cfg.scratch_safety_multiplier = 1.3
+        after = inferencer._get_scratch_filter()
+        assert after is not before
+        assert after._safety == 1.3
+        assert after.effective_threshold == pytest.approx(0.7 * 1.3)
+        assert mock_cls.call_count == 1
+
+
 def test_get_scratch_filter_reloads_when_bundle_path_changes():
     cfg = CAPIConfig()
     cfg.scratch_classifier_enabled = True
