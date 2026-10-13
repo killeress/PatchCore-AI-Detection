@@ -104,6 +104,11 @@ def test_five_standard_bombs_match_polygon_corrected_aoi_anchors(source, version
     assert [tile.is_bomb for tile in tiles] == [True] * 5 + [False, False]
     assert all(tile.bomb_defect_code == "B01" for tile in tiles[:5])
     assert unrelated.bomb_defect_code == below_threshold.bomb_defect_code == ""
+    from capi_server import _iter_qjpg_defect_records
+
+    assert _iter_qjpg_defect_records(
+        [result], RESOLUTION, inferencer.config, bomb_only=True,
+    ) == [f"PCDK3{x:05d}{y:05d}STANDARD" for x, y in AOI_POINTS]
     log = capsys.readouterr().out
     assert "B01×5" in log
     if version == "v2":
