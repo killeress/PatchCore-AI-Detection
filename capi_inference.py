@@ -93,11 +93,13 @@ from capi_edge_cv import (
 from capi_preprocess import (
     PreprocessConfig,
     detect_panel_polygon,
+    isolate_panel_foreground,
     _polyfit_polygon as _pf_polygon,
     is_small_product_resolution,
     rect_polygon_from_bounds,
     resolve_aoi_inward_shift_axes,
     map_product_coord_to_image,
+    map_image_coord_to_product,
 )
 from scratch_classifier import ScratchClassifier, ScratchClassifierLoadError
 from scratch_filter import ScratchFilter
@@ -1273,11 +1275,11 @@ class CAPIInferencer:
     def _find_raw_object_bounds(
         self, image: np.ndarray
     ) -> Tuple[Tuple[int, int, int, int], np.ndarray]:
-        """找尋物件的原始邊界 (不含 Offset)
+        """找尋面板主體的原始邊界 (不含 Offset)，排除外部獨立亮點。
 
         Returns:
             ((x_min, y_min, x_max, y_max), binary_mask) — binary_mask 是 Otsu +
-            morphology close 後的 uint8 前景圖（255=前景），供後續 polygon 偵測重用。
+            morphology close 後僅保留面板的 uint8 前景圖（255=前景），供 polygon 偵測重用。
         """
         img_height, img_width = image.shape[:2]
 
@@ -1290,24 +1292,10 @@ class CAPIInferencer:
         _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         kernel = np.ones((15, 15), np.uint8)
         closing = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        x_min, y_min = np.inf, np.inf
-        x_max, y_max = -np.inf, -np.inf
-
-        MIN_AREA = 1000
-        for contour in contours:
-            if cv2.contourArea(contour) > MIN_AREA:
-                x, y, w, h = cv2.boundingRect(contour)
-                x_min = min(x_min, x)
-                y_min = min(y_min, y)
-                x_max = max(x + w, x_max)
-                y_max = max(y + h, y_max)
-
-        if x_min == np.inf:
-            return (0, 0, img_width, img_height), closing
-
-        return (int(x_min), int(y_min), int(x_max), int(y_max)), closing
+        bounds, panel_mask = isolate_panel_foreground(closing)
+        if bounds is None:
+            return (0, 0, img_width, img_height), panel_mask
+        return bounds, panel_mask
 
     def _find_panel_polygon(
         self,
@@ -9642,14 +9630,10 @@ class CAPIInferencer:
                         nearest = (dist2, coord, dx, dy)
             return nearest
 
-        def image_to_product_coords(img_x: int, img_y: int, raw_bounds: Tuple[int, int, int, int]) -> Tuple[int, int]:
-            product_w, product_h = product_resolution or DEFAULT_PRODUCT_RESOLUTION
-            x_start, y_start, x_end, y_end = raw_bounds
-            panel_w = max(1, x_end - x_start)
-            panel_h = max(1, y_end - y_start)
-            return (
-                int(round((img_x - x_start) * product_w / panel_w)),
-                int(round((img_y - y_start) * product_h / panel_h)),
+        def image_to_product_coords(img_x, img_y, raw_bounds, panel_polygon=None):
+            return map_image_coord_to_product(
+                img_x, img_y, raw_bounds,
+                product_resolution or DEFAULT_PRODUCT_RESOLUTION, panel_polygon,
             )
 
         for result in results:
@@ -9760,7 +9744,8 @@ class CAPIInferencer:
                             coord_source = "aoi"
                         else:
                             product_x, product_y = image_to_product_coords(
-                                tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds
+                                tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds,
+                                result.panel_polygon,
                             )
                             coord_source = "peak"
                         nearest = nearest_point_distance(img_prefix, product_x, product_y)
@@ -9790,7 +9775,9 @@ class CAPIInferencer:
                         ed.is_bomb = True
                         ed.bomb_defect_code = bomb_code
                     if point_coord_count:
-                        product_x, product_y = image_to_product_coords(int(cx), int(cy), result.raw_bounds)
+                        product_x, product_y = image_to_product_coords(
+                            int(cx), int(cy), result.raw_bounds, result.panel_polygon,
+                        )
                         nearest = nearest_point_distance(img_prefix, product_x, product_y)
                         if nearest is not None:
                             dist2, coord, dx, dy = nearest

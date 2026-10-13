@@ -69,6 +69,7 @@ from capi_inference import AOI_PASSTHROUGH_CODES, CAPIInferencer, ImageResult, T
 from capi_preprocess import (
     BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_geometry,
     panel_boundary_config_for_station,
+    map_image_coord_to_product,
 )
 from capi_station_adapter import (
     create_station_adapter,
@@ -944,23 +945,17 @@ def _image_to_product_coords(
     image_y: int,
     raw_bounds: Optional[Tuple[int, int, int, int]],
     product_resolution: Optional[Tuple[int, int]],
+    panel_polygon: Optional[np.ndarray] = None,
 ) -> Tuple[int, int]:
     if not raw_bounds:
         return int(image_x), int(image_y)
 
     product_w, product_h = product_resolution or (0, 0)
-    x_start, y_start, x_end, y_end = raw_bounds
-    panel_w = max(1, x_end - x_start)
-    panel_h = max(1, y_end - y_start)
-
     if product_w <= 0 or product_h <= 0:
         return int(image_x), int(image_y)
 
-    product_x = (float(image_x) - x_start) * product_w / panel_w
-    product_y = (float(image_y) - y_start) * product_h / panel_h
-    return (
-        max(0, min(product_w, int(round(product_x)))),
-        max(0, min(product_h, int(round(product_y)))),
+    return map_image_coord_to_product(
+        image_x, image_y, raw_bounds, (product_w, product_h), panel_polygon,
     )
 
 
@@ -1066,12 +1061,14 @@ def _format_qjpg_defect_record(
     image_prefix: str,
     raw_bounds: Optional[Tuple[int, int, int, int]],
     product_resolution: Optional[Tuple[int, int]],
+    panel_polygon: Optional[np.ndarray] = None,
 ) -> str:
     product_x, product_y = _image_to_product_coords(
         image_x,
         image_y,
         raw_bounds,
         product_resolution,
+        panel_polygon,
     )
     return _format_qjpg_product_defect_record(
         defect_code,
@@ -1164,6 +1161,7 @@ def _iter_qjpg_defect_records(
             or _image_prefix_for_report(result.image_path.name)
         )
         raw_bounds = getattr(result, "raw_bounds", None) or getattr(result, "otsu_bounds", None)
+        panel_polygon = getattr(result, "panel_polygon", None)
 
         if _is_white_frame_ng(result) and not bomb_only:
             for _side, _gap, image_x, image_y in _iter_white_frame_gaps(result):
@@ -1175,6 +1173,7 @@ def _iter_qjpg_defect_records(
                         "WHITEFRA",
                         raw_bounds,
                         product_resolution,
+                        panel_polygon,
                     )
                 )
 
@@ -1199,6 +1198,7 @@ def _iter_qjpg_defect_records(
                         image_prefix,
                         raw_bounds,
                         product_resolution,
+                        panel_polygon,
                     )
                     for image_x, image_y in real_feature_points
                 )
@@ -1239,6 +1239,7 @@ def _iter_qjpg_defect_records(
                         image_prefix,
                         raw_bounds,
                         product_resolution,
+                        panel_polygon,
                     )
                 )
 
@@ -1257,6 +1258,7 @@ def _iter_qjpg_defect_records(
                     image_prefix,
                     raw_bounds,
                     product_resolution,
+                    panel_polygon,
                 )
             )
 
