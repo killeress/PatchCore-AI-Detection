@@ -363,6 +363,58 @@ def test_qjpg_per_region_bomb_keeps_one_representative_coordinate(judgment):
     )
 
 
+@pytest.mark.parametrize("judgment", ["NG", "OK", "OK-i"])
+@pytest.mark.parametrize("source", ["", "aoi_real_region", "aoi_bomb_coordinate"])
+def test_qjpg_logged_standard_bombs_keep_matched_aoi_product_coordinates(judgment, source):
+    result = _image_result("STANDARD_125214.tif", mark_text="DF")
+    # Bounds reconstructed from the five AOI image anchors in T367F8P9NY11.
+    result.raw_bounds = (1031, 1167, 5528, 4269)
+    aoi_points = [(354, 235), (1481, 346), (360, 534), (1077, 569), (1803, 702)]
+    old_report_points = [(351, 210), (1476, 311), (358, 481), (1073, 512), (1798, 634)]
+    for index, ((px, py), (old_x, old_y)) in enumerate(zip(aoi_points, old_report_points)):
+        # Synthetic peaks reproduce the logged QJPG output; actual bomb peaks
+        # were not included in the field log.
+        ix = round(1031 + old_x * 4497 / 1920)
+        iy = round(1167 + old_y * 3102 / 1200)
+        tile = _tile(index, ix, iy)
+        tile.is_aoi_coord_tile = True
+        tile.aoi_product_x, tile.aoi_product_y = px, py
+        tile.anomaly_peak_source = source
+        tile.is_bomb = index > 0
+        if index == 0:
+            tile.bomb_remaining_points = [(ix, iy)]
+        result.anomaly_tiles.append((tile, .83, None))
+
+    response = build_qjpg_response(
+        {"glass_id": "T367F8P9NY11", "model_id": "GN133JCAEFKUS"},
+        judgment, [result], CAPIConfig(),
+    )
+    real_ng = "PCDK20035100210STANDARD" if judgment == "NG" else ""
+    assert response == (
+        "@QJPG-T367F8P9NY11;OK;DF;NG" + real_ng
+        + "PCDK30148100346STANDARDPCDK30036000534STANDARD"
+        "PCDK30107700569STANDARDPCDK30180300702STANDARD,"
+    )
+
+
+@pytest.mark.parametrize("source,aoi_point", [
+    ("bomb_region", (100, 100)),  # A neighboring bomb was found by core evidence.
+    ("aoi_real_region", (-1, 100)),
+    ("aoi_real_region", (100, -1)),
+])
+def test_qjpg_bomb_without_matched_aoi_anchor_keeps_peak(source, aoi_point):
+    result = _image_result("STANDARD_125214.tif")
+    tile = _tile(1, 600, 450)
+    tile.is_aoi_coord_tile = tile.is_bomb = True
+    tile.aoi_product_x, tile.aoi_product_y = aoi_point
+    tile.anomaly_peak_source = source
+    result.anomaly_tiles = [(tile, .8, None)]
+
+    assert build_qjpg_response({"glass_id": "G1"}, "OK", [result], CAPIConfig()) == (
+        "@QJPG-G1;OK;EJ;NGPCDK30096000540STANDARD,"
+    )
+
+
 def test_qjpg_two_stage_features_take_precedence_over_per_region_peaks():
     result = _image_result("WGF50500_054624.tif")
     tile = _tile(1, 600, 450)

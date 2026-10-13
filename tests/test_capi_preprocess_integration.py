@@ -319,6 +319,7 @@ def test_preprocess_panel_folder_default_keeps_legacy_candidate_flow(monkeypatch
         config,
         reference_polygon=None,
         reference_bbox=None,
+        reference_grid_bbox=None,
     ):
         preprocess_calls.append((lighting, reference_polygon is not None))
         detected_polygon = (
@@ -379,6 +380,7 @@ def test_preprocess_panel_folder_prioritizes_w0f_reference(monkeypatch, tmp_path
         config,
         reference_polygon=None,
         reference_bbox=None,
+        reference_grid_bbox=None,
     ):
         preprocess_calls.append((lighting, reference_polygon is not None, reference_bbox))
         polygon = reference_polygon if reference_polygon is not None else polygons[lighting]
@@ -435,6 +437,7 @@ def test_preprocess_panel_folder_uses_boundary_only_w0f_reference(monkeypatch, t
         config,
         reference_polygon=None,
         reference_bbox=None,
+        reference_grid_bbox=None,
     ):
         preprocess_calls.append(
             (lighting, reference_polygon is not None, reference_bbox)
@@ -492,6 +495,7 @@ def test_preprocess_panel_folder_small_occupancy_uses_legacy_flow(monkeypatch, t
         config,
         reference_polygon=None,
         reference_bbox=None,
+        reference_grid_bbox=None,
     ):
         preprocess_calls.append(
             (
@@ -563,6 +567,7 @@ def test_preprocess_panel_folder_fallbacks_are_boundary_only(monkeypatch, tmp_pa
         config,
         reference_polygon=None,
         reference_bbox=None,
+        reference_grid_bbox=None,
     ):
         preprocess_calls.append(lighting)
         return PanelPreprocessResult(
@@ -624,6 +629,7 @@ def test_preprocess_panel_folder_uses_raw_bbox_when_all_polygons_fail(
         config,
         reference_polygon=None,
         reference_bbox=None,
+        reference_grid_bbox=None,
     ):
         preprocess_calls.append((lighting, reference_polygon, reference_bbox))
         return PanelPreprocessResult(

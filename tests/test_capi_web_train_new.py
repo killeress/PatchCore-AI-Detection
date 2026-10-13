@@ -2348,7 +2348,7 @@ def test_handle_train_new_preprocess_preview_cache_depends_on_source_mtime(tmp_p
     assert len(sent_paths) == 2
     assert len(captured_configs) == 2
     assert all(cfg.recover_failed_raw_boundary for cfg in captured_configs)
-    assert all("_v15_" in path.name for path in sent_paths)
+    assert all("_v16_" in path.name for path in sent_paths)
     assert sent_paths[0].name != sent_paths[1].name
     assert sent_paths[0].exists()
     assert sent_paths[1].exists()

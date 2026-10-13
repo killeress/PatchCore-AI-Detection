@@ -1204,7 +1204,17 @@ def _iter_qjpg_defect_records(
                 )
                 continue
             if (
-                getattr(tile, "anomaly_peak_source", "") == "aoi_report_fallback"
+                (
+                    getattr(tile, "anomaly_peak_source", "") == "aoi_report_fallback"
+                    or (
+                        getattr(tile, "is_bomb", False)
+                        and getattr(tile, "is_aoi_coord_tile", False)
+                        # AOI-matched bombs must use the product coordinate that
+                        # passed matching, not a displaced heatmap peak. A core-only
+                        # match may belong to a neighboring bomb, so keep its peak.
+                        and getattr(tile, "anomaly_peak_source", "") != "bomb_region"
+                    )
+                )
                 and getattr(tile, "aoi_product_x", -1) >= 0
                 and getattr(tile, "aoi_product_y", -1) >= 0
             ):

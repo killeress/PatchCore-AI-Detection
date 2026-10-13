@@ -17364,7 +17364,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return {"name": path.name, "mtime_ns": 0, "size": 0}
 
         cache_payload = {
-            "version": 15,
+            "version": 16,
             "lighting": lighting,
             "panel_dir": str(preview_panel_dir.resolve()),
             "files": {
@@ -17383,7 +17383,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v15_{cache_key}.jpg"
+        preview_path = preview_dir / f"{lighting}_v16_{cache_key}.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return

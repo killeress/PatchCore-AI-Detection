@@ -1244,12 +1244,14 @@ def preprocess_panel_image(
     config: PreprocessConfig,
     reference_polygon: Optional[np.ndarray] = None,
     reference_bbox: Optional[Tuple[int, int, int, int]] = None,
+    reference_grid_bbox: Optional[Tuple[int, int, int, int]] = None,
 ) -> PanelPreprocessResult:
     """單張 lighting 圖完整前處理。
 
     預設維持既有流程：模型影像前處理後才偵測 boundary。
     large_panel_raw_boundary_enabled 讓符合占比門檻的 CAPI/AAPI 大面板
     先從 raw image 抓邊。
+    reference_grid_bbox 僅固定切圖格線，不取代各光源的 AOI foreground_bbox。
     """
     img = read_detection_image(image_path, cv2.IMREAD_GRAYSCALE, config.rotate_180)
     if img is None:
@@ -1413,9 +1415,19 @@ def preprocess_panel_image(
 
     tiles = []
     if config.generate_grid_tiles:
+        # Lightings share polygon geometry, so they must also share the grid
+        # origin/span. Keep the per-lighting foreground bbox for AOI mapping.
+        grid_bbox = reference_grid_bbox if reference_grid_bbox is not None else bbox
+        gx1, gy1, gx2, gy2 = grid_bbox
+        if not (0 <= gx1 < gx2 <= img.shape[1] and 0 <= gy1 < gy2 <= img.shape[0]):
+            logger.warning(
+                "[grid] %s: reference bbox %s outside image %s; using local bbox",
+                image_path.name, grid_bbox, img.shape[:2],
+            )
+            grid_bbox = bbox
         tiles = _generate_tiles(
             img,
-            bbox,
+            grid_bbox,
             polygon,
             config,
             original_img=original_img,
@@ -1522,6 +1534,11 @@ def _preprocess_panel_folder_legacy(
             lighting,
             config,
             reference_polygon=ref_result.panel_polygon,
+            reference_grid_bbox=(
+                ref_result.foreground_bbox
+                if config.generate_grid_tiles and ref_result.panel_polygon is not None
+                else None
+            ),
         )
     return results
 
@@ -1608,6 +1625,12 @@ def preprocess_panel_folder(
                 and all(result.polygon_detection_failed for result in legacy_results.values())
             ):
                 recovered = 0
+                recovery_grid_bbox = next(
+                    (result.foreground_bbox for result in legacy_results.values()
+                     if result.foreground_bbox[2] > result.foreground_bbox[0]
+                     and result.foreground_bbox[3] > result.foreground_bbox[1]),
+                    None,
+                )
                 for lighting, result in legacy_results.items():
                     x1, y1, x2, y2 = result.foreground_bbox
                     if x2 <= x1 or y2 <= y1:
@@ -1620,6 +1643,7 @@ def preprocess_panel_folder(
                             files[lighting], lighting,
                             replace(config, large_panel_raw_boundary_enabled=False),
                             reference_polygon=candidate_polygon.copy(),
+                            reference_grid_bbox=recovery_grid_bbox,
                         )
                     else:
                         result.panel_polygon = candidate_polygon.copy()
@@ -1695,6 +1719,11 @@ def preprocess_panel_folder(
             config,
             reference_polygon=ref_polygon,
             reference_bbox=cached_reference_bbox,
+            reference_grid_bbox=(
+                ref_bbox
+                if config.generate_grid_tiles and ref_polygon is not None
+                else None
+            ),
         )
     return results
 
