@@ -57,6 +57,52 @@ def resolve_aoi_inward_shift_axes(
     return "xy"
 
 
+def _aoi_mapping_geometry(raw_bounds, panel_polygon):
+    """Detect area contamination and protrusions along a single image axis."""
+    if panel_polygon is None:
+        return None, 1.0, False
+    polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
+    if (polygon.shape != (4, 2) or not np.isfinite(polygon).all()
+            or not cv2.isContourConvex(polygon)):
+        return None, 1.0, False
+    width = max(1, raw_bounds[2] - raw_bounds[0])
+    height = max(1, raw_bounds[3] - raw_bounds[1])
+    coverage = abs(float(cv2.contourArea(polygon))) / (width * height)
+    span = np.ptp(polygon, axis=0)
+    # A 9% bottom protrusion still passes the historical 90% area check.
+    # Use the polygon when either raw axis includes >5% extra extent; small
+    # boundary refinement differences retain the existing linear mapping.
+    contaminated = coverage < 0.90 or span[0] / width < 0.95 or span[1] / height < 0.95
+    return polygon, coverage, bool(contaminated)
+
+
+def map_image_coord_to_product(
+    image_x: int,
+    image_y: int,
+    raw_bounds: Tuple[int, int, int, int],
+    product_resolution: Tuple[int, int],
+    panel_polygon: Optional[np.ndarray] = None,
+) -> Tuple[int, int]:
+    """Report image peaks using the same contaminated-bound correction as AOI crops."""
+    width, height = product_resolution
+    x1, y1, x2, y2 = raw_bounds
+    px = (float(image_x) - x1) * width / max(1, x2 - x1)
+    py = (float(image_y) - y1) * height / max(1, y2 - y1)
+    try:
+        polygon, _coverage, contaminated = _aoi_mapping_geometry(raw_bounds, panel_polygon)
+        if polygon is not None and contaminated:
+            target = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+            transform = cv2.getPerspectiveTransform(polygon, target)
+            mapped = cv2.perspectiveTransform(
+                np.array([[[float(image_x), float(image_y)]]], dtype=np.float32), transform,
+            )[0, 0]
+            if np.isfinite(mapped).all():
+                px, py = float(mapped[0]), float(mapped[1])
+    except (cv2.error, TypeError, ValueError):
+        pass
+    return max(0, min(width, int(round(px)))), max(0, min(height, int(round(py))))
+
+
 def map_product_coord_to_image(
     px: int,
     py: int,
@@ -86,16 +132,15 @@ def map_product_coord_to_image(
         return img_x, img_y
 
     try:
-        polygon = np.asarray(panel_polygon, dtype=np.float32).reshape(-1, 2)
-        if polygon.shape != (4, 2) or not np.isfinite(polygon).all():
+        polygon, polygon_coverage, raw_bounds_contaminated = _aoi_mapping_geometry(
+            raw_bounds, panel_polygon,
+        )
+        if polygon is None:
             return img_x, img_y
 
         raw_distance = float(cv2.pointPolygonTest(
             polygon, (float(img_x), float(img_y)), True,
         ))
-        raw_area = float(max(1, product_img_width * product_img_height))
-        polygon_coverage = abs(float(cv2.contourArea(polygon))) / raw_area
-        raw_bounds_contaminated = polygon_coverage < 0.90
         if raw_distance >= -1.0 and not raw_bounds_contaminated:
             return img_x, img_y
 
@@ -138,7 +183,7 @@ class PreprocessConfig:
     tile_stride: int = 512
     otsu_offset: int = 5
     enable_panel_polygon: bool = True
-    edge_threshold_px: int = 768  # retained for config compatibility; zone split uses anchor distance <= tile_size / 2
+    edge_threshold_px: int = 768  # compatibility only; grid zones also check full tile clearance
     coverage_min: float = 0.3
     # Edge 取樣 anchor 仍可往 panel 外推半個 tile，但實際 ROI 會再依 polygon 往產品
     # 內側推回來，避免 edge.pt 學到黑色背景邊界。
@@ -485,6 +530,41 @@ def filter_panel_lighting_files(
     return result
 
 
+def isolate_panel_foreground(
+    binary: np.ndarray,
+    *,
+    min_area: Optional[float] = 1000,
+) -> Tuple[Optional[Tuple[int, int, int, int]], np.ndarray]:
+    """Keep the main panel contour, excluding disconnected lamps/reflections.
+
+    The same foreground must define both the bbox and the polygon edge samples.
+    Preserve holes inside the panel and leave the caller's mask untouched.
+    """
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, np.zeros_like(binary)
+    contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(contour)
+    if min_area is not None and area <= min_area:
+        return None, np.zeros_like(binary)
+
+    x, y, width, height = cv2.boundingRect(contour)
+    bounds = (x, y, x + width, y + height)
+    panel_mask = np.zeros_like(binary)
+    cv2.drawContours(panel_mask, [contour], -1, 255, thickness=cv2.FILLED)
+    cv2.bitwise_and(binary, panel_mask, dst=panel_mask)
+    ignored = sum(
+        1 for other in contours
+        if min_area is None or cv2.contourArea(other) > min_area
+    ) - 1
+    if ignored:
+        logger.info(
+            "[boundary] panel_foreground bbox=%s area=%.1f ignored_components=%d",
+            bounds, area, ignored,
+        )
+    return bounds, panel_mask
+
+
 def detect_panel_polygon(
     image: np.ndarray,
     config: PreprocessConfig,
@@ -510,26 +590,12 @@ def detect_panel_polygon(
         kernel = np.ones((15, 15), np.uint8)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return None, None
-        min_area = 1000
-        xs = []
-        ys = []
-        for c in contours:
-            if cv2.contourArea(c) <= min_area:
-                continue
-            x, y, w, h = cv2.boundingRect(c)
-            xs.extend((x, x + w))
-            ys.extend((y, y + h))
-        if not xs or not ys:
+        panel_bounds, binary = isolate_panel_foreground(binary)
+        if panel_bounds is None:
             return None, None
 
         img_h, img_w = binary.shape[:2]
-        raw_x1 = max(0, min(xs))
-        raw_y1 = max(0, min(ys))
-        raw_x2 = min(img_w, max(xs))
-        raw_y2 = min(img_h, max(ys))
+        raw_x1, raw_y1, raw_x2, raw_y2 = panel_bounds
         top_y = _find_low_contrast_upper_boundary(
             gray,
             (raw_x1, raw_y1, raw_x2, raw_y2),
@@ -567,13 +633,14 @@ def detect_panel_polygon(
     else:
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
+        panel_bounds, binary = isolate_panel_foreground(binary, min_area=None)
+        if panel_bounds is None:
             return None, None
-        c = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(c)
+        raw_x1, raw_y1, raw_x2, raw_y2 = panel_bounds
         offset = config.otsu_offset
-        x1, y1, x2, y2 = x + offset, y + offset, x + w - offset, y + h - offset
+        x1, y1, x2, y2 = (
+            raw_x1 + offset, raw_y1 + offset, raw_x2 - offset, raw_y2 - offset,
+        )
     bbox = (x1, y1, x2, y2)
 
     if not config.enable_panel_polygon:
@@ -982,7 +1049,7 @@ def classify_tile_zone(
     polygon: Optional[np.ndarray],
     config: PreprocessConfig,
 ) -> Tuple[str, float, float, Optional[np.ndarray]]:
-    """以 tile 中心到 polygon 的距離決定 zone，並計算 coverage / mask。
+    """依中心及完整 tile 與邊界的距離決定 zone，並計算 coverage / mask。
 
     Returns: (zone, coverage, center_dist_to_edge, mask)
         - zone: "inner" | "edge" | "outside"
@@ -1010,14 +1077,33 @@ def classify_tile_zone(
     # 訓練圖沒有缺陷點，以 tile 中心作為與推論缺陷中心等價的 anchor。
     cx = (x1 + x2) / 2.0
     cy = (y1 + y2) / 2.0
-    # bbox grid 會受 otsu_offset 向產品內縮；補回這段偵測偏移後，實際分界仍是
-    # anchor 距真實 panel 邊界半個 tile。AOI 缺陷中心不經 bbox grid，無此補償。
+    # bbox grid 會受 otsu_offset 向產品內縮，既有中心規則需補回這段偵測偏移；
+    # 完整切片的跨邊與擬合容差另於下方檢查。AOI 缺陷中心不經 bbox grid。
     grid_edge_distance = config.tile_size / 2.0 + max(
         0.0, float(getattr(config, "otsu_offset", 0)),
     )
     zone, signed_center_dist = classify_anchor_zone(
         (cx, cy), polygon, grid_edge_distance,
     )
+    if zone == "inner":
+        # A square's corner can cross a slanted edge even when its centre is
+        # more than half a tile from the polygon. Classify before inward shift
+        # and zone-specific preprocessing so such samples never train INNER.
+        fit_ratio = MAX_EDGE_RESIDUAL_P95_RATIO
+        if config.large_panel_raw_boundary_enabled:
+            fit_ratio = max(fit_ratio, config.raw_boundary_max_edge_residual_p95_ratio)
+        edge_clearance = max(0.0, float(config.otsu_offset)) + max(
+            MIN_EDGE_RESIDUAL_P95_PX, float(config.tile_size) * fit_ratio,
+        )
+        corners = ((x1, y1), (x2 - 1, y1), (x2 - 1, y2 - 1), (x1, y2 - 1))
+        corner_distance = min(
+            cv2.pointPolygonTest(
+                np.asarray(polygon, dtype=np.float32), (float(x), float(y)), True,
+            )
+            for x, y in corners
+        )
+        if coverage < 1.0 or corner_distance <= edge_clearance:
+            zone = "edge"
     center_dist = abs(signed_center_dist)
     output_mask = mask if coverage < 1.0 - 1e-6 else None
     return zone, coverage, center_dist, output_mask

@@ -13847,6 +13847,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             _stored_machine_judgment_for_record, _white_frame_image_result,
             _has_white_frame_ng, _serialize_aoi_machine_coords, parse_request,
             _white_frame_aoi_kwargs, _link_white_frame_white_screen,
+            build_qjpg_response, AOI_PASSTHROUGH_CODES,
         )
         from capi_station_adapter import create_station_adapter
         from capi_white_frame import inspect_white_frame_image
@@ -14146,7 +14147,27 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             else:
                 error_message = ai_judgment if ai_judgment.startswith("ERR") else ""
 
+            # A rerun has no TCP client connection. Show the newly generated
+            # payload separately, preserving the original sent response as history.
+            preview_context = {
+                "glass_id": detail.get("glass_id", ""),
+                "model_id": model_id,
+                "aoi_passthrough_records": [
+                    f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}"
+                    for defects in (aoi_report or {}).values() for d in defects
+                    if d.defect_code in AOI_PASSTHROUGH_CODES
+                ],
+            }
+            response_preview = build_qjpg_response(
+                preview_context, ai_judgment, results, inferencer.config,
+            )
+            preview_note = (
+                f"[RERUN_RESPONSE_PREVIEW] 本次回覆預覽（未傳送 Client；原始通訊紀錄保留）: "
+                f"{response_preview}"
+            )
             inference_log = InferenceLogCapture.stop_capture()
+            inference_log = f"{(inference_log or '').rstrip()}\n{preview_note}".strip()
+            logger.info(preview_note)
             if within_spec_info:
                 within_spec_note = _format_within_spec_inference_note(within_spec_info, WITHIN_SPEC_LOGS_URL)
                 inference_log = f"{(inference_log or '').rstrip()}\n{within_spec_note}".strip()
@@ -17364,7 +17385,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return {"name": path.name, "mtime_ns": 0, "size": 0}
 
         cache_payload = {
-            "version": 16,
+            "version": 18,
             "lighting": lighting,
             "panel_dir": str(preview_panel_dir.resolve()),
             "files": {
@@ -17383,7 +17404,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
         preview_dir = Path(".tmp/train_new_thumbs") / job_id / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = preview_dir / f"{lighting}_v16_{cache_key}.jpg"
+        preview_path = preview_dir / f"{lighting}_v18_{cache_key}.jpg"
         if preview_path.exists():
             self._send_binary(str(preview_path))
             return

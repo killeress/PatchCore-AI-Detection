@@ -30,6 +30,50 @@ def make_inferencer():
     return inferencer
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("extra_defect", [False, True])
+def test_capi14_protruding_bounds_do_not_leave_first_bomb_as_ng(version, extra_defect, monkeypatch):
+    from test_aoi_coordinate_mapping import FIELD_BOUNDS, FIELD_POLYGON
+    from capi_server import _iter_qjpg_defect_records
+
+    inferencer = make_inferencer()
+    tile = make_tile(0, (354, 235), (1860, 1774))
+    tile.anomaly_peak_source = ""
+    # Synthetic heat crosses the old tolerance top (image y=1712), matching
+    # the logged peak at (1854,1710). The original anomaly map is unavailable.
+    amap = np.zeros((512, 512), dtype=np.float32)
+    amap[189:204, 247:254] = .8
+    amap[192, 250] = .821
+    if extra_defect:
+        amap[238:245, 383:390] = .7
+    # Supply the already classified REAL cores, as the dust stage does in
+    # production; this test isolates bomb geometry from top-percent selection.
+    tile.dust_heatmap_binary = (amap > 0).astype(np.uint8) * 255
+    tile.dust_region_details = [dict(
+        label_id=1, is_dust=False, max_score=.821, peak_yx=(192, 250), area=105,
+    )]
+    if extra_defect:
+        tile.dust_region_details.append(dict(
+            label_id=2, is_dust=False, max_score=.7, peak_yx=(238, 383), area=49,
+        ))
+    result = make_result([tile])
+    result.raw_bounds = result.otsu_bounds = FIELD_BOUNDS
+    result.panel_polygon = FIELD_POLYGON.copy()
+    result.anomaly_tiles = [(tile, .821, amap)]
+    bomb_info = dict(image_prefix="STANDARD", defect_type="point", coordinates=[(350, 231)])
+
+    apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
+
+    assert tile.is_bomb is (not extra_defect)
+    records = _iter_qjpg_defect_records([result], RESOLUTION, inferencer.config)
+    if extra_defect:
+        assert tile.bomb_remaining_points
+        assert records and all(record.startswith("PCDK2") for record in records)
+    else:
+        assert tile.bomb_remaining_points == []
+        assert records == ["PCDK30035100232STANDARD"]
+
+
 def make_tile(index, product_point, image_point):
     px, py = product_point
     ix, iy = image_point

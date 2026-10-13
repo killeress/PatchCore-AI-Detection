@@ -29,10 +29,17 @@ def test_rerun_passes_stored_request_context_to_inference(
     expected_report_payload,
 ):
     import capi_server
+    from capi_config import CAPIConfig
+    from test_qjpg_report_response import _image_result, _tile
     from capi_web import CAPIWebHandler
 
-    result = SimpleNamespace(edge_defects=[], preprocess_steps=[])
+    result = _image_result("STANDARD_125214.tif", mark_text="DF")
+    bomb = _tile(1, 600, 450)
+    bomb.is_bomb = bomb.is_aoi_coord_tile = True
+    bomb.aoi_product_x, bomb.aoi_product_y = 1481, 346
+    result.anomaly_tiles = [(bomb, .818, None)]
     inferencer = MagicMock()
+    inferencer.config = CAPIConfig()
     inferencer.config.side_white_detection_enabled = False
     inferencer.config.image_preprocess_pipeline = []
     inferencer.process_panel.return_value = (
@@ -96,6 +103,7 @@ def test_rerun_passes_stored_request_context_to_inference(
             "resolution_y": 1080,
             "client_bomb_info": "",
             "client_request_text": client_request_text,
+            "client_response_text": "original sent response",
             "heatmap_dir": "",
         },
     )
@@ -116,6 +124,11 @@ def test_rerun_passes_stored_request_context_to_inference(
         inferencer._parse_aoi_report_txt.assert_not_called()
     assert CAPIWebHandler._rerun_tasks[7]["status"] == "done"
     db.update_record_for_rerun.assert_called_once()
+    saved = db.update_record_for_rerun.call_args.kwargs
+    assert "client_response_text" not in saved
+    assert "[RERUN_RESPONSE_PREVIEW]" in saved["inference_log"]
+    assert "未傳送 Client" in saved["inference_log"]
+    assert "@QJPG-PANEL001;OK;DF;NGPCDK30148100346STANDARD," in saved["inference_log"]
 
 
 @pytest.mark.parametrize("profile,new_arch,grid,use_lock,fast", [
@@ -144,7 +157,7 @@ def test_rerun_keeps_cache_through_decision_and_saves_deferred_visuals(
                              aoi_coord_inspection_enabled=True, image_preprocess_pipeline=[])
     inferencer = SimpleNamespace(config=config, station_adapter=create_station_adapter(profile))
     lock = threading.Lock() if use_lock else None
-    result = SimpleNamespace(edge_defects=[], preprocess_steps=[])
+    result = SimpleNamespace(edge_defects=[], preprocess_steps=[], image_path=path)
     pending = {"pending": True}
     jobs = [{"kwargs": {}, "result": pending}]
     info = {"status": "within_spec" if converted else "not_within_spec", "converted": converted,
