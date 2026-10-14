@@ -80,6 +80,95 @@ def test_detect_panel_mark_top_right_bo_low_contrast():
     assert result["orientation"] == "normal"
 
 
+def test_existing_mark_success_does_not_detect_panel_bounds(monkeypatch):
+    image = np.full((768, 1024), 160, dtype=np.uint8)
+    _draw_mark(image, "EJ", 790, 150)
+
+    def unexpected_fallback(*args, **kwargs):
+        pytest.fail("panel-relative search must only run after all original searches fail")
+
+    monkeypatch.setattr(mark_detector, "_detect_panel_relative_mark", unexpected_fallback)
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "EJ"
+    assert result["search_pass"] == "primary"
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_panel_relative_mark_search_for_small_displaced_panel(rotated, monkeypatch):
+    image = np.zeros((2048, 3072), dtype=np.uint8)
+    image[700:1900, 400:2300] = 160
+    # A disconnected reflection must not expand the panel's bounding box.
+    image[200:260, 2800:2860] = 220
+    _draw_mark(image, "C4", 2000, 1000, cell=6, gap=8, radius=3, pixel_value=100)
+    if rotated:
+        image = cv2.rotate(image, cv2.ROTATE_180)
+
+    with monkeypatch.context() as original_search_only:
+        original_search_only.setattr(mark_detector, "_detect_panel_relative_mark", lambda *args: [])
+        assert detect_panel_mark(image)["found"] is False
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "C4"
+    assert result["search_pass"].startswith("panel_relative")
+    assert result["roi"] == ("bottom_left" if rotated else "top_right")
+    assert result["orientation"] == ("rot180" if rotated else "normal")
+    expected_x, expected_y = (1004, 1008) if rotated else (1997, 997)
+    assert result["bbox"]["x"] == pytest.approx(expected_x, abs=3)
+    assert result["bbox"]["y"] == pytest.approx(expected_y, abs=3)
+
+
+@pytest.mark.parametrize("has_panel", [False, True])
+def test_panel_relative_search_rejects_empty_image_or_unmarked_panel(has_panel):
+    image = np.zeros((768, 1024), dtype=np.uint8)
+    if has_panel:
+        image[250:700, 150:750] = 160
+
+    assert detect_panel_mark(image)["found"] is False
+
+
+def test_real_displaced_panel_mark_reads_c4(monkeypatch):
+    import base64
+    from capi_mark_shadow import build_mark_shadow_payload
+
+    path = _ROOT / "W0F00000_132756.tif"
+    if not path.exists():
+        pytest.skip(f"real mark fixture not available: {path}")
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    assert image is not None
+
+    with monkeypatch.context() as original_search_only:
+        original_search_only.setattr(mark_detector, "_detect_panel_relative_mark", lambda *args: [])
+        assert detect_panel_mark(image)["found"] is False
+
+    result = detect_panel_mark(image, include_debug=True)
+
+    assert result["found"] is True
+    assert result["text"] == "C4"
+    assert result["search_pass"] == "panel_relative_low_contrast"
+    assert result["roi"] == "top_right"
+    assert result["orientation"] == "normal"
+    for key, expected in zip(("x", "y", "width", "height"), (4607, 1945, 136, 58)):
+        assert result["bbox"][key] == pytest.approx(expected, abs=3)
+    assert result["_debug_images"]["crop"].size > 0
+
+    # Formal text comes from PaddleOCR: verify its actual payload uses raw
+    # pixels and contains both complete glyphs, including their faint edges.
+    payload = build_mark_shadow_payload(image, result, path)
+    box = payload["crop_bbox"]
+    x, y, width, height = (box[key] for key in ("x", "y", "width", "height"))
+    assert x <= 4601 and y <= 1940
+    assert x + width >= 4745 and y + height >= 2007
+    crop = cv2.imdecode(
+        np.frombuffer(base64.b64decode(payload["image_png_base64"]), dtype=np.uint8),
+        cv2.IMREAD_UNCHANGED,
+    )
+    np.testing.assert_array_equal(crop, image[y:y + height, x:x + width])
+
+
 @pytest.mark.parametrize("rotated", [False, True])
 @pytest.mark.parametrize("gap", [4, 8])
 def test_detect_panel_mark_connected_strokes(rotated, gap):

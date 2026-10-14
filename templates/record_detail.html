@@ -287,6 +287,10 @@
             <td>{{ detail.machine_no }}</td>
         </tr>
         <tr>
+            <th>推論程式版本</th>
+            <td>{{ detail.app_version | default('未記錄', true) | e }}</td>
+        </tr>
+        <tr>
             <th>解析度</th>
             <td>{{ detail.resolution_x }} x {{ detail.resolution_y }}</td>
         </tr>

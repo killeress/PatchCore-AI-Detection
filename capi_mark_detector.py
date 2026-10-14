@@ -272,6 +272,9 @@ def detect_panel_mark(
             break
 
     if not candidates:
+        candidates = _detect_panel_relative_mark(gray, profile_index)
+
+    if not candidates:
         return {
             "found": False,
             "message": "no dot-matrix mark candidate found",
@@ -287,6 +290,45 @@ def detect_panel_mark(
         public["_debug_images"] = _make_debug_images(gray, best)
 
     return public
+
+
+def _detect_panel_relative_mark(
+    gray: np.ndarray,
+    profile_index: Dict[Tuple[int, str], Tuple[np.ndarray, ...]],
+) -> List[Dict[str, Any]]:
+    """Retry camera-corner misses using the actual panel's corner regions."""
+    from capi_preprocess import isolate_panel_foreground
+
+    height, width = gray.shape[:2]
+    with timed_inference_stage("mark_panel_bounds"):
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        closing = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        bounds, _ = isolate_panel_foreground(closing)
+    if bounds is None or bounds == (0, 0, width, height):
+        return []
+
+    panel_x1, panel_y1, panel_x2, panel_y2 = bounds
+    panel_width, panel_height = panel_x2 - panel_x1, panel_y2 - panel_y1
+    candidates: List[Dict[str, Any]] = []
+    for low_contrast in (False, True):
+        search_pass = "panel_relative_low_contrast" if low_contrast else "panel_relative"
+        with timed_inference_stage(f"mark_{search_pass}"):
+            for roi_name, ratios in _ROI_RATIOS:
+                x1, y1, x2, y2 = _roi_from_ratios(panel_width, panel_height, ratios)
+                x1, x2 = x1 + panel_x1, x2 + panel_x1
+                y1, y2 = y1 + panel_y1, y2 + panel_y1
+                candidate = _detect_roi(
+                    gray[y1:y2, x1:x2], x1, y1, width, height, roi_name, profile_index,
+                    low_contrast=low_contrast,
+                    refine_low_contrast=True,
+                )
+                if candidate is not None:
+                    candidate["search_pass"] = search_pass
+                    candidates.append(candidate)
+        if candidates:
+            break
+    return candidates
 
 
 def detect_hm_panel_mark(
@@ -463,6 +505,7 @@ def _detect_roi(
     profile_index: Dict[Tuple[int, str], Tuple[np.ndarray, ...]],
     *,
     low_contrast: bool = False,
+    refine_low_contrast: bool = False,
 ) -> Optional[Dict[str, Any]]:
     filtered = (
         _low_contrast_stroke_mask(roi, min(full_width, full_height))
@@ -486,6 +529,19 @@ def _detect_roi(
                 allow_connected_chars=True,
             )
         )
+
+    elif refine_low_contrast:
+        # Smoothed strokes locate faint glyphs, but can close a C into a B.
+        # Prefer local Otsu on the original pixels for recognition when it
+        # yields a valid overlapping group; retain faint seeds otherwise.
+        refined_groups = []
+        for group in groups:
+            refined = _refine_mark_groups(
+                roi, [group], offset_x, offset_y, full_width, full_height,
+                allow_connected_chars=True,
+            )
+            refined_groups.extend(refined or [group])
+        groups = refined_groups
 
     best: Optional[Dict[str, Any]] = None
     for group in groups:
