@@ -28,9 +28,57 @@ def test_missing_panel_uses_next_calendar_day(tmp_path, original, next_day):
     assert resolved == actual
 
 
+@pytest.mark.parametrize("original,previous_day", [
+    ("20260923", "20260922"),
+    ("20261001", "20260930"),
+    ("20270101", "20261231"),
+    ("20280229", "20280228"),
+    ("20280301", "20280229"),
+])
+def test_missing_next_day_uses_previous_calendar_day(tmp_path, original, previous_day):
+    model = tmp_path / "CAPI03" / "yuantu" / "GN160JCA5020S"
+    requested = model / original / "YQ702J206D14"
+    actual = model / previous_day / requested.name
+    actual.mkdir(parents=True)
+
+    selected, resolved = capi_server.resolve_panel_image_directory(str(requested), {})
+
+    assert selected == str(actual)
+    assert resolved == actual
+
+
+def test_next_day_directory_wins_over_previous_day(tmp_path):
+    original = tmp_path / "MODEL" / "20260923" / "GLASS"
+    next_day = original.parent.parent / "20260924" / original.name
+    previous_day = original.parent.parent / "20260922" / original.name
+    next_day.mkdir(parents=True)
+    previous_day.mkdir(parents=True)
+    (previous_day / "W0F00000.tif").write_bytes(b"previous day")
+
+    assert capi_server.resolve_panel_image_directory(str(original), {}) == (
+        str(next_day), next_day,
+    )
+
+
+def test_next_day_file_allows_previous_day_directory(tmp_path):
+    original = tmp_path / "MODEL" / "20260923" / "GLASS"
+    next_day = original.parent.parent / "20260924" / original.name
+    next_day.parent.mkdir(parents=True)
+    next_day.write_text("not a directory")
+    previous_day = original.parent.parent / "20260922" / original.name
+    previous_day.mkdir(parents=True)
+
+    assert capi_server.resolve_panel_image_directory(str(original), {}) == (
+        str(previous_day), previous_day,
+    )
+
+
 @pytest.mark.parametrize("separator", ["/", "\\"])
-def test_unc_mapping_preserves_client_path_and_trailing_separator(tmp_path, separator):
-    actual = tmp_path / "TIANMU" / "yuantu" / "MODEL" / "20260924" / "GLASS"
+@pytest.mark.parametrize("candidate_date", ["20260924", "20260922"])
+def test_unc_mapping_preserves_client_path_and_trailing_separator(
+    tmp_path, separator, candidate_date,
+):
+    actual = tmp_path / "TIANMU" / "yuantu" / "MODEL" / candidate_date / "GLASS"
     actual.mkdir(parents=True)
     requested = "//aoi/d/TIANMU/yuantu/MODEL/20260923/GLASS/".replace("/", separator)
 
@@ -38,16 +86,19 @@ def test_unc_mapping_preserves_client_path_and_trailing_separator(tmp_path, sepa
         requested, {"//aoi/d": str(tmp_path)},
     )
 
-    assert selected == requested.replace("20260923", "20260924")
+    assert selected == requested.replace("20260923", candidate_date)
     assert resolved == actual
 
 
 def test_existing_original_directory_always_wins_even_if_empty(tmp_path):
     original = tmp_path / "MODEL" / "20260923" / "GLASS"
     next_day = tmp_path / "MODEL" / "20260924" / "GLASS"
+    previous_day = tmp_path / "MODEL" / "20260922" / "GLASS"
     original.mkdir(parents=True)
     next_day.mkdir(parents=True)
+    previous_day.mkdir(parents=True)
     (next_day / "W0F00000.tif").write_bytes(b"next day")
+    (previous_day / "W0F00000.tif").write_bytes(b"previous day")
 
     assert capi_server.resolve_panel_image_directory(str(original), {}) == (
         str(original), original,
@@ -70,12 +121,13 @@ def test_only_immediate_parent_date_is_changed(tmp_path):
     )
 
 
-def test_fallback_cannot_change_mapping_to_another_machine(tmp_path):
+@pytest.mark.parametrize("candidate_date", ["20260924", "20260922"])
+def test_fallback_cannot_change_mapping_to_another_machine(tmp_path, candidate_date):
     original = "//aoi/d/MODEL/20260923/GLASS"
-    other = tmp_path / "CAPI04" / "MODEL" / "20260924" / "GLASS"
+    other = tmp_path / "CAPI04" / "MODEL" / candidate_date / "GLASS"
     other.mkdir(parents=True)
     mapping = {
-        "//aoi/d/MODEL/20260924": str(other.parent),
+        f"//aoi/d/MODEL/{candidate_date}": str(other.parent),
         "//aoi/d": str(tmp_path / "CAPI03"),
     }
     assert capi_server.resolve_panel_image_directory(original, mapping) == (
@@ -105,24 +157,34 @@ def _request(path):
     )
 
 
-@pytest.mark.parametrize("obstruction", ["missing", "original_file", "next_day_file"])
+@pytest.mark.parametrize("obstruction", [
+    "missing", "original_file", "next_day_file", "previous_day_file",
+])
 def test_unusable_paths_keep_existing_error_behavior(tmp_path, obstruction):
     original = tmp_path / "CAPI03" / "MODEL" / "20260923" / "GLASS"
     next_day = original.parent.parent / "20260924" / original.name
+    previous_day = original.parent.parent / "20260922" / original.name
     if obstruction == "original_file":
         original.parent.mkdir(parents=True)
         original.write_text("not a directory")
         next_day.mkdir(parents=True)
+        previous_day.mkdir(parents=True)
     elif obstruction == "next_day_file":
         next_day.parent.mkdir(parents=True)
         next_day.write_text("not a directory")
-    # Nearby dates, machines, models and panels must never be selected.
+    elif obstruction == "previous_day_file":
+        previous_day.parent.mkdir(parents=True)
+        previous_day.write_text("not a directory")
+    # Other dates, machines, models and panels must never be selected.
     for candidate in [
         original.parent.parent / "20260925" / "GLASS",
-        original.parent.parent / "20260922" / "GLASS",
+        original.parent.parent / "20260921" / "GLASS",
         original.parent.parent / "20260924" / "OTHER_GLASS",
+        original.parent.parent / "20260922" / "OTHER_GLASS",
         tmp_path / "CAPI03" / "OTHER_MODEL" / "20260924" / "GLASS",
+        tmp_path / "CAPI03" / "OTHER_MODEL" / "20260922" / "GLASS",
         tmp_path / "CAPI04" / "MODEL" / "20260924" / "GLASS",
+        tmp_path / "CAPI04" / "MODEL" / "20260922" / "GLASS",
     ]:
         candidate.mkdir(parents=True)
     server, inferencer = _server({})
@@ -136,10 +198,15 @@ def test_unusable_paths_keep_existing_error_behavior(tmp_path, obstruction):
     inferencer.process_panel.assert_not_called()
 
 
-def test_fallback_reaches_inference_database_and_background_reads(tmp_path, monkeypatch):
+@pytest.mark.parametrize("candidate_date,day_offset", [
+    ("20260924", 1), ("20260922", -1),
+])
+def test_fallback_reaches_inference_database_and_background_reads(
+    tmp_path, monkeypatch, candidate_date, day_offset,
+):
     requested = r"\\aoi\d\TIANMU\yuantu\GN160JCA5020S\20260923\GLASS"
-    selected = requested.replace("20260923", "20260924")
-    actual = tmp_path / "TIANMU" / "yuantu" / "GN160JCA5020S" / "20260924" / "GLASS"
+    selected = requested.replace("20260923", candidate_date)
+    actual = tmp_path / "TIANMU" / "yuantu" / "GN160JCA5020S" / candidate_date / "GLASS"
     actual.mkdir(parents=True)
     server, inferencer = _server({r"\\aoi\d": str(tmp_path)})
     raw_request = f"AOI@GLASS;GN160JCA5020S;CAPI03;1920,1200;NG;{requested}"
@@ -157,7 +224,10 @@ def test_fallback_reaches_inference_database_and_background_reads(tmp_path, monk
     assert inferencer._parse_aoi_report_txt.call_args.args[0] == actual
     assert precheck.call_args.args[0] == actual
     assert inferencer.process_panel.call_args.args[0] == actual
-    assert any("IMAGE_DATE_FALLBACK" in call.args[0] for call in warning.call_args_list)
+    warning.assert_any_call(
+        "[IMAGE_DATE_FALLBACK] Requested=%s Resolved=%s (date %+d day)",
+        actual.parent.parent / "20260923" / "GLASS", actual, day_offset,
+    )
 
     find_pair = MagicMock(return_value=(None, None))
     monkeypatch.setattr("capi_side_white.find_side_white_pair", find_pair)

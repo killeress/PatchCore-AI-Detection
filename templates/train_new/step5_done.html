@@ -129,11 +129,14 @@
               舊版 KNN 清洗（範圍={% if patchcore_params.get("feature_cleaning_scope", "inner_only") == "inner_and_edge" %}inner + edge{% else %}僅 inner{% endif %}、k={{ patchcore_params.get("feature_cleaning_k", 30) }}、保留 {{ (patchcore_params.get("feature_cleaning_keep_ratio", 0.99) * 100)|round(1) }}%）
             {% endif %}
           </dd>
-          {% if patchcore_params.get("feature_cleaning_mode") == "softpatch_plus_v1" or cleaning_zones.get("inner", {}).get("mode") == "softpatch_plus_v1" or cleaning_zones.get("edge", {}).get("mode") == "softpatch_plus_v1" %}
-          {% set sp = patchcore_params.get("softpatch_plus_config", {}) %}
-          <dt>SoftPatch+ 設定</dt>
+          {% for zone in (["inner", "edge"] if cleaning_zones else ["shared"]) %}
+          {% set recipe = cleaning_zones.get(zone, {}) if cleaning_zones else patchcore_params %}
+          {% if recipe.get("mode" if cleaning_zones else "feature_cleaning_mode") == "softpatch_plus_v1" %}
+          {% set sp = recipe.get("softpatch_plus_config", patchcore_params.get("softpatch_plus_config", {})) %}
+          <dt>{{ (zone|upper ~ " ") if cleaning_zones else "" }}SoftPatch+ 設定</dt>
           <dd>{{ sp.get("discriminator", "lof_gaussian") }}；推論權重{{ "開" if sp.get("soft_weight", true) else "關" }}；強度={{ sp.get("weight_strength", 1) }}；重疊保護{{ "開" if sp.get("context_overlap", true) else "關" }}；評分維度={{ sp.get("projection_dim", 32) }}；參考上限={{ sp.get("reference_size", 2048) }}。單一記憶庫，原特徵維度不變。</dd>
           {% endif %}
+          {% endfor %}
           <dt>清洗有效區域</dt>
           <dd>
             {% set modes = namespace(context=false, legacy=false) %}

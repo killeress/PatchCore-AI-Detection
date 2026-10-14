@@ -1366,7 +1366,7 @@ def resolve_unc_path(unc_path: str, path_mapping: Dict[str, str]) -> str:
 def resolve_panel_image_directory(
     requested_dir: str, path_mapping: Dict[str, str],
 ) -> Tuple[str, Path]:
-    """Prefer the requested folder; only a missing YYYYMMDD/panel may use day + 1.
+    """Prefer the requested folder, then day + 1 and day - 1 if it is missing.
 
     Return the selected client path as well as its mapped filesystem path so
     inference, saved records and background image reads use the same directory.
@@ -1379,28 +1379,33 @@ def resolve_panel_image_directory(
     if match is None:
         return requested_dir, panel_dir
     try:
-        next_date = datetime.strptime(match.group(1), "%Y%m%d") + timedelta(days=1)
-    except (ValueError, OverflowError):
+        requested_date = datetime.strptime(match.group(1), "%Y%m%d")
+    except ValueError:
         return requested_dir, panel_dir
 
-    next_dir = (
-        requested_dir[:match.start(1)]
-        + next_date.strftime("%Y%m%d")
-        + requested_dir[match.end(1):]
-    )
-    next_panel_dir = Path(resolve_unc_path(next_dir, path_mapping))
-    # A mapping must not turn the fallback into a different machine/model/panel.
-    if (
-        next_panel_dir.parent.parent == panel_dir.parent.parent
-        and next_panel_dir.name == panel_dir.name
-        and next_panel_dir != panel_dir
-        and next_panel_dir.is_dir()
-    ):
-        logger.warning(
-            "[IMAGE_DATE_FALLBACK] Requested=%s Resolved=%s (date +1 day)",
-            panel_dir, next_panel_dir,
+    for day_offset in (1, -1):
+        try:
+            candidate_date = requested_date + timedelta(days=day_offset)
+        except OverflowError:
+            continue
+        candidate_dir = (
+            requested_dir[:match.start(1)]
+            + candidate_date.strftime("%Y%m%d")
+            + requested_dir[match.end(1):]
         )
-        return next_dir, next_panel_dir
+        candidate_panel_dir = Path(resolve_unc_path(candidate_dir, path_mapping))
+        # A mapping must not turn the fallback into a different machine/model/panel.
+        if (
+            candidate_panel_dir.parent.parent == panel_dir.parent.parent
+            and candidate_panel_dir.name == panel_dir.name
+            and candidate_panel_dir != panel_dir
+            and candidate_panel_dir.is_dir()
+        ):
+            logger.warning(
+                "[IMAGE_DATE_FALLBACK] Requested=%s Resolved=%s (date %+d day)",
+                panel_dir, candidate_panel_dir, day_offset,
+            )
+            return candidate_dir, candidate_panel_dir
     return requested_dir, panel_dir
 
 
@@ -3552,7 +3557,7 @@ class CAPIServer:
             or create_station_adapter("capi")
         )
 
-        # 原日期不存在才找隔一天；同步實際路徑供 DB 與背景檢查使用。
+        # 原日期不存在才依序找隔日、昨日；同步實際路徑供 DB 與背景檢查使用。
         # 原始通訊內容仍由 client_request_text 保留。
         parsed["image_dir"], panel_dir = resolve_panel_image_directory(
             parsed["image_dir"], self.path_mapping,

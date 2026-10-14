@@ -2725,6 +2725,10 @@ def test_handle_train_new_start_partial_rejects_bundle_level_override():
             "feature_cleaning_scope": "inner_and_edge",
             "feature_cleaning_keep_ratio": 0.97,
             "feature_cleaning_center_size": 384,
+            "feature_cleaning_by_zone": {
+                "inner": {"mode": "softpatch_plus_v1", "softpatch_plus_config": {"context_overlap": False}},
+                "edge": {"mode": "softpatch_plus_v1", "softpatch_plus_config": {"context_overlap": True}},
+            },
         },
         "training_scope": {
             "mode": "partial",
@@ -2744,6 +2748,7 @@ def test_handle_train_new_start_partial_rejects_bundle_level_override():
     assert "feature_cleaning_scope" in error
     assert "feature_cleaning_keep_ratio" in error
     assert "feature_cleaning_center_size" in error
+    assert "feature_cleaning_by_zone" in error
     server.database.create_training_job.assert_not_called()
 
 

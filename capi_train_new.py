@@ -306,7 +306,7 @@ def normalize_feature_cleaning_by_zone(raw: Any) -> Dict[str, Dict[str, Any]]:
         item = raw.get(zone)
         if not isinstance(item, dict):
             raise ValueError(f"feature_cleaning_by_zone.{zone} must be an object")
-        unknown = set(item) - {"mode", "k", "keep_ratio"}
+        unknown = set(item) - {"mode", "k", "keep_ratio", "softpatch_plus_config"}
         if unknown:
             raise ValueError(
                 f"feature_cleaning_by_zone.{zone} has unknown keys: {sorted(unknown)}"
@@ -355,6 +355,13 @@ def normalize_feature_cleaning_by_zone(raw: Any) -> Dict[str, Dict[str, Any]]:
             "k": k_value,
             "keep_ratio": keep_ratio,
         }
+        if "softpatch_plus_config" in item:
+            try:
+                normalized[zone]["softpatch_plus_config"] = normalize_softpatch_config(
+                    item["softpatch_plus_config"]
+                )
+            except ValueError as exc:
+                raise ValueError(f"feature_cleaning_by_zone.{zone}.{exc}") from exc
     return normalized
 
 
@@ -1454,7 +1461,9 @@ def train_one_patchcore(
     zone_cleaning_keep_ratio = float(zone_cleaning["keep_ratio"])
     if isinstance(zone_cleaning["k"], bool) or zone_cleaning_k != zone_cleaning["k"] or not 1 <= zone_cleaning_k <= 200:
         raise ValueError("feature_cleaning_k must be an integer between 1 and 200")
-    softpatch_options = normalize_softpatch_config(cfg.softpatch_plus_config)
+    softpatch_options = normalize_softpatch_config(
+        zone_cleaning.get("softpatch_plus_config", cfg.softpatch_plus_config)
+    )
     per_zone_cleaning = bool(cfg.feature_cleaning_by_zone)
     cleaning_stats: Dict[str, Any] = {
         "mode": zone_cleaning_mode,

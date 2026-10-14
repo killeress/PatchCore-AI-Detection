@@ -4,7 +4,9 @@
 
 新機種訓練 → Step 2「選擇訓練資料」→ 展開「訓練設定（進階）」→ 特徵域清洗選 **SoftPatch+（實驗：Tile 適配）**。
 
-可選共用設定，或 INNER／EDGE 分別設定模式、K 與保留比例。下方 SoftPatch+ 進階參數由所有採用此模式的區域共用。局部／單子模型重訓沿用原 bundle 配方。
+可選共用設定，或 INNER／EDGE 分別設定模式、K、保留比例與完整 SoftPatch+ 參數。分開設定時，各區選用 SoftPatch+ 後會顯示自己的六個參數，可讓 INNER 關閉重疊／邊界保護、EDGE 開啟保護。tile step 仍共用；重疊一致性與邊界保護仍由同一開關控制。
+
+首次切換為分開設定會複製共用 SoftPatch+ 參數到兩區；同一頁來回切換保留各自已填內容。局部／單子模型重訓沿用原 bundle 配方，欄位不可修改。
 
 ## 參數
 
@@ -46,6 +48,25 @@
 ```
 
 共用模式可使用 `feature_cleaning_mode`、`feature_cleaning_k`、`feature_cleaning_keep_ratio`、`feature_cleaning_scope`。區域設定存在時優先使用區域設定。
+
+兩區都使用 SoftPatch+、僅 EDGE 開啟重疊／邊界保護的範例：
+
+```json
+{
+  "feature_cleaning_by_zone": {
+    "inner": {
+      "mode": "softpatch_plus_v1", "k": 30, "keep_ratio": 0.99,
+      "softpatch_plus_config": {"context_overlap": false}
+    },
+    "edge": {
+      "mode": "softpatch_plus_v1", "k": 30, "keep_ratio": 0.99,
+      "softpatch_plus_config": {"context_overlap": true}
+    }
+  }
+}
+```
+
+區域內有 `softpatch_plus_config` 時，使用該組設定，省略的欄位補 SoftPatch+ 預設值；區域未提供此欄位時，沿用頂層共用設定，以相容既有配方。畫面送出分區設定時會保存該區完整六個參數。訓練報告、模型內嵌配方、模型庫、完成頁與推論紀錄都依各區實際設定呈現；既有模型不會因修改表單而自動改變，需重新訓練。
 
 ## 此版本的實作範圍
 

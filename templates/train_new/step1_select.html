@@ -1,6 +1,24 @@
 {% extends "base.html" %}
 {% block title %}訓練新機種 - Step 2{% endblock %}
 {% block content %}
+{% macro softpatch_fields(prefix, softpatch) %}
+        <div class="tp-field"><span class="tp-label"><label for="{{ prefix }}discriminator">離群評分</label>
+          <button type="button" class="pp-help-icon" aria-label="LOF 說明"
+                  title="LOF（Local Outlier Factor，局部離群因子）&#10;比較一個特徵與附近 K 個鄰居的相對密度，判斷它是否特別孤立。&#10;原始 LOF 約等於 1：與鄰居相近；明顯大於 1：較可疑；小於 1：比鄰居密集。&#10;有機會保留少見但正常的紋理，減少誤刪；但正常樣本太少仍可能被誤判，相似缺陷聚成群也可能漏掉。&#10;LOF＋Gaussian 結合局部密度與整體分布，再以排名融合；報告顯示的融合排名不是原始 LOF 值。">?</button>
+        </span>
+          <select id="{{ prefix }}discriminator"><option value="lof_gaussian" {% if softpatch.get('discriminator', 'lof_gaussian') == 'lof_gaussian' %}selected{% endif %}>LOF＋Gaussian（SoftPatch+）</option><option value="lof" {% if softpatch.get('discriminator') == 'lof' %}selected{% endif %}>僅 LOF（對照實驗）</option></select>
+        </div>
+        <label class="tp-field"><span class="tp-label">推論權重</span>
+          <select id="{{ prefix }}soft_weight"><option value="true" {% if softpatch.get('soft_weight', true) %}selected{% endif %}>開啟</option><option value="false" {% if not softpatch.get('soft_weight', true) %}selected{% endif %}>關閉（只清洗）</option></select>
+        </label>
+        <label class="tp-field"><span class="tp-label">權重強度</span><input id="{{ prefix }}weight_strength" type="number" min="0" max="4" step="0.1" value="{{ softpatch.get('weight_strength', 1.0) }}"><span class="tp-hint">預設 1；倍率為 1＋強度×離群排名，強度 0 等同無權重</span></label>
+        <label class="tp-field"><span class="tp-label">重疊／邊界保護</span>
+          <select id="{{ prefix }}context_overlap"><option value="true" {% if softpatch.get('context_overlap', true) %}selected{% endif %}>開啟（建議）</option><option value="false" {% if not softpatch.get('context_overlap', true) %}selected{% endif %}>關閉（全部位置）</option></select>
+          <span class="tp-hint">受保護與重疊意見不一致的位置，推論權重維持 1</span>
+        </label>
+        <label class="tp-field"><span class="tp-label">評分特徵維度</span><input id="{{ prefix }}projection_dim" type="number" min="8" max="128" step="1" value="{{ softpatch.get('projection_dim', 32) }}"><span class="tp-hint">只用於清洗評分；記憶庫保留原特徵</span></label>
+        <label class="tp-field"><span class="tp-label">參考特徵上限</span><input id="{{ prefix }}reference_size" type="number" min="256" max="8192" step="1" value="{{ softpatch.get('reference_size', 2048) }}"><span class="tp-hint">越大越耗時；預設 2048</span></label>
+{% endmacro %}
 <div style="max-width:900px;margin:0 auto;padding:24px 16px;">
   <div style="margin-bottom:14px;">
     <a href="/train/new" style="color:#a6adc8;text-decoration:none;font-size:.9rem;">← 返回 Step 1</a>
@@ -152,7 +170,7 @@
           <option value="shared" {% if not inherited_cleaning_zones %}selected{% endif %}>共用設定（目前作法）</option>
           <option value="separate" {% if inherited_cleaning_zones %}selected{% endif %}>INNER／EDGE 分開設定</option>
         </select>
-        <span class="tp-hint">分開設定後，兩區可使用不同 K 與保留比例</span>
+        <span class="tp-hint">分開設定後，兩區可獨立設定清洗模式、K、保留比例與 SoftPatch+ 參數</span>
       </label>
       <label class="tp-field fc-shared-field">
         <span class="tp-label">特徵域清洗 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用原 bundle{% else %}預設關閉{% endif %}</span></span>
@@ -226,27 +244,16 @@
               <input type="number" id="tp-feature_cleaning_{{ zone }}_keep_ratio" min="90" max="100" step="0.1" value="{{ (zone_ratio * 100)|round(1) }}" {% if training_scope.mode == 'partial' %}disabled{% endif %}>
               <span class="tp-hint">新模式為最大移除比例，允許實際移除 0 個</span>
             </label>
+            <div id="softpatch-settings-{{ zone }}" class="sp-zone-settings" style="display:none">
+              <div class="tp-hint">{{ zone|upper }} SoftPatch+ 設定；只作用於此區域</div>
+              {{ softpatch_fields("sp-" ~ zone ~ "-", zone_cfg.get("softpatch_plus_config", softpatch)) }}
+            </div>
           </section>
         {% endfor %}
       </div>
       <section id="softpatch-settings" class="fc-zone-grid" style="display:none">
         <div class="tp-hint">SoftPatch+ 設定（所有選用此模式的區域共用）。LOF／Gaussian 排名融合，使用單一記憶庫；開啟重疊保護時仍要求一致移除。此模式不使用 MAD 門檻，也不使用中央裁切。</div>
-        <div class="tp-field"><span class="tp-label"><label for="sp-discriminator">離群評分</label>
-          <button type="button" class="pp-help-icon" aria-label="LOF 說明"
-                  title="LOF（Local Outlier Factor，局部離群因子）&#10;比較一個特徵與附近 K 個鄰居的相對密度，判斷它是否特別孤立。&#10;原始 LOF 約等於 1：與鄰居相近；明顯大於 1：較可疑；小於 1：比鄰居密集。&#10;有機會保留少見但正常的紋理，減少誤刪；但正常樣本太少仍可能被誤判，相似缺陷聚成群也可能漏掉。&#10;LOF＋Gaussian 結合局部密度與整體分布，再以排名融合；報告顯示的融合排名不是原始 LOF 值。">?</button>
-        </span>
-          <select id="sp-discriminator"><option value="lof_gaussian" {% if softpatch.get('discriminator', 'lof_gaussian') == 'lof_gaussian' %}selected{% endif %}>LOF＋Gaussian（SoftPatch+）</option><option value="lof" {% if softpatch.get('discriminator') == 'lof' %}selected{% endif %}>僅 LOF（對照實驗）</option></select>
-        </div>
-        <label class="tp-field"><span class="tp-label">推論權重</span>
-          <select id="sp-soft_weight"><option value="true" {% if softpatch.get('soft_weight', true) %}selected{% endif %}>開啟</option><option value="false" {% if not softpatch.get('soft_weight', true) %}selected{% endif %}>關閉（只清洗）</option></select>
-        </label>
-        <label class="tp-field"><span class="tp-label">權重強度</span><input id="sp-weight_strength" type="number" min="0" max="4" step="0.1" value="{{ softpatch.get('weight_strength', 1.0) }}"><span class="tp-hint">預設 1；倍率為 1＋強度×離群排名，強度 0 等同無權重</span></label>
-        <label class="tp-field"><span class="tp-label">重疊／邊界保護</span>
-          <select id="sp-context_overlap"><option value="true" {% if softpatch.get('context_overlap', true) %}selected{% endif %}>開啟（建議）</option><option value="false" {% if not softpatch.get('context_overlap', true) %}selected{% endif %}>關閉（全部位置）</option></select>
-          <span class="tp-hint">受保護與重疊意見不一致的位置，推論權重維持 1</span>
-        </label>
-        <label class="tp-field"><span class="tp-label">評分特徵維度</span><input id="sp-projection_dim" type="number" min="8" max="128" step="1" value="{{ softpatch.get('projection_dim', 32) }}"><span class="tp-hint">只用於清洗評分；記憶庫保留原特徵</span></label>
-        <label class="tp-field"><span class="tp-label">參考特徵上限</span><input id="sp-reference_size" type="number" min="256" max="8192" step="1" value="{{ softpatch.get('reference_size', 2048) }}"><span class="tp-hint">越大越耗時；預設 2048</span></label>
+        {{ softpatch_fields("sp-", softpatch) }}
       </section>
       <label class="tp-field" id="feature-cleaning-center-field">
         <span class="tp-label">舊版清洗有效區域 <span class="tp-default">{% if training_scope.mode == 'partial' %}沿用中央 {{ inherited_cleaning_center_size }}×{{ inherited_cleaning_center_size }}{% else %}預設中央 384×384{% endif %}</span></span>
@@ -476,7 +483,10 @@
   .tp-hint { color:#a6adc8;font-size:.74rem;line-height:1.4; }
   .fc-zone-grid { display:none;grid-column:1/-1;grid-template-columns:repeat(2,minmax(240px,1fr));gap:12px; }
   #softpatch-settings { padding-top:12px;border-top:1px solid #45475a; }
-  #softpatch-settings > .tp-hint { grid-column:1/-1; }
+  #softpatch-settings > .tp-hint, .sp-zone-settings > .tp-hint { grid-column:1/-1; }
+  .sp-zone-settings { grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding-top:12px;border-top:1px solid #45475a; }
+  .sp-zone-settings .tp-field { min-width:0; }
+  .sp-zone-settings input,.sp-zone-settings select { box-sizing:border-box;width:100%;min-width:0; }
   .tile-settings-row { grid-column:1/-1;display:grid;grid-template-columns:minmax(220px,1fr) minmax(0,2fr);gap:12px;align-items:start; }
   #softpatch-parameter-help { padding:10px 12px;border:1px solid #45475a;border-radius:8px;background:#292c3e;color:#a6adc8;font-size:.74rem;line-height:1.5; }
   #softpatch-parameter-help[hidden] { display:none; }
@@ -493,7 +503,7 @@
   .fc-zone-card { display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px;padding:12px;border:1px solid #45475a;border-radius:8px;background:#1e1e2e; }
   .fc-zone-title { grid-column:1/-1;font-weight:800;letter-spacing:.08em;color:#89b4fa; }
   .fc-zone-edge .fc-zone-title { color:#fab387; }
-  @media (max-width:900px) { .fc-zone-grid,.fc-zone-card { grid-template-columns:1fr; } }
+  @media (max-width:900px) { .fc-zone-grid,.fc-zone-card,.sp-zone-settings { grid-template-columns:1fr; } }
   .tp-field input, .tp-field select {
     background:#1e1e2e;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;
     padding:6px 10px;font-family:'JetBrains Mono',Consolas,monospace;font-size:.86rem;
@@ -1433,6 +1443,9 @@ function syncFeatureCleaningLayout() {
       document.getElementById(`tp-feature_cleaning_${zone}_mode`).value = enabled ? sharedMode : 'off';
       document.getElementById(`tp-feature_cleaning_${zone}_k`).value = document.getElementById('tp-feature_cleaning_k').value;
       document.getElementById(`tp-feature_cleaning_${zone}_keep_ratio`).value = enabled ? sharedRatio : '99';
+      for (const key of ['discriminator', 'soft_weight', 'weight_strength', 'context_overlap', 'projection_dim', 'reference_size']) {
+        document.getElementById(`sp-${zone}-${key}`).value = document.getElementById(`sp-${key}`).value;
+      }
     }
     _zoneCleaningInitialized = true;
   }
@@ -1449,9 +1462,15 @@ function syncFeatureCleaningLayout() {
   const usesLegacyCenter = activeModes.includes('knn_cosine_q99_v1');
   const usesSoftPatch = activeModes.includes('softpatch_plus_v1');
   const settings = document.getElementById('softpatch-settings');
-  settings.style.display = usesSoftPatch ? 'grid' : 'none';
+  settings.style.display = !separate && usesSoftPatch ? 'grid' : 'none';
   document.getElementById('softpatch-parameter-help').hidden = !usesSoftPatch;
-  settings.querySelectorAll('input,select').forEach(el => { el.disabled = !usesSoftPatch || partial; });
+  settings.querySelectorAll('input,select').forEach(el => { el.disabled = separate || !usesSoftPatch || partial; });
+  for (const zone of ['inner', 'edge']) {
+    const active = separate && document.getElementById(`tp-feature_cleaning_${zone}_mode`).value === 'softpatch_plus_v1';
+    const zoneSettings = document.getElementById(`softpatch-settings-${zone}`);
+    zoneSettings.style.display = active ? 'grid' : 'none';
+    zoneSettings.querySelectorAll('input,select').forEach(el => { el.disabled = !active || partial; });
+  }
   for (const zone of ['inner', 'edge', 'shared']) {
     const prefix = zone === 'shared' ? 'tp-feature_cleaning_' : `tp-feature_cleaning_${zone}_`;
     document.getElementById(prefix + 'keep_ratio').min = document.getElementById(prefix + 'mode').value === 'softpatch_plus_v1' ? '50' : '90';
@@ -1540,21 +1559,27 @@ function collectTrainingParams() {
     }
     params.feature_cleaning_by_zone = byZone;
   }
-  if (!document.getElementById('sp-discriminator').disabled) {
+  const softpatchZones = isSeparateFeatureCleaning() ? ['inner', 'edge'] : ['shared'];
+  for (const zone of softpatchZones) {
+    const prefix = zone === 'shared' ? 'sp-' : `sp-${zone}-`;
+    if (document.getElementById(prefix + 'discriminator').disabled) continue;
     const config = {
-      discriminator: document.getElementById('sp-discriminator').value,
-      soft_weight: document.getElementById('sp-soft_weight').value === 'true',
-      context_overlap: document.getElementById('sp-context_overlap').value === 'true',
+      discriminator: document.getElementById(prefix + 'discriminator').value,
+      soft_weight: document.getElementById(prefix + 'soft_weight').value === 'true',
+      context_overlap: document.getElementById(prefix + 'context_overlap').value === 'true',
     };
     for (const key of ['weight_strength', 'projection_dim', 'reference_size']) {
-      const el = document.getElementById('sp-' + key);
+      const el = document.getElementById(prefix + key);
       const value = Number(el.value);
       if (!el.value.trim() || !Number.isFinite(value) || value < Number(el.min) || value > Number(el.max) || (key !== 'weight_strength' && !Number.isInteger(value))) {
-        return {params: null, error: `SoftPatch+ ${key} 必須介於 ${el.min}～${el.max}${key === 'weight_strength' ? '' : ' 的整數'}`};
+        el.classList.add('invalid');
+        return {params: null, error: `${zone === 'shared' ? '' : zone.toUpperCase() + ' '}SoftPatch+ ${key} 必須介於 ${el.min}～${el.max}${key === 'weight_strength' ? '' : ' 的整數'}`};
       }
+      el.classList.remove('invalid');
       config[key] = value;
     }
-    params.softpatch_plus_config = config;
+    if (zone === 'shared') params.softpatch_plus_config = config;
+    else params.feature_cleaning_by_zone[zone].softpatch_plus_config = config;
   }
   return {params: Object.keys(params).length ? params : null, error: null};
 }
