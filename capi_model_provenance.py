@@ -31,7 +31,10 @@ def snapshot_model_training(inferencer, model_path=None):
                     mode = zone_config.get("mode", "unknown")
                 elif zone == "edge" and params.get("feature_cleaning_scope") == "inner_only":
                     mode = "off"
-                metadata = {"mode": mode, "softpatch_plus_config": params.get("softpatch_plus_config") or {}}
+                options = params.get("softpatch_plus_config") or {}
+                if isinstance(zone_config, dict):
+                    options = zone_config.get("softpatch_plus_config", options)
+                metadata = {"mode": mode, "softpatch_plus_config": options}
                 source = "manifest"
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
@@ -50,6 +53,11 @@ def snapshot_model_training(inferencer, model_path=None):
                 result["discriminator"] = options["discriminator"]
             if isinstance(options.get("soft_weight"), bool):
                 result["soft_weight"] = options["soft_weight"]
+            if isinstance(options.get("context_overlap"), bool):
+                result["context_overlap"] = options["context_overlap"]
+            for key in ("projection_dim", "reference_size"):
+                if type(options.get(key)) is int:
+                    result[key] = options[key]
             strength = options.get("weight_strength")
             if isinstance(strength, (int, float)) and not isinstance(strength, bool) and math.isfinite(strength):
                 result["weight_strength"] = strength

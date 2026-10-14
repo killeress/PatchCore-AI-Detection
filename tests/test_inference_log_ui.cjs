@@ -59,6 +59,16 @@ test('missing metadata and malformed markers cannot be mistaken for baseline or 
     assert.equal(soft.models[0].path, '<img src=x onerror=alert(1)>');
 });
 
+test('SoftPatch zone summaries preserve independent boundary protection and scoring settings', () => {
+    const log = ['inner', 'edge'].map(zone => '[MODEL_TRAINING] ' + JSON.stringify({
+        lighting: 'G0F00000', zone, mode: 'softpatch_plus_v1',
+        context_overlap: zone === 'edge', projection_dim: 32, reference_size: 2048,
+    })).join('\n');
+    const result = parseLog(log);
+    assert.match(result.models[0].settings, /重疊／邊界保護關閉/);
+    assert.match(result.models[1].settings, /重疊／邊界保護開啟；評分維度 32；參考上限 2048/);
+});
+
 test('legacy missing screen errors explain retraining and override incomplete decisions', () => {
     const error = "[v2] U0F00000/inner tile(1608,1080) 推論失敗: 'U0F00000'";
     const raw = `[2026-09-28 12:56:13] ERROR [capi.server] Inference error: ${error}`;

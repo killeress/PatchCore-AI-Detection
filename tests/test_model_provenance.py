@@ -43,6 +43,26 @@ def test_previously_exported_softpatch_uses_manifest_options(tmp_path):
     assert snapshot["soft_weight"] is False
 
 
+@pytest.mark.parametrize("zone,protected", [("inner", False), ("edge", True)])
+def test_manifest_softpatch_options_follow_zone_with_legacy_fallback(tmp_path, zone, protected):
+    write_manifest(tmp_path, {
+        "softpatch_plus_config": {"context_overlap": True, "soft_weight": True, "weight_strength": 1},
+        "feature_cleaning_by_zone": {
+            "inner": {"mode": "softpatch_plus_v1", "softpatch_plus_config": {
+                "context_overlap": False, "soft_weight": False, "weight_strength": 2,
+                "projection_dim": 16, "reference_size": 256}},
+            "edge": {"mode": "softpatch_plus_v1"},
+        },
+    })
+    snapshot = snapshot_model_training(SimpleNamespace(model=softpatch()), tmp_path / f"G0F00000-{zone}.pt")
+    assert snapshot["context_overlap"] is protected
+    assert snapshot["soft_weight"] is protected
+    assert snapshot["weight_strength"] == (1 if protected else 2)
+    if zone == "inner":
+        assert snapshot["projection_dim"] == 16
+        assert snapshot["reference_size"] == 256
+
+
 @pytest.mark.parametrize("zone,expected", [("inner", "context_overlap_adaptive_v1"), ("edge", "off")])
 def test_manifest_respects_inner_only_scope(tmp_path, zone, expected):
     write_manifest(tmp_path, {"feature_cleaning_mode": "context_overlap_adaptive_v1", "feature_cleaning_scope": "inner_only"})

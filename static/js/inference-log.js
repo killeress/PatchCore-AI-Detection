@@ -18,6 +18,9 @@
             details.push(({lof: 'LOF', lof_gaussian: 'LOF＋Gaussian'})[data.discriminator] || '評分設定未記錄');
             details.push(data.soft_weight === true ? '推論權重開啟' : data.soft_weight === false ? '推論權重關閉' : '權重開關未記錄');
             if (typeof data.weight_strength === 'number' && Number.isFinite(data.weight_strength)) details.push(`強度 ${data.weight_strength}`);
+            if (typeof data.context_overlap === 'boolean') details.push(`重疊／邊界保護${data.context_overlap ? '開啟' : '關閉'}`);
+            if (Number.isInteger(data.projection_dim)) details.push(`評分維度 ${data.projection_dim}`);
+            if (Number.isInteger(data.reference_size)) details.push(`參考上限 ${data.reference_size}`);
             if ([data.weight_min, data.weight_max].every(v => typeof v === 'number' && Number.isFinite(v))) {
                 details.push(`實際倍率 ${data.weight_min.toFixed(2)}～${data.weight_max.toFixed(2)}`);
             }

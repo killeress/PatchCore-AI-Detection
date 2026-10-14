@@ -224,7 +224,8 @@ def test_constant_and_insufficient_features_remain_neutral(count, k):
     assert torch.equal(model.embedding_store[0], torch.full((count, 4), 3.))
 
 
-def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("recipe,zone", [("shared", "inner"), ("legacy_zones", "edge"), ("zone_options", "inner"), ("zone_options", "edge")])
+def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch, recipe, zone):
     from capi_train_new import TrainingConfig, train_one_patchcore
     captured = {}
 
@@ -249,6 +250,9 @@ def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch):
             captured["callback"] = callback
             callback._select_coreset_indices = lambda bank, ratio: [0, 3, 7]
             callback.on_train_start(None, model)
+            # The fake engine skips feature extraction, so supply its grid layout.
+            callback._batch_layouts = [{"image_paths": ["tile.png"], "grid_size": (5, 8),
+                                        "embedding_count": 40}]
             callback.on_validation_start(SimpleNamespace(sanity_checking=False), model)
             model.model.subsample_embedding(.1)
 
@@ -267,17 +271,36 @@ def test_training_wiring_exports_weighted_model(tmp_path, monkeypatch):
     config = TrainingConfig(machine_id="M", panel_paths=[], over_review_root=tmp_path,
         feature_cleaning_mode="softpatch_plus_v1", feature_cleaning_k=6,
         feature_cleaning_keep_ratio=.85, softpatch_plus_config={"context_overlap": False})
+    expected = normalize_softpatch_config(config.softpatch_plus_config)
+    if recipe != "shared":
+        config.feature_cleaning_by_zone = {
+            z: {"mode": "softpatch_plus_v1", "k": 6, "keep_ratio": .85}
+            for z in ("inner", "edge")
+        }
+    if recipe == "zone_options":
+        for z in ("inner", "edge"):
+            config.feature_cleaning_by_zone[z]["softpatch_plus_config"] = {
+                "context_overlap": z == "edge", "soft_weight": z == "edge", "weight_strength": 2,
+                "discriminator": "lof", "projection_dim": 16, "reference_size": 256,
+            }
+        expected = normalize_softpatch_config(config.feature_cleaning_by_zone[zone]["softpatch_plus_config"])
     stats = {}
-    path = train_one_patchcore(staging, tmp_path / "run", "G0F00000-inner", cfg=config,
+    path = train_one_patchcore(staging, tmp_path / "run", f"G0F00000-{zone}", cfg=config,
                               experiment_stats_out=stats)
     loaded = torch.load(path, weights_only=False)["model"]
     assert isinstance(loaded, SoftPatchPlusModel)
     assert loaded.softpatch_weights.shape == (3,)
     assert loaded.training_provenance["mode"] == "softpatch_plus_v1"
-    assert loaded.training_provenance["softpatch_plus_config"]["soft_weight"] is True
+    assert loaded.training_provenance["softpatch_plus_config"] == expected
+    assert captured["callback"].options == expected
+    assert stats["feature_cleaning"]["softpatch_plus_config"] == expected
     assert stats["feature_cleaning"]["mode"] == "softpatch_plus_v1"
     assert stats["feature_cleaning"]["k"] == 6
-    assert stats["feature_cleaning"]["removed"] > 0
+    if expected["context_overlap"]:
+        assert stats["feature_cleaning"]["removed"] == 0
+        assert torch.all(loaded.softpatch_weights == 1)
+    else:
+        assert stats["feature_cleaning"]["removed"] > 0
     assert torch.isfinite(loaded(torch.ones(1, 2, 1, 2)).pred_score).all()
 
 
