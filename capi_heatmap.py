@@ -17,6 +17,7 @@ from capi_edge_cv import clamp_median_kernel, compute_fg_aware_diff
 from capi_tile_diagnostics import edge_ng_evidence
 from typing import List, Dict, Optional, Tuple, Any
 import time
+from functools import lru_cache
 
 
 def heatmap_to_uint8(anomaly_map: np.ndarray) -> np.ndarray:
@@ -33,6 +34,23 @@ def _blend_color_on_mask(image: np.ndarray, mask: np.ndarray, color, alpha: floa
             image[pixels].astype(np.float32) * (1 - alpha) +
             np.array(color, dtype=np.float32) * alpha
         ).clip(0, 255).astype(np.uint8)
+
+
+@lru_cache(maxsize=1)
+def _roi_threshold_label_mask():
+    # Pre-rendered「ROI 內達門檻區域」: also works on Linux without CJK fonts.
+    path = Path(__file__).parent / "static" / "images" / "aoi_roi_threshold_label.png"
+    return cv2.imdecode(np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_GRAYSCALE)
+
+
+def draw_roi_threshold_label(panel: np.ndarray) -> None:
+    mask = _roi_threshold_label_mask()
+    width = min(panel.shape[1] - 10, round(mask.shape[1] * 18 / mask.shape[0]))
+    mask = cv2.resize(mask, (width, 18), interpolation=cv2.INTER_AREA)
+    cv2.rectangle(panel, (2, 2), (width + 8, 25), (20, 20, 20), -1)
+    alpha = mask[:, :, None].astype(np.float32) / 255.0
+    patch = panel[5:23, 5:5 + width]
+    patch[:] = (patch * (1 - alpha) + np.array((0, 200, 255)) * alpha).astype(np.uint8)
 
 
 def _draw_dashed_contour(
@@ -135,7 +153,9 @@ def _bomb_region_summary(regions: list) -> str:
     return summary + (f" Ignored:{ignored}" if ignored else "")
 
 
-def build_bomb_region_debug_panel(diagnostics: dict, tile_size: int) -> np.ndarray:
+def build_bomb_region_debug_panel(
+    diagnostics: dict, tile_size: int, tile_image: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Show final region evidence instead of the cached dust-only verdicts."""
     binary = diagnostics["heatmap_binary"]
     _count, labels = cv2.connectedComponents((binary > 0).astype(np.uint8), connectivity=8)
@@ -146,6 +166,11 @@ def build_bomb_region_debug_panel(diagnostics: dict, tile_size: int) -> np.ndarr
     if diagnostics.get("ignored_mask") is not None:
         panel[diagnostics["ignored_mask"] > 0] = (128, 128, 128)
     panel[diagnostics["excluded_mask"] > 0] = (255, 0, 255)
+    if tile_image is not None:
+        base = cv2.resize(ensure_bgr(tile_image), (binary.shape[1], binary.shape[0]))
+        active = np.any(panel > 0, axis=2)
+        base[active] = (base[active] * 0.65 + panel[active] * 0.35).astype(np.uint8)
+        panel = base
     panel = cv2.resize(panel, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
     cv2.putText(panel, _bomb_region_summary(diagnostics["regions"]), (10, 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
@@ -165,6 +190,7 @@ def build_region_zoom_panels(
     bomb_excluded_mask: Optional[np.ndarray] = None,
     bomb_ignored_mask: Optional[np.ndarray] = None,
     bomb_priority_applied: bool = False,
+    tile_image: Optional[np.ndarray] = None,
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
 
@@ -176,6 +202,7 @@ def build_region_zoom_panels(
         metric_name: "COV" 或 "IOU"
         iou_threshold: 判定閾值
         max_panels: 最多生成幾張
+        tile_image: 原始 tile，提供時在原圖上疊加半透明遮罩
 
     Returns:
         [(panel_image, label_text), ...] 最多 max_panels 筆
@@ -216,6 +243,8 @@ def build_region_zoom_panels(
         dm_resized = cv2.resize(dm, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
     h_src, w_src = heatmap_binary.shape[:2]
+    original = (cv2.resize(ensure_bgr(tile_image), (tile_size, tile_size))
+                if tile_image is not None else None)
     results = []
 
     for region in sorted_regions:
@@ -252,7 +281,19 @@ def build_region_zoom_panels(
             if ignored_resized is not None:
                 base[ignored_resized[y1:y2, x1:x2] > 0] = (128, 128, 128)
 
+            if original is not None:
+                background = original[y1:y2, x1:x2].copy()
+                active = np.any(base > 0, axis=2)
+                background[active] = (background[active] * 0.65 + base[active] * 0.35).astype(np.uint8)
+                base = background
+
             panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+
+            # Dark backing keeps scores/reasons readable on bright source images.
+            cv2.rectangle(panel, (0, 0), (tile_size - 1, 145 if method_label else 120),
+                          (20, 20, 20), -1)
+            cv2.rectangle(panel, (0, tile_size - 30), (tile_size - 1, tile_size - 1),
+                          (20, 20, 20), -1)
 
             # 標註計算過程
             cov = region["coverage"]
@@ -903,7 +944,7 @@ class HeatmapManager:
         bomb_diagnostics = getattr(tile_info, 'bomb_region_diagnostics', None) if tile_info else None
         ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
         if has_omit and bomb_diagnostics:
-            iou_debug_panel = build_bomb_region_debug_panel(bomb_diagnostics, tile_size)
+            iou_debug_panel = build_bomb_region_debug_panel(bomb_diagnostics, tile_size, original_src)
             zoom_results = build_region_zoom_panels(
                 bomb_diagnostics['heatmap_binary'], dust_mask, bomb_diagnostics['regions'],
                 tile_size=tile_size,
@@ -913,6 +954,7 @@ class HeatmapManager:
                 bomb_excluded_mask=bomb_diagnostics['excluded_mask'],
                 bomb_ignored_mask=bomb_diagnostics.get('ignored_mask'),
                 bomb_priority_applied=bomb_diagnostics.get('priority_applied', False),
+                tile_image=original_src,
             )
         elif has_omit and ts_features:
             heatmap_binary = getattr(tile_info, 'dust_heatmap_binary', None)
@@ -938,6 +980,7 @@ class HeatmapManager:
                 metric_name=metric_name,
                 iou_threshold=iou_threshold,
                 high_cov_threshold=dust_high_cov_threshold,
+                tile_image=original_src,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---

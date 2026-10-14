@@ -471,7 +471,6 @@ def _detect_roi(
     )
     groups = _find_mark_groups(
         filtered, offset_x, offset_y, full_width, full_height, allow_connected_chars=True,
-        connected_gap_ratio=0.05 if low_contrast else 0.10,
     )
     if not groups:
         return None
@@ -597,7 +596,7 @@ def _find_mark_groups(
     full_height: int,
     *,
     allow_connected_chars: bool = False,
-    connected_gap_ratio: float = 0.10,
+    connected_gap_ratio: float = 0.05,
 ) -> List[Dict[str, Any]]:
     join = max(15, int(round(min(full_width, full_height) * 0.010)))
     dilated = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (join, join)), iterations=1)
@@ -624,6 +623,11 @@ def _find_mark_groups(
             continue
 
         tight = mark_mask[tight_y1:tight_y2, tight_x1:tight_x2]
+        # Sparse panel texture can join into a large box with many components,
+        # yet contain almost no strokes. Do not let it stop fallback searches
+        # or produce a background-only OCR crop.
+        if np.count_nonzero(tight) / tight.size < 0.02:
+            continue
         comp_count = _count_small_components(tight)
         if comp_count < 10 and not (
             allow_connected_chars and comp_count >= 2
@@ -647,7 +651,7 @@ def _find_mark_groups(
     return groups
 
 
-def _is_connected_char_pair(mask: np.ndarray, *, min_gap_ratio: float = 0.10) -> bool:
+def _is_connected_char_pair(mask: np.ndarray, *, min_gap_ratio: float = 0.05) -> bool:
     """Require two aligned glyph shapes before accepting a low dot count."""
     parts = _split_two_chars(mask)
     if parts is None:
@@ -659,6 +663,8 @@ def _is_connected_char_pair(mask: np.ndarray, *, min_gap_ratio: float = 0.10) ->
     if abs(boxes[0]["y"] - boxes[1]["y"]) > height * 0.20:
         return False
     gap = boxes[1]["x"] - boxes[0]["x"] - boxes[0]["width"]
+    # Printed dots may merge into glyphs with only a narrow inter-character gap.
+    # Keep alignment, aspect, and stroke-density checks even for these pairs.
     if not height * min_gap_ratio <= gap <= height:
         return False
     return all(

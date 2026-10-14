@@ -5098,6 +5098,8 @@ class CAPIInferencer:
         is_dust: bool,
         region_details: Optional[list] = None,
         region_labels: Optional[np.ndarray] = None,
+        aoi_roi_enabled: bool = False,
+        original_image: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         產生灰塵 IOU 交叉驗證的 Debug 可視化圖
@@ -5105,7 +5107,7 @@ class CAPIInferencer:
         顯示：
           左上: Heatmap 疊加原圖 (紅色=異常熱區)
           右上: 灰塵遮罩 (黃色=灰塵區域)
-          左下: 熱區二值化 (白色=top X% 最紅像素)
+          左下: 原圖＋半透明熱區遮罩 (AOI ROI 使用達門檻區域標籤)
           右下: 逐區域判定結果 (紅色=真實缺陷, 綠色=灰塵區域, 藍色=僅灰塵遮罩)
 
         Args:
@@ -5121,6 +5123,8 @@ class CAPIInferencer:
         Returns:
             Debug 可視化圖 (BGR)
         """
+        from capi_heatmap import _blend_color_on_mask, draw_roi_threshold_label, ensure_bgr
+
         sz = 256  # 每個子圖大小
 
         # --- 準備基底圖 ---
@@ -5131,6 +5135,8 @@ class CAPIInferencer:
         else:
             base = tile_image.copy()
         base = cv2.resize(base, (sz, sz))
+        mask_base = (cv2.resize(ensure_bgr(original_image), (sz, sz))
+                     if original_image is not None else base)
 
         # --- 左上: Heatmap Overlay ---
         if anomaly_map is not None:
@@ -5155,15 +5161,18 @@ class CAPIInferencer:
         cv2.putText(panel_tr, "Dust Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
         # --- 左下: 熱區二值化 ---
-        panel_bl = np.zeros((sz, sz, 3), dtype=np.uint8)
+        panel_bl = mask_base.copy()
         if heatmap_binary is not None:
             hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            panel_bl[hb > 0] = (255, 255, 255)  # 白色 = 熱區
-        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
+            _blend_color_on_mask(panel_bl, hb, (255, 255, 255), alpha=0.35)
+        if aoi_roi_enabled:
+            draw_roi_threshold_label(panel_bl)
+        else:
+            cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
 
         # --- 右下: 逐區域判定結果 ---
-        panel_br = np.zeros((sz, sz, 3), dtype=np.uint8)
+        panel_br = mask_base.copy()
         if region_details is not None and heatmap_binary is not None and dust_mask is not None:
             # 使用逐區域判定結果上色 (labels 由 check_dust_per_region 傳入，避免重複計算)
             if region_labels is not None:
@@ -5185,7 +5194,7 @@ class CAPIInferencer:
             # 先畫僅灰塵遮罩區域 (藍色)
             hb_resized = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
             dust_only = (dm > 0) & (hb_resized == 0)
-            panel_br[dust_only] = (255, 100, 0)  # 藍色 = 僅灰塵遮罩
+            _blend_color_on_mask(panel_br, dust_only, (255, 100, 0), alpha=0.35)
 
             # 逐區域上色
             region_peak_dust_map = {r["label_id"]: r.get("peak_in_dust", True) for r in region_details}
@@ -5195,9 +5204,9 @@ class CAPIInferencer:
             for label_id in range(1, num_labels):
                 region_mask = labels_resized == label_id
                 if region_dust_map.get(label_id, False):
-                    panel_br[region_mask] = (0, 200, 0)     # 綠色 = 灰塵(已抑制)
+                    _blend_color_on_mask(panel_br, region_mask, (0, 200, 0), alpha=0.35)
                 else:
-                    panel_br[region_mask] = (0, 0, 255)      # 紅色 = 真實缺陷(保留)
+                    _blend_color_on_mask(panel_br, region_mask, (0, 0, 255), alpha=0.35)
 
             # 在每個 region 的峰值位置畫標記
             for r in region_details:
@@ -5228,9 +5237,9 @@ class CAPIInferencer:
             dust_only = (dm > 0) & (hb == 0)
             overlap = (hb > 0) & (dm > 0)
 
-            panel_br[heat_only] = (0, 0, 255)
-            panel_br[dust_only] = (255, 100, 0)
-            panel_br[overlap]   = (0, 255, 0)
+            _blend_color_on_mask(panel_br, heat_only, (0, 0, 255), alpha=0.35)
+            _blend_color_on_mask(panel_br, dust_only, (255, 100, 0), alpha=0.35)
+            _blend_color_on_mask(panel_br, overlap, (0, 255, 0), alpha=0.35)
             verdict_text = "DUST" if is_dust else "REAL_NG"
         else:
             verdict_text = "DUST" if is_dust else "REAL_NG"
@@ -8179,6 +8188,8 @@ class CAPIInferencer:
                                         tile.is_suspected_dust_or_scratch,
                                         region_details=region_details,
                                         region_labels=region_labels,
+                                        aoi_roi_enabled=tile.aoi_roi_mask is not None,
+                                        original_image=tile.original_image,
                                     )
                             except Exception as dbg_err:
                                 print(f"⚠️ Debug image generation failed: {dbg_err}")
@@ -9089,6 +9100,8 @@ class CAPIInferencer:
                                 tile.is_suspected_dust_or_scratch,
                                 region_details=region_details,
                                 region_labels=region_labels,
+                                aoi_roi_enabled=tile.aoi_roi_mask is not None,
+                                original_image=tile.original_image,
                             )
                     except Exception as dbg_err:
                         print(f"⚠️ [v2] Debug image generation failed: {dbg_err}")
