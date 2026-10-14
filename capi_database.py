@@ -23,6 +23,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 from urllib.parse import urlparse
 from capi_tile_diagnostics import decorate_edge_ng_evidence
+from capi_version import get_version_info
+
+# Snapshot at process startup so in-place updates cannot relabel running code.
+_APP_VERSION = get_version_info()["version"]
 
 _DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _FACTORY_DAY_START_TIME = "07:30:00"
@@ -201,6 +205,7 @@ class CAPIDatabase:
                     glass_id TEXT NOT NULL,
                     model_id TEXT NOT NULL,
                     machine_no TEXT NOT NULL,
+                    app_version TEXT DEFAULT '',
                     resolution_x INTEGER DEFAULT 0,
                     resolution_y INTEGER DEFAULT 0,
                     machine_judgment TEXT DEFAULT '',
@@ -1108,6 +1113,7 @@ class CAPIDatabase:
                     ),
                 )
 
+            add_column_if_not_exists("inference_records", "app_version", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "error_message", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_bomb_info", "TEXT DEFAULT ''")
             add_column_if_not_exists("inference_records", "client_request_text", "TEXT DEFAULT ''")
@@ -1301,15 +1307,15 @@ class CAPIDatabase:
                         client_request_text, client_response_text, aoi_machine_coords,
                         inference_log, omit_overexposed, omit_overexposure_info,
                         image_preprocess_pipeline, image_preprocess_pipelines,
-                        image_preprocess_timing)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        image_preprocess_timing, app_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (glass_id, model_id, machine_no, resolution[0], resolution[1],
                      machine_judgment, ai_judgment, image_dir, total_images, ng_images,
                      ng_details, request_time, response_time, processing_seconds,
                      heatmap_dir, error_message, client_bomb_info,
                      client_request_text, client_response_text, aoi_machine_coords,
                      inference_log, omit_overexposed, omit_overexposure_info,
-                     preprocess_json, preprocess_zones_json, preprocess_timing_json)
+                     preprocess_json, preprocess_zones_json, preprocess_timing_json, _APP_VERSION)
                 )
                 record_id = cursor.lastrowid
 
@@ -1522,12 +1528,13 @@ class CAPIDatabase:
                            omit_overexposure_info = ?,
                            image_preprocess_pipeline = ?,
                            image_preprocess_pipelines = ?,
-                           image_preprocess_timing = ?
+                           image_preprocess_timing = ?,
+                           app_version = ?
                        WHERE id = ?""",
                     (ai_judgment, machine_judgment, total_images, ng_images, ng_details,
                      now_str, processing_seconds, heatmap_dir, error_message,
                      aoi_machine_coords, inference_log, omit_overexposed, omit_overexposure_info,
-                     preprocess_json, preprocess_zones_json, preprocess_timing_json,
+                     preprocess_json, preprocess_zones_json, preprocess_timing_json, _APP_VERSION,
                      record_id),
                 )
                 if cursor.rowcount == 0:

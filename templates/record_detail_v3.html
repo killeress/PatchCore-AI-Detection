@@ -438,6 +438,10 @@
                                 <td class="value">{{ detail.machine_no }}</td>
                             </tr>
                             <tr>
+                                <td class="label">推論程式版本</td>
+                                <td class="value">{{ detail.app_version | default('未記錄', true) | e }}</td>
+                            </tr>
+                            <tr>
                                 <td class="label">解析度</td>
                                 <td class="value">{{ detail.resolution_x }} x {{ detail.resolution_y }}</td>
                             </tr>
