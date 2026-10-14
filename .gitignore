@@ -54,6 +54,7 @@ debug*/
 *.xls
 *.xlsx
 *.png
+!static/images/aoi_roi_threshold_label.png
 !central_dashboard/banner.png
 *.jpg
 *.jpeg

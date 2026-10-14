@@ -198,9 +198,10 @@ CODEONLY_EXCLUDED_PREFIXES = (
     "static/",
 )
 
-# Small application assets required by the bundled inference-log template.
+# Small application assets required by inference logs and diagnostic rendering.
 # Keep these in subsequent code-only releases so older installations can upgrade.
 CODEONLY_REQUIRED_STATIC_FILES = {
+    "static/images/aoi_roi_threshold_label.png",
     "static/css/inference-log.css",
     "static/js/inference-log.js",
     "static/css/edge-ng-evidence.css",

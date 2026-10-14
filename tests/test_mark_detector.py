@@ -81,9 +81,10 @@ def test_detect_panel_mark_top_right_bo_low_contrast():
 
 
 @pytest.mark.parametrize("rotated", [False, True])
-def test_detect_panel_mark_connected_strokes(rotated):
+@pytest.mark.parametrize("gap", [4, 8])
+def test_detect_panel_mark_connected_strokes(rotated, gap):
     image = np.full((2048, 3072), 160, dtype=np.uint8)
-    _draw_mark(image, "C4", 2400, 350, cell=6, radius=3, pixel_value=120)
+    _draw_mark(image, "C4", 2400, 350, cell=6, gap=gap, radius=3, pixel_value=120)
     image = cv2.GaussianBlur(image, (3, 3), 0)
     if rotated:
         image = cv2.rotate(image, cv2.ROTATE_180)
@@ -297,6 +298,57 @@ def test_low_contrast_fallback_rejects_empty_textured_panel():
     image[-60:] = 0
     image[:, -60:] = 0
     assert detect_panel_mark(image)["found"] is False
+
+
+def test_mark_groups_reject_sparse_texture_with_many_components():
+    # A dilated grid passes the size/component-count checks despite containing
+    # almost no foreground. It must not become an OCR crop or stop retries.
+    mask = np.zeros((240, 240), dtype=np.uint8)
+    for y in range(60, 161, 20):
+        for x in range(60, 161, 20):
+            cv2.circle(mask, (x, y), 1, 255, -1)
+
+    assert mark_detector._count_small_components(mask) == 36
+    assert mark_detector._find_mark_groups(
+        mask, 0, 0, 3072, 2048, allow_connected_chars=True,
+    ) == []
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_real_narrow_mark_crop_avoids_opposite_corner_texture(rotated):
+    import base64
+    from capi_mark_shadow import build_mark_shadow_payload
+
+    path = _ROOT / "W0F00000_111322.tif"
+    if not path.exists():
+        pytest.skip(f"real mark fixture not available: {path}")
+    source = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    assert source is not None
+    image = cv2.rotate(source, cv2.ROTATE_180) if rotated else source
+    x, y, width, height = 943, 3439, 92, 81
+    if rotated:
+        x, y = image.shape[1] - x - width, image.shape[0] - y - height
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["roi"] == ("top_right" if rotated else "bottom_left")
+    assert result["orientation"] == ("normal" if rotated else "rot180")
+    for key, expected in zip(("x", "y", "width", "height"), (x, y, width, height)):
+        assert result["bbox"][key] == pytest.approx(expected, abs=3)
+
+    payload = build_mark_shadow_payload(image, result, path)
+    crop_box = payload["crop_bbox"]
+    assert crop_box["x"] <= x
+    assert crop_box["y"] <= y
+    assert crop_box["x"] + crop_box["width"] >= x + width
+    assert crop_box["y"] + crop_box["height"] >= y + height
+    crop = cv2.imdecode(
+        np.frombuffer(base64.b64decode(payload["image_png_base64"]), dtype=np.uint8),
+        cv2.IMREAD_UNCHANGED,
+    )
+    expected_crop = cv2.rotate(source[3427:3532, 884:1094], cv2.ROTATE_180)
+    np.testing.assert_array_equal(crop, expected_crop)
 
 
 @pytest.mark.parametrize(
