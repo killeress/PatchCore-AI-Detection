@@ -1016,7 +1016,10 @@ class CAPIInferencer:
         except (TypeError, ValueError, OverflowError):
             deskew_angle = 0.0
         locator_details = (
-            f"deskew_angle_deg={deskew_angle:.1f} underline_count={len(regions) - 1}"
+            f"deskew_angle_deg={deskew_angle:.1f} underline_count={len(regions) - 1} "
+            f"crop_rectified={detection.get('ocr_quad') is not None} "
+            f"min_rect_angle_deg={detection.get('rectify_min_rect_angle_deg')} "
+            f"opencv={cv2.__version__}"
         )
         detection["mark_bbox_tuple"] = (x, y, width, height)
         detection["mark_stream_key"] = self._build_mark_stream_key(

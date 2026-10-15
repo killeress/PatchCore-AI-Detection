@@ -690,13 +690,18 @@ def _rectify_mark_candidate(
     if not lines and _aligned_mark_pair(mask) and best["confidence"] >= 0.55:
         return best
 
-    angle = float(cv2.minAreaRect(np.column_stack((xs, ys)).astype(np.float32))[2])
+    raw_angle = float(cv2.minAreaRect(np.column_stack((xs, ys)).astype(np.float32))[2])
+    # OpenCV 4.13 returns [-90, 0) instead of the earlier positive range.
+    # Equivalent rectangles can swap width/height and differ by 90 degrees;
+    # normalize before searching both perpendicular glyph baselines.
+    angle = raw_angle % 90.0
     angles = {0.0}
     for base in (angle, angle - 90.0):
         angles.update(round(base + delta, 2) for delta in (-6, -3, 0, 3, 6)
                       if 8 <= abs(base + delta) <= 90)
     side = int(np.ceil(np.hypot(*mask.shape))) + 4
     center = (mask.shape[1] / 2.0, mask.shape[0] / 2.0)
+    best = {**best, "rectify_min_rect_angle_deg": raw_angle}
     best_mean = float(np.mean([char["score"] for char in best["chars"]]))
     winner = best
     winning_score = best_mean
@@ -1403,6 +1408,7 @@ def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Di
         "search_pass": best.get("search_pass", "primary"),
         "orientation": best.get("orientation", "normal"),
         "deskew_angle_deg": best.get("deskew_angle_deg", 0.0),
+        "rectify_min_rect_angle_deg": best.get("rectify_min_rect_angle_deg"),
         "ocr_quad": best.get("ocr_quad"),
         "underline_bboxes": best.get("underline_bboxes", []),
         "component_count": best["component_count"],

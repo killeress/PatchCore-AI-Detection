@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -13,6 +14,7 @@ from capi_database import CAPIDatabase
 from capi_edge_cv import EdgeExclusionZoneConfig, EdgeInspectionConfig
 from capi_inference import CAPIInferencer, ExclusionRegion, ImageResult, TileInfo
 from capi_server import results_to_db_data
+from test_mark_geometry import _reported_ay_path, _set_min_area_rect_convention, _synthetic_mark
 
 
 class _FakePatchcoreModel:
@@ -164,6 +166,165 @@ def test_mark_underlines_are_masked_and_attached_in_every_recognition_mode(
     assert masked_map[50, 70] == pytest.approx(0.09)
     assert masked_map[86, 40] == pytest.approx(0.30)
     assert score == pytest.approx(0.30)
+
+
+@pytest.mark.parametrize("convention", ["positive", "negative"])
+@pytest.mark.parametrize("rotate180", [False, True])
+@pytest.mark.parametrize("recognition_mode", ["deferred", "paddle_ok", "paddle_invalid"])
+def test_formal_mark_rectification_excludes_both_underlines_in_aoi_lighting(
+    monkeypatch, tmp_path, capsys, convention, rotate180, recognition_mode,
+):
+    import capi_mark_shadow
+
+    _set_min_area_rect_convention(monkeypatch, convention)
+    image, centers = _synthetic_mark(138)
+    source = tmp_path / "W0F00000_142426.tif"
+    assert cv2.imwrite(str(source), image)
+    if rotate180:
+        centers = np.asarray([image.shape[1] - 1, image.shape[0] - 1]) - centers
+
+    config = CAPIConfig(
+        inference_rotate_180_enabled=rotate180,
+        patchcore_filter_enabled=False,
+        patchcore_concentration_enabled=False,
+        patchcore_diffuse_area_enabled=False,
+        edge_margin_px=0,
+        mark_exclusion_padding_px=0,
+        mark_exclusion_soft_decay_px=0,
+        aoi_judgment_roi_enabled=True,
+        aoi_judgment_radius_px=25,
+    )
+    inf = object.__new__(CAPIInferencer)
+    inf.config = config
+    inf.threshold = 0.34
+    payloads = []
+    client = object.__new__(capi_mark_shadow.MarkShadowClient)
+    client.padding_ratio = 0.15
+
+    def recognize(payload):
+        payloads.append(payload)
+        return {
+            "success": True,
+            "paddle_text": "AY" if recognition_mode == "paddle_ok" else "公",
+            "paddle_confidence": 0.96,
+            "worker_version": "6",
+        }
+
+    monkeypatch.setattr(client, "_send", recognize)
+    monkeypatch.setattr(capi_mark_shadow, "_CLIENT", client)
+    found, regions = inf._detect_panel_mark_binary_region(
+        [source], machine_no="CAPI45", model_id="GN116BGEAB40S",
+        apply_recognition=recognition_mode != "deferred",
+    )
+    assert found["text"] == "AY"
+    assert 35 < abs(found["deskew_angle_deg"]) < 50
+    assert found["orientation"] == ("normal" if rotate180 else "rot180")
+    assert len(regions) == 3
+    assert [region.name for region in regions].count("mark_underline") == 2
+    for x, y in centers:
+        assert any(r.x1 <= x < r.x2 and r.y1 <= y < r.y2
+                   for r in regions if r.name == "mark_underline")
+    assert len(payloads) == (recognition_mode != "deferred")
+    for payload in payloads:
+        assert payload["crop_rectified"] is True
+        assert payload["crop_width"] > payload["crop_height"]
+    if recognition_mode != "deferred":
+        assert found["recognition_fallback"] is (recognition_mode == "paddle_invalid")
+    locator_log = capsys.readouterr().out
+    assert "underline_count=2" in locator_log
+    assert "crop_rectified=True" in locator_log
+    assert f"opencv={cv2.__version__}" in locator_log
+
+    tx, ty = (0, 256) if rotate180 else (512, 0)
+    # Check each AOI seed independently in both reported lighting images. A real
+    # defect within the same ROI must survive even when both printed lines do not.
+    for prefix in ("W0F00000", "WGF50500"):
+        for ax, ay in np.rint(centers).astype(int):
+            for add_real_defect in (False, True):
+                tile = TileInfo(
+                    tile_id=0, x=tx, y=ty, width=512, height=512,
+                    image=np.zeros((512, 512), dtype=np.uint8),
+                    is_aoi_coord_tile=True,
+                    aoi_image_x=int(ax), aoi_image_y=int(ay),
+                    aoi_product_x=int(ax), aoi_product_y=int(ay),
+                    score_threshold=0.34,
+                )
+                result = ImageResult(
+                    image_path=Path(f"{prefix}_142426.tif"),
+                    image_size=(1024, 768), otsu_bounds=(0, 0, 1024, 768),
+                    raw_bounds=(0, 0, 1024, 768), exclusion_regions=[],
+                    tiles=[tile], excluded_tile_count=0, processed_tile_count=1,
+                    processing_time=0.0,
+                )
+                inf._attach_panel_mark_binary_to_results([result], found, regions)
+                assert tile.mark_exclusion_region_count == 3
+                amap = np.zeros((512, 512), dtype=np.float32)
+                for x, y in np.rint(centers).astype(int):
+                    amap[y - ty, x - tx] = 0.95
+                yy, xx = np.mgrid[:512, :512]
+                free = (np.abs(xx + tx - ax) <= 24) & (np.abs(yy + ty - ay) <= 24)
+                for r in regions:
+                    free &= ~((xx + tx >= r.x1) & (xx + tx < r.x2)
+                              & (yy + ty >= r.y1) & (yy + ty < r.y2))
+                real_y, real_x = np.argwhere(free)[0]
+                if add_real_defect:
+                    amap[real_y, real_x] = 0.70
+                score, masked = inf.predict_tile(
+                    tile, threshold=0.34, raw_prediction=(0.95, amap),
+                )
+                for x, y in np.rint(centers).astype(int):
+                    assert masked[y - ty, x - tx] == pytest.approx(0.095)
+                assert masked[real_y, real_x] == pytest.approx(0.70 if add_real_defect else 0)
+                result.anomaly_tiles = [(tile, score, masked)]
+                inf._apply_aoi_judgment_roi([result], (1024, 768))
+                assert bool(tile.is_aoi_coord_below_threshold) is (not add_real_defect)
+                assert (result.anomaly_tiles[0][1] >= 0.34) is add_real_defect
+
+
+@pytest.mark.parametrize("rotate180", [False, True])
+def test_reported_ay_formal_exclusions_suppress_both_lines_with_default_padding(rotate180):
+    source = _reported_ay_path()
+    inf = object.__new__(CAPIInferencer)
+    inf.config = CAPIConfig(
+        inference_rotate_180_enabled=rotate180,
+        patchcore_filter_enabled=False,
+        patchcore_concentration_enabled=False,
+        patchcore_diffuse_area_enabled=False,
+        edge_margin_px=0,
+    )
+    inf.threshold = 0.34
+    found, regions = inf._detect_panel_mark_binary_region([source], apply_recognition=False)
+    assert found["text"] == "AY" and found["ocr_quad"] is not None
+    assert len(regions) == 3
+    width, height = found["image_size"]
+    centers = np.float32([[4872, 916], [4919, 963]])
+    tx, ty = 4631, 770  # Exact tile origin from the reported inference log.
+    if rotate180:
+        centers = [width - 1, height - 1] - centers
+        tx, ty = width - tx - 512, height - ty - 512
+    for prefix in ("W0F00000", "WGF50500"):
+        for ax, ay in np.rint(centers).astype(int):
+            tile = TileInfo(
+                tile_id=0, x=tx, y=ty, width=512, height=512,
+                image=np.zeros((512, 512), dtype=np.uint8),
+                is_aoi_coord_tile=True, aoi_image_x=int(ax), aoi_image_y=int(ay),
+            )
+            result = ImageResult(
+                image_path=Path(f"{prefix}_142426.tif"), image_size=(width, height),
+                otsu_bounds=(0, 0, width, height), exclusion_regions=[], tiles=[tile],
+                excluded_tile_count=0, processed_tile_count=1, processing_time=0.0,
+            )
+            inf._attach_panel_mark_binary_to_results([result], found, regions)
+            for real_score in (0.0, 0.7):
+                amap = np.zeros((512, 512), dtype=np.float32)
+                for x, y in np.rint(centers).astype(int):
+                    amap[y - ty, x - tx] = 0.95
+                amap[0, 0] = real_score  # Outside all MARK padding/decay bands.
+                score, masked = inf.predict_tile(tile, raw_prediction=(0.95, amap))
+                for x, y in np.rint(centers).astype(int):
+                    assert masked[y - ty, x - tx] == pytest.approx(0.095)
+                assert score == pytest.approx(max(0.095, real_score))
+                assert masked[0, 0] == pytest.approx(real_score)
 
 
 def test_mark_exclusion_recomputes_formal_score_from_strongest_valid_patch():
