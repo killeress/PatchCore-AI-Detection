@@ -244,6 +244,7 @@ class TileInfo:
     dust_two_stage_features: Optional[list] = field(default=None, repr=False)  # 兩階段特徵點列表
     dust_two_stage_dust_mask: Optional[np.ndarray] = field(default=None, repr=False)  # two-stage 實際使用的 dust mask
     dust_two_stage_association_mask: Optional[np.ndarray] = field(default=None, repr=False)  # 規格內檢查使用的灰塵暈圈關聯 mask
+    dust_low_coverage_features: Optional[list] = field(default=None, repr=False)  # 低 COV 原圖覆核，獨立於 two-stage / bomb 證據
     is_bomb: bool = False       # 是否為炸彈系統模擬缺陷
     bomb_defect_code: str = ""  # 匹配到的炸彈 Defect Code
     bomb_remaining_points: Optional[List[Tuple[int, int]]] = field(default=None, repr=False)  # 點炸彈排除後的真異常圖片座標
@@ -924,6 +925,10 @@ class CAPIInferencer:
             str(detection.get("roi") or "unknown").strip(),
             "locator-rot180" if detection.get("orientation") == "rot180" else "locator-normal",
         ]
+        # Rectified diagonal crops must not inherit OCR votes from older skewed
+        # crops. Keep one stable stream despite small frame-to-frame angle drift.
+        if abs(float(detection.get("deskew_angle_deg") or 0.0)) > 0.01:
+            parts.append("deskew")
         return "|".join(part.replace("|", "/") or "unknown" for part in parts)
 
     def _detect_panel_mark_binary_region(
@@ -984,6 +989,35 @@ class CAPIInferencer:
             x2=x + width,
             y2=y + height,
         )
+        regions = [region]
+        underline_bboxes = detection.get("underline_bboxes") or []
+        if isinstance(underline_bboxes, (list, tuple)):
+            for underline_bbox in underline_bboxes:
+                if not isinstance(underline_bbox, dict):
+                    continue
+                try:
+                    ux = int(underline_bbox["x"])
+                    uy = int(underline_bbox["y"])
+                    uw = int(underline_bbox["width"])
+                    uh = int(underline_bbox["height"])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if uw <= 0 or uh <= 0:
+                    continue
+                ux1, uy1 = max(0, ux), max(0, uy)
+                ux2, uy2 = min(image_w, ux + uw), min(image_h, uy + uh)
+                if ux2 <= ux1 or uy2 <= uy1:
+                    continue
+                regions.append(ExclusionRegion("mark_underline", ux1, uy1, ux2, uy2))
+        try:
+            deskew_angle = float(detection.get("deskew_angle_deg") or 0.0)
+            if not np.isfinite(deskew_angle):
+                deskew_angle = 0.0
+        except (TypeError, ValueError, OverflowError):
+            deskew_angle = 0.0
+        locator_details = (
+            f"deskew_angle_deg={deskew_angle:.1f} underline_count={len(regions) - 1}"
+        )
         detection["mark_bbox_tuple"] = (x, y, width, height)
         detection["mark_stream_key"] = self._build_mark_stream_key(
             machine_no,
@@ -998,20 +1032,13 @@ class CAPIInferencer:
                 f"technique={detection.get('locator_technique', 'HM-DotMatrixCV')} "
                 f"roi={detection.get('roi', '')} "
                 f"search={detection.get('search_pass', 'hm_fixed_roi')} "
-                f"bbox=({x},{y},{width},{height})"
+                f"bbox=({x},{y},{width},{height}) {locator_details}"
             )
             print(
                 f"MARK Recognition {source_path.name}: decision=skipped "
                 f"reason={detection.get('recognition_reason', 'hm_location_only')}"
             )
-            return detection, [region]
-        if not apply_recognition:
-            return detection, [region]
-        self._apply_online_paddle_mark_recognition(
-            image,
-            detection,
-            source_path,
-        )
+            return detection, regions
         print(
             f"MARK Locator {source_path.name}: technique=DotMatrixCV "
             f"profile=v{int(detection.get('profile_version') or 0)} "
@@ -1019,7 +1046,14 @@ class CAPIInferencer:
             f"search={detection.get('search_pass', 'primary')} "
             f"orientation={detection.get('orientation', '')} "
             f"paddle_crop_rotation={'rot180' if detection.get('orientation') == 'rot180' else 'normal'} "
-            f"bbox=({x},{y},{width},{height})"
+            f"bbox=({x},{y},{width},{height}) {locator_details}"
+        )
+        if not apply_recognition:
+            return detection, regions
+        self._apply_online_paddle_mark_recognition(
+            image,
+            detection,
+            source_path,
         )
         if detection.get("recognition_fallback"):
             print(
@@ -1058,7 +1092,7 @@ class CAPIInferencer:
                 f"{float(detection.get('paddle_round_trip_ms') or 0.0):.1f} "
                 f"legacy_text={detection.get('legacy_text', '')}"
             )
-        return detection, [region]
+        return detection, regions
 
     def _attach_panel_mark_binary_to_results(
         self,
@@ -3691,7 +3725,9 @@ class CAPIInferencer:
             return accepted_bubble_mask
 
         non_zero_pixels = gray[gray > 0]
-        if len(non_zero_pixels) <= 100 or float(np.median(non_zero_pixels)) <= 20:
+        # Dark OMIT substrates can still contain visible bubbles. The local
+        # contrast and shape checks below reject noise without a brightness gate.
+        if len(non_zero_pixels) <= 100:
             return accepted_bubble_mask
 
         min_dim = min(gray.shape[:2])
@@ -3881,7 +3917,152 @@ class CAPIInferencer:
             reference_area=ref_area,
         )
         accepted_bubble_mask[large_bubble_mask > 0] = 255
+        broad_bubble_mask = self._detect_broad_bubble_mask(
+            gray,
+            area_min,
+            area_max,
+            extension,
+            reference_area=ref_area,
+        )
+        accepted_bubble_mask[broad_bubble_mask > 0] = 255
         return accepted_bubble_mask
+
+    def _detect_broad_bubble_mask(
+        self,
+        gray: np.ndarray,
+        area_min: int,
+        area_max: int,
+        extension: int,
+        reference_area: Optional[int] = None,
+    ) -> np.ndarray:
+        """Find compact bright bubbles on a slowly varying OMIT background."""
+        bubble_mask = np.zeros_like(gray, dtype=np.uint8)
+        if gray is None or gray.size == 0 or min(gray.shape[:2]) < 256:
+            return bubble_mask
+
+        height, width = gray.shape[:2]
+        ref_area = gray.size if reference_area is None else max(1, int(reference_area))
+        min_area = max(area_min * 20, int(ref_area * 0.003))
+        max_area = min(area_max, int(ref_area * 0.08))
+        if max_area < min_area:
+            return bubble_mask
+
+        # A local Gaussian background can absorb a broad, faint bubble. Fit a
+        # quadratic illumination surface to sparse samples instead, excluding
+        # outliers so the bubbles themselves do not pull the background upward.
+        source = cv2.GaussianBlur(cv2.medianBlur(gray, 5), (9, 9), 0)
+        x = np.arange(width, dtype=np.float64)[None, :] / (width / 2.0) - 1.0
+        y = np.arange(height, dtype=np.float64)[:, None] / (height / 2.0) - 1.0
+        sample_y, sample_x = np.broadcast_arrays(y[::8, :], x[:, ::8])
+        design = np.stack(
+            (np.ones_like(sample_x), sample_x, sample_y,
+             sample_x * sample_x, sample_x * sample_y, sample_y * sample_y),
+            axis=-1,
+        ).reshape(-1, 6)
+        samples = source[::8, ::8].ravel().astype(np.float64)
+        valid_pixels = gray[::8, ::8].ravel() > 0
+        inliers = valid_pixels.copy()
+        minimum_samples = max(100, int(samples.size * 0.5))
+        coefficients = None
+        for iteration in range(7):
+            if np.count_nonzero(inliers) < minimum_samples:
+                return bubble_mask
+            coefficients, _, rank, _ = np.linalg.lstsq(
+                design[inliers], samples[inliers], rcond=None,
+            )
+            if rank < 6 or not np.all(np.isfinite(coefficients)):
+                return bubble_mask
+            if iteration == 6:
+                break  # Final fit uses the last selected inliers.
+            residual = samples - design @ coefficients
+            median = float(np.median(residual[valid_pixels]))
+            mad = 1.4826 * float(np.median(np.abs(residual[valid_pixels] - median)))
+            inliers = valid_pixels & (np.abs(residual - median) <= max(1.0, 2.0 * mad))
+
+        background = (
+            coefficients[0] + coefficients[1] * x + coefficients[2] * y
+            + coefficients[3] * x * x + coefficients[4] * x * y
+            + coefficients[5] * y * y
+        )
+        delta = source.astype(np.float64) - background
+        binary = ((delta >= 2.0) & (gray > 0)).astype(np.uint8) * 255
+        binary = cv2.morphologyEx(
+            binary, cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)),
+        )
+        binary = cv2.morphologyEx(
+            binary, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        )
+        binary[gray == 0] = 0
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        for index in range(1, count):
+            left, top, box_width, box_height, area = (int(value) for value in stats[index])
+            if area < min_area or area > max_area:
+                continue
+            if (left <= 6 or top <= 6
+                    or left + box_width >= width - 6 or top + box_height >= height - 6):
+                continue
+            aspect = max(box_width, box_height) / max(1, min(box_width, box_height))
+            fill_ratio = area / max(1, box_width * box_height)
+            if aspect > 2.5 or not 0.45 <= fill_ratio <= 0.90:
+                continue
+            component = labels == index
+            mean_delta = float(np.mean(delta[component]))
+            if mean_delta < 2.0:
+                continue
+            contours, _ = cv2.findContours(
+                component.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE,
+            )
+            contour = max(contours, key=cv2.contourArea)
+            if len(contour) < 5:
+                continue
+            contour_area = float(cv2.contourArea(contour))
+            perimeter = float(cv2.arcLength(contour, True))
+            circularity = 4.0 * np.pi * contour_area / max(1.0, perimeter * perimeter)
+            hull = cv2.convexHull(contour)
+            solidity = contour_area / max(1.0, float(cv2.contourArea(hull)))
+            if circularity < 0.65 or solidity < 0.90:
+                continue
+
+            filled = np.zeros_like(gray, dtype=np.uint8)
+            cv2.drawContours(filled, [hull], -1, 255, thickness=-1)
+            if np.count_nonzero(filled) > max_area:
+                continue
+            ellipse_mask = np.zeros_like(filled)
+            cv2.ellipse(ellipse_mask, cv2.fitEllipse(contour), 255, thickness=-1)
+            intersection = np.count_nonzero((filled > 0) & (ellipse_mask > 0))
+            union = np.count_nonzero((filled > 0) | (ellipse_mask > 0))
+            if intersection / max(1, union) < 0.90:
+                continue
+
+            # Check contrast against nearby background after the shape gates.
+            # A local crop keeps these larger morphology kernels inexpensive.
+            x1, y1 = max(0, left - 15), max(0, top - 15)
+            x2 = min(width, left + box_width + 15)
+            y2 = min(height, top + box_height + 15)
+            local_mask = filled[y1:y2, x1:x2]
+            outer = cv2.dilate(
+                local_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)),
+            )
+            inner = cv2.dilate(
+                local_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+            )
+            ring = (outer > 0) & (inner == 0) & (gray[y1:y2, x1:x2] > 0)
+            if not np.any(ring):
+                continue
+            ring_delta = float(np.median(delta[y1:y2, x1:x2][ring]))
+            if mean_delta - ring_delta < 2.0:
+                continue
+            if extension > 0:
+                filled = cv2.dilate(
+                    filled,
+                    cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE, (extension * 2 + 1, extension * 2 + 1),
+                    ),
+                )
+            bubble_mask[filled > 0] = 255
+        return bubble_mask
 
     def _detect_large_surface_bubble_mask(
         self,
@@ -4616,6 +4797,41 @@ class CAPIInferencer:
 
         return has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, labels
 
+    def _review_aoi_low_coverage_dust(
+        self, tile, anomaly_map, region_details, region_labels,
+        omit_image, omit_crop, *, focus_x=None, product_resolution=None,
+    ):
+        """Review low-COV AOI regions using raw pixels and unextended OMIT cores."""
+        threshold = self.config.dust_heatmap_iou_threshold
+        if tile.aoi_roi_mask is None or not any(
+            not region["is_dust"] and 0 < region.get("dust_overlap", 0)
+            and region["coverage"] < threshold for region in region_details
+        ):
+            return region_details, ""
+        if tile.original_image is None or omit_crop is None:
+            return region_details, " LOW_COV_FEATURE: missing raw/OMIT -> KEEP_NG"
+        from capi_dust_review import review_low_coverage_regions
+
+        _, precise_mask, _, _ = self._check_dust_or_scratch_feature_with_context(
+            omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
+            extension_override=0, focus_x=focus_x,
+            product_resolution=product_resolution,
+        )
+        reviewed, features = review_low_coverage_regions(
+            tile.original_image, precise_mask, anomaly_map, region_labels,
+            region_details, coverage_threshold=threshold,
+            evaluation_mask=tile.aoi_roi_mask,
+        )
+        tile.dust_low_coverage_features = features
+        rescued = sum(region.get("feature_review_reason") ==
+                      "all_features_match_precise_dust" for region in reviewed)
+        matched = sum(feature["is_dust"] for feature in features)
+        unmatched = len(features) - matched
+        return reviewed, (
+            f" LOW_COV_FEATURE: {matched}dust+{unmatched}real"
+            f" rescued_regions={rescued}"
+        )
+
     def _build_dust_association_mask(
         self,
         dust_mask: Optional[np.ndarray],
@@ -5210,10 +5426,11 @@ class CAPIInferencer:
 
             # 在每個 region 的峰值位置畫標記
             for r in region_details:
-                py, px = r["peak_yx"]
+                reviewed_real_peak = r.get("real_feature_peak_yx") if not r["is_dust"] else None
+                py, px = reviewed_real_peak if reviewed_real_peak is not None else r["peak_yx"]
                 sx = int(px * scale_x)
                 sy = int(py * scale_y)
-                peak_in = r.get("peak_in_dust", True)
+                peak_in = False if reviewed_real_peak is not None else r.get("peak_in_dust", True)
                 if peak_in:
                     # 峰值在灰塵上 → 黃色圓點
                     cv2.circle(panel_br, (sx, sy), 4, (0, 255, 255), -1)
@@ -8001,8 +8218,13 @@ class CAPIInferencer:
             """單張圖片的灰塵交叉驗證 (可安全在多執行緒中呼叫)"""
             img_path = result.image_path
 
-            # skip_files 圖片（如 B0F00000）不做 OMIT 灰塵比對
+            # 黑圖使用精準二值亮點遮罩做 OMIT 比對，與 v2 共用處理。
             if self.config.should_skip_file(img_path.name, self.station_adapter):
+                self._apply_omit_dust_postprocess(
+                    [result], omit_image, omit_overexposed, omit_overexposure_info,
+                    cpu_workers=1, model_id=model_id,
+                    product_resolution=product_resolution,
+                )
                 return result
 
             if result.anomaly_tiles and omit_image is not None and omit_overexposed:
@@ -8085,6 +8307,19 @@ class CAPIInferencer:
                                     force_include_radius=aoi_seed_radius,
                                     force_include_min_score=aoi_seed_min_score,
                                 )
+                            if has_real_defect:
+                                region_details, review_note = self._review_aoi_low_coverage_dust(
+                                    tile, anomaly_map, region_details, region_labels,
+                                    omit_image, omit_crop, focus_x=context_focus_x,
+                                    product_resolution=product_resolution,
+                                )
+                                detail_text += review_note
+                                remaining = [region for region in region_details if not region["is_dust"]]
+                                if region_details and review_note:
+                                    has_real_defect = bool(remaining)
+                                if remaining and review_note:
+                                    best = max(remaining, key=lambda region: region["max_score"])
+                                    real_peak_yx = best.get("real_feature_peak_yx", best["peak_yx"])
                             iou = overall_iou
                             tile.dust_heatmap_iou = iou
                             # 記錄 per-region 最大 coverage（實際判定用的值）
@@ -8116,7 +8351,10 @@ class CAPIInferencer:
                             else:
                                 # 所有異常區域都與灰塵重疊 → 初步標記為灰塵
                                 # 如果啟用兩階段判定，進行二次確認
-                                if self.config.dust_two_stage_enabled:
+                                if self.config.dust_two_stage_enabled and not (region_details and all(
+                                    region.get("feature_review_reason") == "all_features_match_precise_dust"
+                                    for region in region_details
+                                )):
                                     # 兩階段: 用原圖精準定位 feature 點，比對 dust_mask (ext=0)
                                     dust_mask_no_ext = None
                                     if omit_crop is not None:
@@ -8432,6 +8670,7 @@ class CAPIInferencer:
                             and (tile.aoi_roi_mask is not None or tile.anomaly_peak_source in {
                                 "aoi_real_region",
                                 "aoi_report_fallback",
+                                "bright_spot_dust",
                             })
                             and tile.anomaly_peak_x >= 0
                             and tile.anomaly_peak_y >= 0
@@ -8880,6 +9119,106 @@ class CAPIInferencer:
             " -> REAL_NG"
         )
 
+    def _filter_bright_spot_dust(
+        self,
+        tile: TileInfo,
+        anomaly_map: np.ndarray,
+        dust_mask: np.ndarray,
+    ) -> Tuple[np.ndarray, str]:
+        """Subtract exact OMIT pixels, then recheck the original bright-spot area.
+
+        Binary candidates have no meaningful peak/sub-peak ratio. Even a small
+        overlap must not suppress an entire connected bright defect; only its
+        overlapping pixels are removed, without a dust dilation or heatmap rank.
+        """
+        amap = self._limit_aoi_roi_mask(tile, np.asarray(anomaly_map, dtype=np.float32))
+        if amap.ndim != 2 or not amap.size or not np.isfinite(amap).all():
+            return anomaly_map, " BINARY_DUST: invalid evidence -> REAL_NG"
+        binary = (amap > 0.5).astype(np.uint8)
+        dm = np.asarray(dust_mask, dtype=np.uint8)
+        if dm.ndim == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        if dm.shape != binary.shape:
+            dm = cv2.resize(dm, (binary.shape[1], binary.shape[0]), interpolation=cv2.INTER_NEAREST)
+        dust = dm > 0
+        residual = ((binary > 0) & ~dust).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(residual, connectivity=8)
+        minimum = max(1, int(tile.bright_spot_min_area or self.config.bright_spot_min_area))
+        keep = np.zeros(count, dtype=bool)
+        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= minimum
+        remaining = keep[labels]
+
+        # Split removed and surviving pixels before making diagnostic regions.
+        # A sticker can connect two real points; each surviving point must get
+        # its own report coordinate and the removed connector must stay green.
+        region_labels = np.zeros(binary.shape, dtype=np.int32)
+        details = []
+        dust_area = int(np.count_nonzero(dust))
+        for is_dust, pixels in ((False, remaining), (True, (binary > 0) & ~remaining)):
+            region_count, part_labels, region_stats, _ = cv2.connectedComponentsWithStats(
+                pixels.astype(np.uint8), connectivity=8,
+            )
+            offset = len(details)
+            active = part_labels > 0
+            region_labels[active] = part_labels[active] + offset
+            for label in range(1, region_count):
+                region = part_labels == label
+                area = int(region_stats[label, cv2.CC_STAT_AREA])
+                overlap = int(np.count_nonzero(region & dust))
+                metric_denominator = (area if self.config.dust_heatmap_metric == "coverage"
+                                      else area + dust_area - overlap)
+                # Use an actual pixel nearest the centroid, not a point in a
+                # hole or the space between disconnected bright candidates.
+                ys, xs = np.where(region)
+                nearest = int(np.argmin((ys - ys.mean()) ** 2 + (xs - xs.mean()) ** 2))
+                peak = (int(ys[nearest]), int(xs[nearest]))
+                details.append(dict(
+                    label_id=label + offset, area=area, dust_overlap=overlap,
+                    metric_denominator=metric_denominator,
+                    coverage=float(overlap / metric_denominator),
+                    is_dust=is_dust, remaining_area=0 if is_dust else area,
+                    peak_in_dust=bool(dust[peak]), max_score=1.0, peak_yx=peak,
+                ))
+        candidate_area = int(np.count_nonzero(binary))
+        remaining_area = int(np.count_nonzero(remaining))
+        real_regions = [region for region in details if not region["is_dust"]]
+        dust_count = len(details) - len(real_regions)
+        tile.dust_heatmap_binary = binary * 255
+        tile.dust_region_details = details
+        tile.dust_region_max_cov = max((region["coverage"] for region in details), default=0.0)
+        intersection = int(np.count_nonzero((binary > 0) & dust))
+        denominator = (int(np.count_nonzero(dust)) if self.config.dust_heatmap_metric == "coverage"
+                       else int(np.count_nonzero((binary > 0) | dust)))
+        tile.dust_heatmap_iou = float(intersection / denominator) if denominator else 0.0
+        tile.is_suspected_dust_or_scratch = candidate_area > 0 and remaining_area == 0
+        tile.bright_spot_area = remaining_area
+        if real_regions:
+            peak_y, peak_x = max(real_regions, key=lambda region: region["remaining_area"])["peak_yx"]
+            tile.anomaly_peak_y = tile.y + int(peak_y * tile.height / amap.shape[0])
+            tile.anomaly_peak_x = tile.x + int(peak_x * tile.width / amap.shape[1])
+            tile.anomaly_peak_source = "bright_spot_dust"
+        tile.decision_context = dict(tile.decision_context or {}, bright_spot_dust={
+            "method": "exact_mask_subtraction", "extension": 0,
+            "candidate_pixels": candidate_area, "overlap_pixels": intersection,
+            "remaining_pixels": remaining_area, "min_area": minimum,
+        })
+        try:
+            tile.dust_iou_debug_image = self.generate_dust_iou_debug_image(
+                tile.image, amap, dust_mask, tile.dust_heatmap_binary,
+                tile.dust_heatmap_iou, 100.0, tile.is_suspected_dust_or_scratch,
+                region_details=details, region_labels=region_labels,
+                aoi_roi_enabled=tile.aoi_roi_mask is not None,
+                original_image=tile.original_image,
+            )
+        except Exception as exc:
+            logger.warning("Black-screen dust debug image failed: %s", exc)
+        verdict = "DUST" if tile.is_suspected_dust_or_scratch else "REAL_NG"
+        return remaining.astype(np.float32), (
+            f" BINARY_DUST: {len(real_regions)}real+{dust_count}dust"
+            f" overlap={intersection}/{candidate_area} remaining={remaining_area}"
+            f" min_area={minimum} ext=0 -> {verdict}"
+        )
+
     def _apply_omit_dust_postprocess(
         self,
         results: List[ImageResult],
@@ -8890,12 +9229,15 @@ class CAPIInferencer:
         model_id: Optional[str] = None,
         product_resolution: Optional[Tuple[int, int]] = None,
     ) -> None:
-        """Apply panel-level OMIT dust filtering to PatchCore anomaly tiles."""
+        """Apply OMIT filtering to PatchCore heatmaps and binary bright spots."""
         if omit_image is None:
             return
 
         def _dust_check_one(result: ImageResult) -> None:
-            if self.config.should_skip_file(result.image_path.name, self.station_adapter):
+            binary_only = (self.config.should_skip_file(result.image_path.name, self.station_adapter)
+                           or self._get_image_prefix(result.image_path.name) == "B0F00000")
+            if (binary_only
+                    and not any(tile.is_bright_spot_detection for tile, _, _ in result.anomaly_tiles)):
                 return
             if not result.anomaly_tiles:
                 return
@@ -8920,7 +9262,9 @@ class CAPIInferencer:
                 return
 
             oh, ow = omit_image.shape[:2]
-            for tile, score, anomaly_map in result.anomaly_tiles:
+            for tile_index, (tile, score, anomaly_map) in enumerate(result.anomaly_tiles):
+                if binary_only and not tile.is_bright_spot_detection:
+                    continue
                 tx, ty, tw, th = tile.x, tile.y, tile.width, tile.height
                 # AOI centered tile 可能在影像外 (tx<0 或 ty<0)，必須用零填補
                 # 對齊 cv2.copyMakeBorder 切 tile.image 的行為，否則 omit_crop 會
@@ -8948,6 +9292,7 @@ class CAPIInferencer:
                         tw,
                         th,
                         omit_crop,
+                        **({"extension_override": 0} if tile.is_bright_spot_detection else {}),
                         focus_x=context_focus_x,
                         product_resolution=product_resolution,
                     )
@@ -8967,6 +9312,20 @@ class CAPIInferencer:
                         f"{log_icon} {result.image_path.name} Tile@({tx},{ty}){zone_tag}{aoi_suffix} "
                         f"Score:{score:.3f} → {detail_text}"
                     )
+                    continue
+
+                if tile.is_bright_spot_detection:
+                    tile.is_suspected_dust_or_scratch = False
+                    if is_dust and anomaly_map is not None and dust_mask is not None:
+                        filtered_map, binary_detail = self._filter_bright_spot_dust(tile, anomaly_map, dust_mask)
+                        result.anomaly_tiles[tile_index] = (tile, score, filtered_map)
+                        detail_text += binary_detail
+                    else:
+                        detail_text += " BINARY_DUST: no matching evidence -> REAL_NG"
+                    tile.dust_detail_text = detail_text
+                    icon = "🧹" if tile.is_suspected_dust_or_scratch else "🔴"
+                    print(f"{icon} {result.image_path.name} Tile@({tx},{ty})"
+                          f"{self._format_aoi_tile_log_suffix(tile)} Score:{score:.3f} → {detail_text}")
                     continue
 
                 if is_dust and anomaly_map is not None and dust_mask is not None:
@@ -8991,6 +9350,19 @@ class CAPIInferencer:
                             force_include_radius=aoi_seed_radius,
                             force_include_min_score=aoi_seed_min_score,
                         )
+                    if has_real:
+                        region_details, review_note = self._review_aoi_low_coverage_dust(
+                            tile, anomaly_map_for_dust, region_details, region_labels,
+                            omit_image, omit_crop, focus_x=context_focus_x,
+                            product_resolution=product_resolution,
+                        )
+                        detail_text += review_note
+                        remaining = [region for region in region_details if not region["is_dust"]]
+                        if region_details and review_note:
+                            has_real = bool(remaining)
+                        if remaining and review_note:
+                            best = max(remaining, key=lambda region: region["max_score"])
+                            real_peak_yx = best.get("real_feature_peak_yx", best["peak_yx"])
                     tile.dust_heatmap_iou = overall_iou
                     tile.dust_region_details = region_details
                     tile.dust_heatmap_binary = heatmap_binary
@@ -9014,7 +9386,10 @@ class CAPIInferencer:
                             tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
                             tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
                     else:
-                        if self.config.dust_two_stage_enabled:
+                        if self.config.dust_two_stage_enabled and not (region_details and all(
+                            region.get("feature_review_reason") == "all_features_match_precise_dust"
+                            for region in region_details
+                        )):
                             dust_mask_no_ext = None
                             if omit_crop is not None:
                                 _, dust_mask_no_ext, _, _ = \
@@ -9474,6 +9849,12 @@ class CAPIInferencer:
                                     peak_in_dust=False, max_score=float(amap[py, px]), peak_yx=(py, px)))
             if not details:
                 return False, ""
+        elif tile.is_bright_spot_detection:
+            # The diagnostic binary includes filtered sticker pixels. Bomb
+            # matching must use only the surviving bright-spot evidence.
+            _real, _peak, _iou, details, binary, labels = self.check_dust_per_region(
+                np.zeros(amap.shape, dtype=np.uint8), amap, top_percent=100.0,
+            )
         elif (
             tile.dust_region_details is not None
             and binary is not None
@@ -9661,6 +10042,7 @@ class CAPIInferencer:
                         and (tile.aoi_roi_mask is not None or tile.anomaly_peak_source in {
                             "aoi_real_region",
                             "aoi_report_fallback",
+                            "bright_spot_dust",
                         })
                         and tile.anomaly_peak_x >= 0
                         and tile.anomaly_peak_y >= 0

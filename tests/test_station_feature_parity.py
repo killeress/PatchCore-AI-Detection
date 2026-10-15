@@ -202,15 +202,24 @@ def test_station_skip_files_and_cli_image_lookup(station, tmp_path):
     assert CAPIWebHandler._resolve_debug_image_path(tmp_path, station) == white
 
 
-def test_skipped_black_image_bypasses_production_dust_filter(station, tmp_path):
+def test_skipped_black_image_uses_binary_production_dust_filter(station, tmp_path):
     worker = object.__new__(CAPIInferencer)
     worker.station_adapter = station
     worker.config = CAPIConfig(skip_files=["B0F00000"])
-    worker._check_dust_or_scratch_feature_with_context = Mock(side_effect=AssertionError("black image entered dust filter"))
+    worker._check_dust_or_scratch_feature_with_context = Mock(
+        return_value=(True, np.full((64, 64), 255, np.uint8), 1.0, "OMIT exact mask"),
+    )
+    worker.check_dust_per_region = Mock(side_effect=AssertionError("black image entered PatchCore dust filter"))
+    worker.check_dust_two_stage = Mock(side_effect=AssertionError("black image entered PatchCore two-stage filter"))
     result = result_for(tmp_path / image_name(station, "B0F00000"))
+    result.tiles[0].is_bright_spot_detection = True
+    result.tiles[0].bright_spot_min_area = 4
     worker._apply_omit_dust_postprocess([result], np.full((128, 128), 90, np.uint8), False, "")
-    worker._check_dust_or_scratch_feature_with_context.assert_not_called()
-    assert not result.tiles[0].is_suspected_dust_or_scratch
+    worker._check_dust_or_scratch_feature_with_context.assert_called_once()
+    assert worker._check_dust_or_scratch_feature_with_context.call_args.kwargs["extension_override"] == 0
+    worker.check_dust_per_region.assert_not_called()
+    worker.check_dust_two_stage.assert_not_called()
+    assert result.tiles[0].is_suspected_dust_or_scratch
 
 
 @pytest.mark.parametrize("source", ["Windows_BG", "STANDARD", "U0F00000", "W0F00010"])

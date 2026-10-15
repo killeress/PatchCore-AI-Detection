@@ -563,7 +563,196 @@ def _detect_roi(
             if best is None or candidate["candidate_score"] > best["candidate_score"]:
                 best = candidate
 
+    if best is not None:
+        best = _rectify_mark_candidate(roi, offset_x, offset_y, full_width, full_height, best, profile_index)
     return best
+
+
+def _separate_mark_underlines(mask: np.ndarray) -> Tuple[np.ndarray, List[Dict[str, int]]]:
+    """Separate thin parallel bands from the glyph band in a rectified MARK.
+
+    Requiring a short gap and substantial horizontal overlap avoids treating
+    distant defects or a vertical scratch as part of the printed MARK.
+    """
+    rows = np.flatnonzero(np.any(mask > 0, axis=1))
+    if rows.size == 0:
+        return mask, []
+    max_gap = max(3, round((rows[-1] - rows[0] + 1) * 0.08))
+    bands = np.split(rows, np.flatnonzero(np.diff(rows) > max_gap) + 1)
+    main = max(bands, key=lambda band: band[-1] - band[0])
+    _, main_x = np.where(mask[main[0]:main[-1] + 1] > 0)
+    height = int(main[-1] - main[0] + 1)
+    width = int(main_x.max() - main_x.min() + 1)
+    clean = mask.copy()
+    underlines = []
+    for band in bands:
+        band_height = int(band[-1] - band[0] + 1)
+        _, xs = np.where(mask[band[0]:band[-1] + 1] > 0)
+        band_width = int(xs.max() - xs.min() + 1)
+        gap = max(main[0] - band[-1] - 1, band[0] - main[-1] - 1)
+        overlap = max(0, min(main_x.max(), xs.max()) - max(main_x.min(), xs.min()) + 1)
+        if not (band_height <= height * 0.25 and band_width >= width * 0.45
+                and 0 <= gap <= height * 0.75 and overlap >= band_width * 0.80):
+            continue
+        # Keep separate underlines separate, instead of masking the entire gap.
+        columns = np.unique(xs)
+        parts = np.split(columns, np.flatnonzero(np.diff(columns) > max_gap) + 1)
+        for part in parts:
+            x1, x2 = int(part[0]), int(part[-1]) + 1
+            piece = mask[band[0]:band[-1] + 1, x1:x2]
+            yy, xx = np.where(piece > 0)
+            if x2 - x1 < max(8, height * 0.30) or x2 - x1 < band_height * 2.0:
+                continue
+            underlines.append({"x": x1, "y": int(band[0] + yy.min()),
+                               "width": x2 - x1, "height": int(yy.max() - yy.min() + 1)})
+            clean[band[0]:band[-1] + 1, x1:x2] = 0
+    return clean, underlines
+
+
+def _aligned_mark_pair(mask: np.ndarray) -> bool:
+    parts = _split_two_chars(mask)
+    if parts is None:
+        return False
+    boxes = [box for _, box in parts]
+    height = max(box["height"] for box in boxes)
+    gap = boxes[1]["x"] - boxes[0]["x"] - boxes[0]["width"]
+    return (min(box["height"] for box in boxes) >= height * 0.70
+            and abs(boxes[0]["y"] - boxes[1]["y"]) <= height * 0.18
+            and 0 <= gap <= height
+            and all(0.25 <= box["width"] / box["height"] <= 1.15 for box in boxes))
+
+
+def _box_quad(box: Dict[str, int]) -> np.ndarray:
+    x, y, w, h = (box[key] for key in ("x", "y", "width", "height"))
+    return np.float32([[x, y], [x + w, y], [x + w, y + h], [x, y + h]])
+
+
+def _quad_bbox(quad: np.ndarray) -> Dict[str, int]:
+    lo = np.floor(quad.min(axis=0)).astype(int)
+    hi = np.ceil(quad.max(axis=0)).astype(int)
+    return {"x": int(lo[0]), "y": int(lo[1]),
+            "width": int(hi[0] - lo[0]), "height": int(hi[1] - lo[1])}
+
+
+def _rectify_mark_candidate(
+    roi: np.ndarray, offset_x: int, offset_y: int, full_width: int, full_height: int,
+    best: Dict[str, Any], profile_index: Dict[Tuple[int, str], Tuple[np.ndarray, ...]],
+) -> Dict[str, Any]:
+    """Correct a local MARK's baseline and retain underline exclusion geometry.
+
+    Search a bounded set of angles around the minimum-area rectangle, then
+    require aligned glyphs and a stronger recognition score. All returned
+    boxes remain in the source image; only the OCR quad is rectified later.
+    """
+    bbox = best["bbox"]
+    margin = max(20, round(max(bbox["width"], bbox["height"]) * 0.80))
+    x1 = max(0, bbox["x"] - offset_x - margin)
+    y1 = max(0, bbox["y"] - offset_y - margin)
+    x2 = min(roi.shape[1], bbox["x"] - offset_x + bbox["width"] + margin)
+    y2 = min(roi.shape[0], bbox["y"] - offset_y + bbox["height"] + margin)
+    local = roi[y1:y2, x1:x2]
+    mask = _remove_tiny_components(_dot_mask(local, min(full_width, full_height), allow_connected_chars=True, allow_underlines=True))
+    # Local background estimation can leave sparse texture near crop edges.
+    # Keep the located cluster plus compact nearby ink (potential underlines),
+    # so isolated texture cannot determine the rectangle's angle.
+    join = max(15, round(min(full_width, full_height) * 0.010))
+    count, labels, _, _ = cv2.connectedComponentsWithStats(cv2.dilate(mask, np.ones((join, join), np.uint8)))
+    selected = np.zeros_like(mask)
+    for index in range(1, count):
+        yy, xx = np.where((labels == index) & (mask > 0))
+        if xx.size == 0:
+            continue
+        cluster = {"x": int(xx.min()) + offset_x + x1, "y": int(yy.min()) + offset_y + y1,
+                   "width": int(xx.max() - xx.min() + 1), "height": int(yy.max() - yy.min() + 1)}
+        density = xx.size / (cluster["width"] * cluster["height"])
+        interior = (xx.min() > 2 and yy.min() > 2
+                    and xx.max() < mask.shape[1] - 3 and yy.max() < mask.shape[0] - 3)
+        compact = max(cluster["width"], cluster["height"]) <= max(bbox["width"], bbox["height"]) * 1.4
+        if _bboxes_overlap(bbox, cluster) or (interior and compact and density >= 0.06 and xx.size >= 20):
+            selected[yy, xx] = 255
+    mask = selected
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 20:
+        return best
+    # Re-estimate contrast away from the panel/crop boundary after localization.
+    # The wide search crop is for finding detached underlines, not thresholding
+    # faint glyphs against the camera's outer illumination gradient.
+    pad = max(12, round(min(bbox["width"], bbox["height"]) * 0.12))
+    cx1, cy1 = max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad)
+    cx2, cy2 = min(local.shape[1], int(xs.max()) + pad + 1), min(local.shape[0], int(ys.max()) + pad + 1)
+    local = local[cy1:cy2, cx1:cx2]
+    x1, y1 = x1 + cx1, y1 + cy1
+    mask = _remove_tiny_components(_dot_mask(local, min(full_width, full_height), allow_connected_chars=True, allow_underlines=True))
+    ys, xs = np.where(mask > 0)
+    if len(xs) < 20:
+        return best
+    clean, lines = _separate_mark_underlines(mask)
+    if not lines and _aligned_mark_pair(mask) and best["confidence"] >= 0.55:
+        return best
+
+    angle = float(cv2.minAreaRect(np.column_stack((xs, ys)).astype(np.float32))[2])
+    angles = {0.0}
+    for base in (angle, angle - 90.0):
+        angles.update(round(base + delta, 2) for delta in (-6, -3, 0, 3, 6)
+                      if 8 <= abs(base + delta) <= 90)
+    side = int(np.ceil(np.hypot(*mask.shape))) + 4
+    center = (mask.shape[1] / 2.0, mask.shape[0] / 2.0)
+    best_mean = float(np.mean([char["score"] for char in best["chars"]]))
+    winner = best
+    winning_score = best_mean
+    for correction in sorted(angles, key=abs):
+        transform = cv2.getRotationMatrix2D(center, correction, 1.0)
+        transform[:, 2] += np.array([side / 2.0, side / 2.0]) - center
+        rotated = cv2.warpAffine(mask, transform, (side, side), flags=cv2.INTER_NEAREST)
+        glyphs, underlines = _separate_mark_underlines(rotated)
+        if correction == 0 and not underlines:
+            continue
+        trimmed = _trim_mask(glyphs)
+        if trimmed is None or not _aligned_mark_pair(trimmed[0]):
+            continue
+        tight, tight_box = trimmed
+        if not 1.05 <= tight.shape[1] / tight.shape[0] <= 2.40:
+            continue
+        for recognized in _recognize_group_variants(tight, profile_index):
+            # A printed underline belongs below upright text, which also
+            # disambiguates the 180-degree orientation without corner priors.
+            if underlines:
+                below = all(line["y"] >= tight_box["y"] + tight_box["height"] for line in underlines)
+                above = all(line["y"] + line["height"] <= tight_box["y"] for line in underlines)
+                if not ((below and recognized["orientation"] == "normal")
+                        or (above and recognized["orientation"] == "rot180")):
+                    continue
+            score = float(np.mean([char["score"] for char in recognized["chars"]]))
+            same_upright_text = (correction == 0 and recognized["text"] == best["text"]
+                                 and recognized["orientation"] == best["orientation"])
+            if (score < 0.25 or score < best_mean + (0.06 if correction else -0.02)
+                    or (score <= winning_score and not (same_upright_text and winner is best))):
+                continue
+            inverse = cv2.invertAffineTransform(transform)
+
+            def to_source(box):
+                quad = cv2.transform(_box_quad(box)[None], inverse)[0]
+                return quad + np.float32([offset_x + x1, offset_y + y1])
+
+            quad = to_source(tight_box)
+            source_bbox = _quad_bbox(quad)
+            if not _bboxes_overlap(bbox, source_bbox):
+                continue
+            mapped_boxes = []
+            for box in recognized["char_boxes"]:
+                absolute = {**box, "x": box["x"] + tight_box["x"], "y": box["y"] + tight_box["y"]}
+                mapped = _quad_bbox(to_source(absolute))
+                mapped["x"] -= source_bbox["x"]
+                mapped["y"] -= source_bbox["y"]
+                mapped_boxes.append(mapped)
+            winner = {**best, **recognized, "char_boxes": mapped_boxes,
+                      "bbox": source_bbox, "ocr_quad": quad.tolist(),
+                      "deskew_angle_deg": float(correction),
+                      "underline_bboxes": [_quad_bbox(to_source(line)) for line in underlines],
+                      "confidence": float(np.clip((score - 0.05) / 0.25, 0.0, 1.0)),
+                      "candidate_score": score + min(best["component_count"] / 40.0, 1.0) * 0.08}
+            winning_score = score
+    return winner
 
 
 def _low_contrast_stroke_mask(roi: np.ndarray, scale_basis: int) -> np.ndarray:
@@ -594,6 +783,7 @@ def _low_contrast_stroke_mask(roi: np.ndarray, scale_basis: int) -> np.ndarray:
 
 def _dot_mask(
     roi: np.ndarray, scale_basis: int, *, allow_connected_chars: bool = False,
+    allow_underlines: bool = False,
 ) -> np.ndarray:
     sigma = max(17, int(round(scale_basis * 0.007)))
     background = cv2.GaussianBlur(roi, (0, 0), sigmaX=sigma, sigmaY=sigma)
@@ -616,6 +806,12 @@ def _dot_mask(
         x, y, width, height, area = stats[idx]
         if 3 <= width <= max_blob and 3 <= height <= max_blob and 5 <= area <= max_blob * max_blob:
             filtered[y : y + height, x : x + width] = binary[y : y + height, x : x + width]
+        elif allow_underlines and 5 <= area and max(width, height) <= max(120, scale_basis * 0.08):
+            yy, xx = np.where(labels[y:y + height, x:x + width] == idx)
+            short, long = sorted(cv2.minAreaRect(np.column_stack((xx, yy)).astype(np.float32))[1])
+            if 1 <= short <= max(5, scale_basis * 0.005) and long >= short * 3:
+                patch = filtered[y:y + height, x:x + width]
+                patch[yy, xx] = 255
 
     return filtered
 
@@ -1206,6 +1402,9 @@ def _public_result(best: Dict[str, Any], candidates: List[Dict[str, Any]]) -> Di
         "roi": best["roi"],
         "search_pass": best.get("search_pass", "primary"),
         "orientation": best.get("orientation", "normal"),
+        "deskew_angle_deg": best.get("deskew_angle_deg", 0.0),
+        "ocr_quad": best.get("ocr_quad"),
+        "underline_bboxes": best.get("underline_bboxes", []),
         "component_count": best["component_count"],
         "chars": best["chars"],
         "candidate_score": round(float(best["candidate_score"]), 4),

@@ -310,6 +310,8 @@ SMALL_PRODUCT_MAX_RESOLUTION = (1366, 768)
 EDGE_EXTENSION_DUPLICATE_IOU = 0.36
 LOW_CONTRAST_SIDE_MAX_EXTEND_PX = 128
 SIDE_EDGE_STABILIZE_SPAN_PX = 32
+LOW_CONTRAST_EDGE_WINDOW_PX = 8
+LOW_CONTRAST_EDGE_MIN_STEP = 3.0
 
 
 def is_small_product_resolution(product_resolution: Optional[Tuple[int, int]]) -> bool:
@@ -358,6 +360,22 @@ def _boundary_detection_gray(
         return result["image"]
     except Exception:
         return gray
+
+
+def _has_low_contrast_boundary_step(profile: np.ndarray, boundary: int, *, rising: bool) -> bool:
+    """A dim band needs a local edge, not just a gradual illumination halo.
+
+    The background-relative threshold selects a candidate; it cannot establish
+    that the candidate is a physical boundary. Compare short windows on either
+    side so a broad brightness ramp does not become a filled panel extension.
+    """
+    window = LOW_CONTRAST_EDGE_WINDOW_PX
+    if boundary < window or boundary + window > len(profile):
+        return False
+    before = float(np.median(profile[boundary-window:boundary]))
+    after = float(np.median(profile[boundary:boundary+window]))
+    contrast = after - before if rising else before - after
+    return contrast >= LOW_CONTRAST_EDGE_MIN_STEP
 
 
 def _find_low_contrast_upper_boundary(
@@ -409,7 +427,8 @@ def _find_low_contrast_upper_boundary(
     for run_start, run_end in runs:
         if run_end - run_start < min_run:
             continue
-        if len(profile) - run_end <= max_gap:
+        if (len(profile) - run_end <= max_gap
+                and _has_low_contrast_boundary_step(profile, run_start, rising=True)):
             return y0 + run_start
     return y1
 
@@ -480,12 +499,14 @@ def _find_low_contrast_side_boundary(
             candidate = x0 + run_start
             if x1 - candidate > LOW_CONTRAST_SIDE_MAX_EXTEND_PX:
                 return x1
-            return candidate
+            if _has_low_contrast_boundary_step(profile, run_start, rising=True):
+                return candidate
         if side == "right" and run_start <= max_gap:
             candidate = x0 + run_end
             if candidate - x2 > LOW_CONTRAST_SIDE_MAX_EXTEND_PX:
                 return x2
-            return candidate
+            if _has_low_contrast_boundary_step(profile, run_end, rising=False):
+                return candidate
     return x1 if side == "left" else x2
 
 
@@ -946,7 +967,13 @@ def _polyfit_polygon(
         if stabilize_near_vertical_edges and not horizontal:
             q10, q90 = np.percentile(dep, [10, 90])
             if q90 - q10 <= SIDE_EDGE_STABILIZE_SPAN_PX:
-                return 0.0, float(np.median(dep))
+                # Keep a coherent camera tilt. Flattening every narrow x-span
+                # hides a genuine slanted edge on otherwise clean small panels.
+                slope, intercept = np.polyfit(ind, dep, 1)
+                residual_p95 = float(np.percentile(np.abs(dep - (slope * ind + intercept)), 95))
+                drift = abs(float(slope)) * float(np.ptp(ind))
+                if drift <= 2.0 or residual_p95 > max(1.0, (q90 - q10) * 0.25):
+                    return 0.0, float(np.median(dep))
         try:
             a, b = np.polyfit(ind, dep, 1)
         except (np.linalg.LinAlgError, ValueError):

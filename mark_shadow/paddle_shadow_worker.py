@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 
-VERSION = "5"
+VERSION = "6"
 TECHNIQUE = "PaddleOCR"
 LOGGER = logging.getLogger("mark_shadow.worker")
 VALID_MARK = re.compile(r"[A-Z0-9]{2}")
@@ -376,6 +376,10 @@ class ShadowStore:
                 "temporal_stable_text": "TEXT DEFAULT ''",
                 "temporal_history_count": "INTEGER DEFAULT 0",
                 "temporal_stable_support_count": "INTEGER DEFAULT 0",
+                "current_deskew_angle_deg": "REAL DEFAULT 0",
+                "crop_rotation_deg": "REAL DEFAULT 0",
+                "paddle_rotation_deg": "INTEGER DEFAULT 0",
+                "orientation_attempts": "INTEGER DEFAULT 1",
             }
             for column, definition in migrations.items():
                 if column not in columns:
@@ -481,11 +485,12 @@ class ShadowStore:
                     valid_two_chars, agreed, final_text, adoption_reason,
                     temporal_stable_text, temporal_history_count,
                     temporal_stable_support_count, latency_ms, model_name,
-                    crop_path, error
+                    crop_path, error, current_deskew_angle_deg,
+                    crop_rotation_deg, paddle_rotation_deg, orientation_attempts
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -514,6 +519,10 @@ class ShadowStore:
                     str(result.get("model_name") or ""),
                     crop_path,
                     str(result.get("error") or ""),
+                    float(request_data.get("current_deskew_angle_deg") or 0.0),
+                    float(result.get("crop_rotation_deg") or 0.0),
+                    int(result.get("paddle_rotation_deg") or 0),
+                    int(result.get("orientation_attempts") or 1),
                 ),
             )
             return int(cursor.lastrowid)
@@ -632,6 +641,55 @@ class ShadowApplication:
         self.temporal.reset_context(stream_key)
         return "context_start" if previous_model is None else "model_switch_reset"
 
+    def _predict_orientations(self, image, request_data):
+        """Resolve the remaining baseline direction using at most two OCR calls.
+
+        Geometry removes arbitrary skew before this boundary. Only a rectified
+        diagonal MARK needs the additional 180-degree candidate; ordinary MARKs
+        retain their existing one-call path. Paddle's valid two-character output
+        and confidence decide the winner, without a DotMatrix spelling prior.
+        """
+        primary = self.recognizer.predict(image)
+        candidates = [(0, primary)]
+        attempts = 1
+        if request_data.get("crop_rectified") and abs(float(
+            request_data.get("current_deskew_angle_deg") or 0.0
+        )) > 0.01:
+            attempts += 1
+            try:
+                alternative = self.recognizer.predict(
+                    cv2.rotate(image, cv2.ROTATE_180)
+                )
+                candidates.append((180, alternative))
+            except Exception as exc:
+                # A failed optional retry must not discard the primary result.
+                LOGGER.warning("MARK orientation retry failed: %s", exc)
+
+        def candidate_rank(candidate):
+            prediction = candidate[1]
+            valid = bool(normalize_mark_text(prediction.get("paddle_text")))
+            confidence = float(prediction.get("paddle_confidence") or 0.0)
+            confidence = confidence if np.isfinite(confidence) else 0.0
+            return valid, confidence
+
+        # If neither direction has a valid MARK, retain the original raw result
+        # for diagnosis rather than adopting an unrelated high-confidence glyph.
+        valid_candidates = [item for item in candidates if candidate_rank(item)[0]]
+        rotation, selected = (
+            max(valid_candidates, key=candidate_rank)
+            if valid_candidates else candidates[0]
+        )
+        result = dict(selected)
+        result["latency_ms"] = sum(
+            float(item.get("latency_ms") or 0.0) for _, item in candidates
+        )
+        result["paddle_rotation_deg"] = rotation
+        result["orientation_attempts"] = attempts
+        result["crop_rotation_deg"] = float(
+            request_data.get("crop_rotation_deg") or 0.0
+        ) + rotation
+        return result
+
     def infer(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         png_base64 = str(request_data.get("image_png_base64") or "")
         if not png_base64:
@@ -653,7 +711,7 @@ class ShadowApplication:
             raise ValueError("MARK crop cannot be decoded")
 
         try:
-            result = self.recognizer.predict(image)
+            result = self._predict_orientations(image, request_data)
         except Exception as exc:
             result = {
                 "paddle_raw_text": "",
@@ -676,6 +734,19 @@ class ShadowApplication:
             getattr(self.recognizer, "engine_version", "unknown"),
         )
         result.setdefault("worker_version", VERSION)
+        result.setdefault("paddle_rotation_deg", 0)
+        result.setdefault("orientation_attempts", 1)
+        result.setdefault("crop_rotation_deg", float(
+            request_data.get("crop_rotation_deg") or 0.0
+        ))
+        if result["paddle_rotation_deg"] == 180:
+            encoded, winning_png = cv2.imencode(
+                ".png", cv2.rotate(image, cv2.ROTATE_180)
+            )
+            if not encoded:
+                raise ValueError("winning MARK crop could not be encoded")
+            crop_png = winning_png.tobytes()
+            request_data["crop_sha256"] = hashlib.sha256(crop_png).hexdigest()
         raw_text = normalize_mark_text(result.get("paddle_text"))
         result["paddle_text"] = raw_text
         requested_rules = (

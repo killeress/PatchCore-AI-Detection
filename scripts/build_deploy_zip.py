@@ -37,6 +37,7 @@ CODE_FILES = [
     "capi_dataset_export.py",
     "capi_edge_cv.py",
     "capi_heatmap.py",
+    "capi_dust_review.py",
     "capi_heatmap_diagnostics.py",
     "capi_tile_diagnostics.py",
     "capi_image_orientation.py",

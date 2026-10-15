@@ -550,6 +550,16 @@
         cursor: pointer;
     }
 
+    .inf-history-note {
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        line-height: 1.6;
+        margin-bottom: 16px;
+        padding: 8px 12px;
+        border-left: 3px solid var(--accent);
+        background: var(--surface);
+    }
+
     .inf-stats-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1937,6 +1947,7 @@
     <div class="inf-loading" id="inf_loading">載入中...</div>
 
     <!-- Stats Cards -->
+    <div class="inf-history-note" id="inf_historyNote" style="display:none;"></div>
     <div class="inf-stats-grid" id="inf_statsGrid" style="display:none;"></div>
 
     <!-- Charts Row 1: Trend + Distribution -->
@@ -4101,6 +4112,10 @@
 
         function loadData(startDate, endDate) {
             const loading = document.getElementById('inf_loading');
+            const historyNote = document.getElementById('inf_historyNote');
+            historyNote.textContent = '';
+            historyNote.style.display = 'none';
+            loading.textContent = '載入中...';
             loading.style.display = 'block';
             ['inf_statsGrid', 'inf_chartsRow1', 'inf_chartsRow2', 'inf_chartsRow3'].forEach(id => {
                 document.getElementById(id).style.display = 'none';
@@ -4122,8 +4137,18 @@
                     ['inf_statsGrid', 'inf_chartsRow1', 'inf_chartsRow2', 'inf_chartsRow3'].forEach(id => {
                         document.getElementById(id).style.display = '';
                     });
+                    if (data.history && data.history.initialized_at) {
+                        historyNote.textContent = '歷史統計獨立保存，清除推論明細不影響總數及 OK／NG 比率。'
+                            + '啟用時間：' + data.history.initialized_at
+                            + '；已補入啟用時仍留存的紀錄，啟用前已刪除的資料無法自動還原。';
+                        historyNote.style.display = 'block';
+                    }
                 })
-                .catch(err => { loading.textContent = '載入失敗: ' + err.message; });
+                .catch(err => {
+                    historyNote.textContent = '';
+                    historyNote.style.display = 'none';
+                    loading.textContent = '載入失敗: ' + err.message;
+                });
         }
 
         function renderCards(s) {
@@ -4419,12 +4444,12 @@
                 </div>
                 <div class="inf-cross-cell">
                     <div class="cell-label">AOI NG → AI OK</div>
-                    <div class="cell-value"><a href="${ngOkUrl}" style="color:#22c55e;text-decoration:underline;text-underline-offset:3px;" title="點擊查看 AI 救回記錄">${(cm.ng_ok || 0).toLocaleString()}</a></div>
+                    <div class="cell-value"><a href="${ngOkUrl}" style="color:#22c55e;text-decoration:underline;text-underline-offset:3px;" title="查看仍留存的 AI 救回明細，筆數可能少於歷史累計">${(cm.ng_ok || 0).toLocaleString()}</a></div>
                     <div class="cell-desc" style="color:#22c55e;">✓ AI 救回</div>
                 </div>
                 <div class="inf-cross-cell">
                     <div class="cell-label">AOI OK → AI NG</div>
-                    <div class="cell-value"><a href="${okNgUrl}" style="color:#ef4444;text-decoration:underline;text-underline-offset:3px;" title="點擊查看 AI 攔截記錄">${(cm.ok_ng || 0).toLocaleString()}</a></div>
+                    <div class="cell-value"><a href="${okNgUrl}" style="color:#ef4444;text-decoration:underline;text-underline-offset:3px;" title="查看仍留存的 AI 攔截明細，筆數可能少於歷史累計">${(cm.ok_ng || 0).toLocaleString()}</a></div>
                     <div class="cell-desc" style="color:#ef4444;">AI 額外攔截</div>
                 </div>
                 <div class="inf-cross-cell">
