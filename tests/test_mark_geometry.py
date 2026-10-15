@@ -10,6 +10,26 @@ from capi_mark_detector import _PATTERNS, _separate_mark_underlines, detect_pane
 from capi_mark_shadow import build_mark_shadow_payload
 
 
+def _set_min_area_rect_convention(monkeypatch, convention):
+    """Exercise the equivalent rectangle angles used before/after OpenCV 4.13."""
+    original = cv2.minAreaRect
+
+    def min_area_rect(points):
+        center, (width, height), angle = original(points)
+        if convention == "negative" and angle >= 0:
+            return center, (height, width), angle - 90
+        if convention == "positive" and angle < 0:
+            return center, (height, width), angle + 90
+        return center, (width, height), angle
+
+    monkeypatch.setattr(cv2, "minAreaRect", min_area_rect)
+
+
+@pytest.fixture(params=["positive", "negative"])
+def min_area_rect_convention(monkeypatch, request):
+    _set_min_area_rect_convention(monkeypatch, request.param)
+
+
 def _synthetic_mark(angle=0, underlined=True):
     local = np.full((240, 240), 160, np.uint8)
     for index, char in enumerate("AY"):
@@ -31,8 +51,16 @@ def _synthetic_mark(angle=0, underlined=True):
     return image, expected
 
 
+def _reported_ay_path():
+    root = Path(__file__).resolve().parents[1]
+    for path in (root / "W0F00000_142426.tif", root / "marks" / "W0F00000_142426.tif"):
+        if path.is_file():
+            return path
+    pytest.skip("local AY sample is unavailable")
+
+
 @pytest.mark.parametrize("angle", [0, -42, 42, 138])
-def test_underlined_mark_rectifies_and_masks_both_lines(angle):
+def test_underlined_mark_rectifies_and_masks_both_lines(angle, min_area_rect_convention):
     image, centers = _synthetic_mark(angle)
     result = detect_panel_mark(image)
     assert result["found"]
@@ -48,7 +76,7 @@ def test_underlined_mark_rectifies_and_masks_both_lines(angle):
     assert crop.shape[1] > crop.shape[0]
 
 
-def test_plain_upright_mark_keeps_legacy_crop_and_has_no_underline():
+def test_plain_upright_mark_keeps_legacy_crop_and_has_no_underline(min_area_rect_convention):
     image, _ = _synthetic_mark(underlined=False)
     result = detect_panel_mark(image)
     assert result["found"] and result["text"] == "AY"
@@ -58,7 +86,7 @@ def test_plain_upright_mark_keeps_legacy_crop_and_has_no_underline():
 
 
 @pytest.mark.parametrize("angle", [-42, 42, 138])
-def test_slanted_mark_without_underlines_still_rectifies(angle):
+def test_slanted_mark_without_underlines_still_rectifies(angle, min_area_rect_convention):
     image, _ = _synthetic_mark(angle, underlined=False)
     result = detect_panel_mark(image)
     assert result["found"] and result["text"] == "AY"
@@ -66,7 +94,7 @@ def test_slanted_mark_without_underlines_still_rectifies(angle):
     assert result["underline_bboxes"] == []
 
 
-def test_single_continuous_underline_is_excluded():
+def test_single_continuous_underline_is_excluded(min_area_rect_convention):
     image, _ = _synthetic_mark(underlined=False)
     cv2.line(image, (815, 210), (895, 210), 45, 4)
     result = detect_panel_mark(image)
@@ -94,10 +122,10 @@ def test_unrelated_stroke_is_not_a_mark_underline(kind):
 
 
 @pytest.mark.parametrize("rotate180", [False, True])
-def test_reported_ay_sample_has_upright_glyph_quad_and_two_exclusion_lines(rotate180):
-    path = Path(__file__).resolve().parents[1] / "marks" / "W0F00000_142426.tif"
-    if not path.exists():
-        pytest.skip("local AY sample is unavailable")
+def test_reported_ay_sample_has_upright_glyph_quad_and_two_exclusion_lines(
+    rotate180, min_area_rect_convention,
+):
+    path = _reported_ay_path()
     image = cv2.imread(str(path), 0)
     if rotate180:
         image = cv2.rotate(image, cv2.ROTATE_180)
@@ -105,6 +133,13 @@ def test_reported_ay_sample_has_upright_glyph_quad_and_two_exclusion_lines(rotat
     assert result["found"] and result["text"] == "AY"
     assert 38 <= abs(result["deskew_angle_deg"]) <= 48
     assert len(result["underline_bboxes"]) == 2
+    centers = np.float32([[4872, 916], [4919, 963]])
+    if rotate180:
+        centers = [image.shape[1] - 1, image.shape[0] - 1] - centers
+    for x, y in centers:
+        assert any(box["x"] <= x < box["x"] + box["width"]
+                   and box["y"] <= y < box["y"] + box["height"]
+                   for box in result["underline_bboxes"])
     payload = build_mark_shadow_payload(image, result, path)
     assert payload["crop_rectified"] is True
     assert payload["crop_width"] > payload["crop_height"]
