@@ -64,6 +64,108 @@ class _FakePatchcoreInferencer:
         return SimpleNamespace(pred_score=pred_score, anomaly_map=anomaly_map)
 
 
+@pytest.mark.parametrize("recognition_mode", ["hm", "deferred", "online"])
+def test_mark_underlines_are_masked_and_attached_in_every_recognition_mode(
+    monkeypatch, capsys, recognition_mode
+):
+    image = np.zeros((100, 100), dtype=np.uint8)
+    detection = {
+        "found": True,
+        "text": "AY",
+        "roi": "top_right",
+        "orientation": "normal",
+        "deskew_angle_deg": 45.0,
+        "bbox": {"x": 60, "y": 20, "width": 20, "height": 60},
+        "underline_bboxes": [
+            {"x": 60, "y": 85, "width": 20, "height": 5},
+            {"x": -2, "y": 98, "width": 5, "height": 8},
+            {"x": 100, "y": 20, "width": 5, "height": 2},
+            {"x": 20, "y": 20, "width": -5, "height": 2},
+            {"x": float("nan"), "y": 20, "width": 5, "height": 2},
+            {"x": 20},
+            None,
+        ],
+    }
+    if recognition_mode == "hm":
+        detection["recognition_skipped"] = True
+    monkeypatch.setattr(
+        "capi_mark_detector.detect_panel_mark",
+        lambda image, include_debug=False: detection,
+    )
+    monkeypatch.setattr(
+        "capi_mark_detector.detect_hm_panel_mark", lambda image, bounds: detection
+    )
+    inferencer = object.__new__(CAPIInferencer)
+    config = CAPIConfig()
+    config.patchcore_filter_enabled = False
+    config.patchcore_concentration_enabled = False
+    config.patchcore_diffuse_area_enabled = False
+    config.edge_margin_px = 0
+    config.mark_exclusion_padding_px = 0
+    config.mark_exclusion_soft_decay_px = 0
+    config.no_detect_soft_decay_min_weight = 0.10
+    inferencer.config = config
+    inferencer.threshold = 0.5
+    monkeypatch.setattr(inferencer, "_is_mark_binary_source", lambda filename: True)
+    monkeypatch.setattr(inferencer, "_read_detection_image", lambda path: image)
+    monkeypatch.setattr(
+        inferencer, "_is_hm_mark_layout", lambda filename, machine: recognition_mode == "hm"
+    )
+    monkeypatch.setattr(
+        inferencer, "_find_raw_object_bounds", lambda image: ((0, 0, 100, 100), None)
+    )
+    recognition_calls = []
+    monkeypatch.setattr(
+        inferencer,
+        "_apply_online_paddle_mark_recognition",
+        lambda *args: recognition_calls.append(args),
+    )
+
+    found, regions = inferencer._detect_panel_mark_binary_region(
+        [Path("W0F00000_000000.tif")],
+        apply_recognition=recognition_mode != "deferred",
+    )
+
+    assert found["mark_bbox_tuple"] == (60, 20, 20, 60)
+    assert [(r.name, r.x1, r.y1, r.x2, r.y2) for r in regions] == [
+        ("mark_binary", 60, 20, 80, 80),
+        ("mark_underline", 60, 85, 80, 90),
+        ("mark_underline", 0, 98, 3, 100),
+    ]
+    assert len(recognition_calls) == (1 if recognition_mode == "online" else 0)
+    log = capsys.readouterr().out
+    assert "deskew_angle_deg=45.0" in log
+    assert "underline_count=2" in log
+
+    tile = TileInfo(tile_id=1, x=0, y=0, width=100, height=100, image=image)
+    result = ImageResult(
+        image_path=Path("W0F00000_000000.tif"),
+        image_size=(100, 100),
+        otsu_bounds=(0, 0, 100, 100),
+        exclusion_regions=[],
+        tiles=[tile],
+        excluded_tile_count=0,
+        processed_tile_count=1,
+        processing_time=0.0,
+    )
+    inferencer._attach_panel_mark_binary_to_results([result], found, regions)
+    assert result.mark_exclusion_regions == regions
+    assert result.mark_bbox == (60, 20, 20, 60)
+    assert tile.mark_exclusion_region_count == 3
+
+    anomaly_map = np.zeros((100, 100), dtype=np.float32)
+    anomaly_map[86, 70] = 1.0  # MARK underline outside the glyph bounding box.
+    anomaly_map[50, 70] = 0.9  # MARK glyph.
+    anomaly_map[86, 40] = 0.3  # Real defect beside the MARK.
+    score, masked_map = inferencer.predict_tile(
+        tile, threshold=0.5, raw_prediction=(1.0, anomaly_map)
+    )
+    assert masked_map[86, 70] == pytest.approx(0.10)
+    assert masked_map[50, 70] == pytest.approx(0.09)
+    assert masked_map[86, 40] == pytest.approx(0.30)
+    assert score == pytest.approx(0.30)
+
+
 def test_mark_exclusion_recomputes_formal_score_from_strongest_valid_patch():
     config = CAPIConfig()
     config.patchcore_filter_enabled = False

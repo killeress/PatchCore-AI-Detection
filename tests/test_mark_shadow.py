@@ -100,6 +100,52 @@ def test_mark_payload_uses_runtime_forced_char_conversions(rules):
     assert payload["forced_char_conversions"] == rules
 
 
+@pytest.mark.parametrize("orientation", ["normal", "rot180"])
+def test_diagonal_mark_payload_rectifies_glyph_quad_before_locator_rotation(orientation):
+    upright = np.full((300, 300), 200, dtype=np.uint8)
+    upright[120:170, 95:110] = 20
+    upright[120:135, 190:215] = 40
+    upright[195:200, 85:220] = 0  # Underline lies outside the glyph rectangle.
+    forward = cv2.getRotationMatrix2D((150, 150), -40, 1.0)
+    tilted = cv2.warpAffine(upright, forward, (300, 300), borderValue=200)
+    quad = cv2.transform(np.asarray([[
+        [80, 110], [220, 110], [220, 180], [80, 180],
+    ]], dtype=np.float32), forward)[0]
+    x, y, width, height = cv2.boundingRect(quad)
+    payload = build_mark_shadow_payload(tilted, {
+        "found": True,
+        "bbox": {"x": x, "y": y, "width": width, "height": height},
+        "orientation": orientation,
+        "deskew_angle_deg": 40,
+        "ocr_quad": quad.tolist(),
+    }, "diagonal.tif", padding_ratio=0)
+    actual = cv2.imdecode(np.frombuffer(
+        base64.b64decode(payload["image_png_base64"]), dtype=np.uint8,
+    ), cv2.IMREAD_UNCHANGED)
+    if orientation == "rot180":
+        actual = cv2.rotate(actual, cv2.ROTATE_180)
+    assert 147 <= actual.shape[1] <= 149
+    assert 77 <= actual.shape[0] <= 79
+    assert actual[20:55, 23:30].mean() < 30
+    assert actual[18:24, 120:130].mean() < 50
+    assert actual[-5:].mean() > 190
+    assert payload["crop_rectified"] is True
+    assert payload["current_deskew_angle_deg"] == 40
+    assert payload["crop_rotation_deg"] == 40 + (180 if orientation == "rot180" else 0)
+
+
+def test_diagonal_mark_payload_requires_valid_quad():
+    detection = {
+        "found": True, "deskew_angle_deg": 45,
+        "bbox": {"x": 5, "y": 6, "width": 12, "height": 8},
+    }
+    with pytest.raises(ValueError, match="requires ocr_quad"):
+        build_mark_shadow_payload(np.zeros((40, 40), np.uint8), detection, "bad.tif")
+    detection["ocr_quad"] = [[0, 0], [1, 1], [1, 0], [0, 1]]
+    with pytest.raises(ValueError, match="convex"):
+        build_mark_shadow_payload(np.zeros((40, 40), np.uint8), detection, "bad.tif")
+
+
 def test_normalize_forced_char_conversions_rejects_invalid_or_duplicate_rules():
     assert normalize_forced_char_conversions([]) == []
     assert normalize_forced_char_conversions([
@@ -205,6 +251,22 @@ def test_mark_stream_key_separates_locator_directions_and_legacy_history():
         result = temporal.observe(key, "C4")
         assert result["final_text"] == "C4"
         assert result["temporal_history_count"] == 1
+
+
+def test_diagonal_mark_stream_is_separate_and_stable_across_angle_drift():
+    locator = {"roi": "top_right", "orientation": "rot180"}
+    old_key = CAPIInferencer._build_mark_stream_key("CAPI13", "MODEL-A", locator)
+    keys = {
+        CAPIInferencer._build_mark_stream_key(
+            "CAPI13", "MODEL-A", {**locator, "deskew_angle_deg": angle},
+        )
+        for angle in (40.0, 42.81, 45.0)
+    }
+    assert keys == {old_key + "|deskew"}
+    temporal = MarkTemporalStabilizer(lambda key, limit: ["SY"] * 10 if key == old_key else [])
+    result = temporal.observe(keys.pop(), "AY")
+    assert result["final_text"] == "AY"
+    assert result["temporal_history_count"] == 1
 
 
 def test_normalize_mark_text_rejects_non_two_character_results():
@@ -436,8 +498,87 @@ def test_paddle_recognizer_sends_three_channel_image_to_model():
     assert result["paddle_text"] == "EJ"
     assert result["paddle_confidence"] == pytest.approx(0.93)
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "5"
+    assert result["worker_version"] == "6"
     assert result["error"] == ""
+
+
+@pytest.mark.parametrize(("primary", "alternative", "expected", "rotation"), [
+    (("公", 0.99), ("AY", 0.91), "AY", 180),
+    (("BY", 0.72), ("AY", 0.93), "AY", 180),
+    (("AY", 0.98), ("YA", 0.95), "AY", 0),
+    (("公", 0.90), ("?", 0.98), "", 0),
+])
+def test_diagonal_mark_tries_both_directions_and_saves_winning_crop(
+    tmp_path, primary, alternative, expected, rotation,
+):
+    image = np.arange(12 * 20, dtype=np.uint8).reshape(12, 20)
+    _, png = cv2.imencode(".png", image)
+    predictions = iter((primary, alternative))
+    calls = []
+
+    class FakeRecognizer:
+        model_name = "fake"
+
+        def predict(self, crop):
+            calls.append(crop.copy())
+            text, confidence = next(predictions)
+            return {
+                "paddle_raw_text": text,
+                "paddle_text": normalize_mark_text(text),
+                "paddle_confidence": confidence,
+                "latency_ms": 10.0,
+            }
+
+    store = ShadowStore(tmp_path / "shadow.db", tmp_path / "disagreements")
+    request = {
+        "image_png_base64": base64.b64encode(png.tobytes()).decode("ascii"),
+        "current_orientation": "rot180",
+        "current_deskew_angle_deg": 45,
+        "crop_rotation_deg": 225,
+        "crop_rectified": True,
+    }
+    result = ShadowApplication(FakeRecognizer(), store).infer(request)
+    assert result["paddle_text"] == expected
+    assert result["paddle_rotation_deg"] == rotation
+    assert result["crop_rotation_deg"] == 225 + rotation
+    assert result["orientation_attempts"] == 2
+    assert result["latency_ms"] == 20.0
+    assert len(calls) == 2
+    np.testing.assert_array_equal(calls[1], cv2.rotate(image, cv2.ROTATE_180))
+    with sqlite3.connect(store.db_path) as connection:
+        saved = connection.execute(
+            "SELECT crop_path, current_deskew_angle_deg, crop_rotation_deg, "
+            "paddle_rotation_deg, orientation_attempts FROM mark_shadow_results "
+            "WHERE id = ?", (result["id"],),
+        ).fetchone()
+    assert saved[1:] == (45, 225 + rotation, rotation, 2)
+    saved_image = cv2.imread(saved[0], cv2.IMREAD_UNCHANGED)
+    np.testing.assert_array_equal(saved_image, calls[int(rotation == 180)])
+
+
+def test_diagonal_retry_failure_preserves_primary_and_horizontal_marks_are_single_call():
+    calls = []
+
+    class FakeRecognizer:
+        def predict(self, image):
+            calls.append(image)
+            if len(calls) > 1:
+                raise RuntimeError("optional inference failed")
+            return {"paddle_text": "AY", "paddle_confidence": 0.95, "latency_ms": 10}
+
+    application = object.__new__(ShadowApplication)
+    application.recognizer = FakeRecognizer()
+    image = np.full((12, 20), 180, dtype=np.uint8)
+    result = application._predict_orientations(image, {
+        "crop_rectified": True, "current_deskew_angle_deg": 45,
+    })
+    assert result["paddle_text"] == "AY"
+    assert result["paddle_rotation_deg"] == 0
+    assert result["orientation_attempts"] == 2
+    calls.clear()
+    result = application._predict_orientations(image, {})
+    assert result["paddle_text"] == "AY"
+    assert len(calls) == 1
 
 
 def test_shadow_application_saves_comparison_and_disagreement_crop(tmp_path):
@@ -479,7 +620,7 @@ def test_shadow_application_saves_comparison_and_disagreement_crop(tmp_path):
 
     assert result["agreed"] is False
     assert result["technique"] == "PaddleOCR"
-    assert result["worker_version"] == "5"
+    assert result["worker_version"] == "6"
     assert store.stats()["total"] == 1
     assert store.stats()["disagreed"] == 1
     assert len(list((tmp_path / "disagreements").rglob("*.png"))) == 1

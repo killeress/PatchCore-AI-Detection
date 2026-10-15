@@ -249,9 +249,16 @@ def build_region_zoom_panels(
 
     for region in sorted_regions:
         try:
-            # 峰值座標縮放到 tile_size 空間
-            peak_y = int(region["peak_yx"][0] * tile_size / h_src)
-            peak_x = int(region["peak_yx"][1] * tile_size / w_src)
+            # 原圖覆核保留的真缺陷優先於較強的灰塵 heatmap 峰值。
+            peak_yx = region["peak_yx"]
+            if (region.get("feature_reviewed") and not region.get("is_dust")
+                    and region.get("bomb_status") not in
+                    ("BOMB", "PARTIAL_BOMB", "IGNORED_BY_AOI_BOMB")):
+                reviewed_peak = region.get("real_feature_peak_yx")
+                if reviewed_peak is not None:
+                    peak_yx = reviewed_peak
+            peak_y = int(peak_yx[0] * tile_size / h_src)
+            peak_x = int(peak_yx[1] * tile_size / w_src)
 
             crop_sz = tile_size // 2
             y1 = max(0, peak_y - crop_sz // 2)
@@ -330,6 +337,13 @@ def build_region_zoom_panels(
             elif region.get("bomb_status") == "PARTIAL_BOMB":
                 reason = (f"BOMB: {region['bomb_excluded_px']} px; "
                           f"remaining NG: {region['bomb_remaining_px']} px")
+            elif region.get("feature_reviewed"):
+                matched = int(region.get("feature_review_matched", 0))
+                unmatched = int(region.get("feature_review_unmatched", 0))
+                outcome = "DUST" if is_dust else "REAL_NG"
+                reason = f"FEATURE_MATCH Dust:{matched} Real:{unmatched} -> {outcome}"
+                if region.get("feature_review_reason") == "no_matched_features":
+                    reason = f"FEATURE_MATCH NoMatch Dust:{matched} Real:{unmatched} -> {outcome}"
             elif is_dust and peak_in:
                 reason = f"PeakInDust {metric_name}>={thr_str} -> DUST"
             elif is_dust and sub_rescue:
@@ -770,17 +784,26 @@ class HeatmapManager:
         orig = _to_bgr_panel(original_src)
         preprocessed = _to_bgr_panel(tile_image)
 
-        # === B0F 二值化偵測模式：2-panel (Original + Binarization Overlay) ===
+        # === B0F 二值化偵測模式，保留 OMIT 灰塵過濾證據 ===
         if is_bright_spot:
             is_bomb = getattr(tile_info, 'is_bomb', False) if tile_info else False
             bomb_code = getattr(tile_info, 'bomb_defect_code', '') if tile_info else ''
+            is_dust = getattr(tile_info, 'is_suspected_dust_or_scratch', False)
+            source_binary = getattr(tile_info, 'dust_heatmap_binary', None)
 
-            # Panel 2: 二值化結果疊加在原圖上（紅色標記亮點）
+            # 紅色保留 NG；綠色顯示經 OMIT 灰塵過濾排除的原始候選。
             if anomaly_map is not None:
                 binary_vis = preprocessed.copy()
                 binary_resized = cv2.resize(
-                    heatmap_to_uint8(anomaly_map), (tile_size, tile_size)
+                    heatmap_to_uint8(anomaly_map), (tile_size, tile_size),
+                    interpolation=cv2.INTER_NEAREST,
                 )
+                if source_binary is not None:
+                    candidates = cv2.resize(
+                        (source_binary > 0).astype(np.uint8), (tile_size, tile_size),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    binary_vis[(candidates > 0) & (binary_resized == 0)] = (0, 200, 0)
                 # 紅色高亮標記偵測到的亮點區域
                 binary_vis[binary_resized > 0] = (0, 0, 255)
                 # 半透明混合
@@ -790,8 +813,33 @@ class HeatmapManager:
                 cv2.putText(binary_panel, "No Binary", (150, 260),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
 
-            labels = ["Original", "Preprocessed", "Binarization"]
+            binary_label = "Binarization (R=NG G=Filtered)" if source_binary is not None else "Binarization"
+            labels = ["Original", "Preprocessed", binary_label]
             panels = [_draw_roi(p) for p in (orig, preprocessed, binary_panel)]
+
+            omit_crop = getattr(tile_info, 'omit_crop_image', None)
+            dust_mask = getattr(tile_info, 'dust_mask', None)
+            dust_debug = getattr(tile_info, 'dust_iou_debug_image', None)
+            if any(data is not None for data in (omit_crop, dust_mask, dust_debug)):
+                def _diagnostic_panel(data, missing_label):
+                    if data is not None:
+                        return _to_bgr_panel(data)
+                    panel = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+                    cv2.putText(panel, missing_label, (130, 260),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)
+                    return panel
+
+                omit_panel = _diagnostic_panel(omit_crop, "No OMIT")
+                if dust_mask is not None:
+                    dust_panel = omit_panel.copy()
+                    mask = cv2.resize(dust_mask, (tile_size, tile_size),
+                                      interpolation=cv2.INTER_NEAREST)
+                    _blend_color_on_mask(dust_panel, mask, (0, 255, 255), alpha=0.4)
+                else:
+                    dust_panel = _diagnostic_panel(None, "No Dust Data")
+                debug_panel = _diagnostic_panel(dust_debug, "No Dust Debug")
+                panels.extend([_draw_roi(omit_panel), _draw_roi(dust_panel), debug_panel])
+                labels.extend(["OMIT Crop", "Dust Mask", "Dust Debug (G=Dust R=RealNG B=DustOnly)"])
 
             # --- 橫向拼接 ---
             composite = np.hstack(panels)
@@ -802,8 +850,10 @@ class HeatmapManager:
             label_bar = np.zeros((label_h, comp_w, 3), dtype=np.uint8)
             for i_lbl, lbl in enumerate(labels):
                 lx = i_lbl * tile_size + 10
+                text_width = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0][0]
+                label_scale = 0.7 * min(1.0, (tile_size - 20) / max(1, text_width))
                 cv2.putText(label_bar, lbl, (lx, 28),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, label_scale, (200, 200, 200), 2)
 
             # --- 頂部 Header ---
             header_h = 60
@@ -818,6 +868,9 @@ class HeatmapManager:
             if is_bomb:
                 verdict = f"BOMB: {bomb_code} (Filtered as OK)"
                 verdict_color = (255, 0, 255)
+            elif is_dust:
+                verdict = "DUST (Filtered as OK)"
+                verdict_color = (0, 200, 255)
             elif score > 0:
                 verdict = "NG"
                 verdict_color = (0, 0, 255)
@@ -829,6 +882,9 @@ class HeatmapManager:
             info_text = f"B0F | Diff:{max_diff} Area:{spot_area}px | DiffThr:{diff_thr} MinArea:{spot_min_area} | "
             self._draw_split_color_header(header, info_text, verdict, verdict_color, y=25, font_scale=0.6)
             detail_line = f"Tile#{tile_id} | {image_name}"
+            dust_detail = getattr(tile_info, 'dust_detail_text', '')
+            if dust_detail:
+                detail_line += " | " + str(dust_detail).replace('\u2192', '->').replace('\u2190', '<-')
             cv2.putText(header, detail_line, (10, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
@@ -876,6 +932,30 @@ class HeatmapManager:
                 label = "D" if is_dust_feat else "R"
                 cv2.putText(heatmap_panel, label, (dx + marker_r + 3, dy + 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # Keep low-coverage review evidence separate from two-stage/BOMB features.
+        review_features = getattr(tile_info, 'dust_low_coverage_features', None) if tile_info else None
+        if review_features:
+            sx = tile_size / max(1, getattr(tile_info, 'width', tile_size))
+            sy = tile_size / max(1, getattr(tile_info, 'height', tile_size))
+            for feature in sorted(review_features, key=lambda f: not f.get('is_dust', False)):
+                matched = bool(feature.get('is_dust', False))
+                position = (feature.get('abs_pos') if matched else
+                            feature.get('real_pos', feature.get('abs_pos')))
+                if position is None:
+                    continue
+                dx, dy = int(position[0] * sx), int(position[1] * sy)
+                if not (0 <= dx < tile_size and 0 <= dy < tile_size):
+                    continue
+                color = (0, 200, 0) if matched else (0, 0, 255)
+                contour = feature.get('feature_contour')
+                if contour is not None and len(contour) >= 2:
+                    points = np.rint(np.asarray(contour).reshape(-1, 2) * [sx, sy]).astype(np.int32)
+                    cv2.polylines(heatmap_panel, [points], True, color, 2)
+                else:
+                    cv2.circle(heatmap_panel, (dx, dy), 8, color, 2)
+                cv2.putText(heatmap_panel, 'FM-D' if matched else 'FM-R', (dx + 10, dy + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
         # --- Panel 3 & 4 & 5: OMIT Crop & Dust Mask & IOU Debug (如果有 tile_info) ---
         has_omit = False
@@ -1045,6 +1125,12 @@ class HeatmapManager:
         elif is_dust:
             if "TWO_STAGE" in str(dust_detail):
                 verdict = "DUST (Filtered as OK) | TWO_STAGE -> DUST"
+            elif any(r.get('feature_reviewed')
+                     for r in (getattr(tile_info, 'dust_region_details', None) or [])):
+                reviewed = [r for r in tile_info.dust_region_details if r.get('feature_reviewed')]
+                matched = sum(int(r.get('feature_review_matched', 0)) for r in reviewed)
+                unmatched = sum(int(r.get('feature_review_unmatched', 0)) for r in reviewed)
+                verdict = f"DUST (Filtered as OK) | FEATURE_MATCH Dust:{matched} Real:{unmatched}"
             elif getattr(tile_info, 'dust_region_details', None):
                 verdict = f"DUST (Filtered as OK) | Region{metric_name}:{dust_region_cov:.3f}>={iou_threshold:.3f}"
             elif dust_detail:

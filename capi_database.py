@@ -1222,9 +1222,82 @@ class CAPIDatabase:
                     ON edge_defect_results(image_result_id) WHERE is_dust = 1;
             """)
 
+            self._init_inference_statistics_history(conn)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _init_inference_statistics_history(conn: sqlite3.Connection) -> None:
+        """Preserve reporting facts independently of inference detail retention.
+
+        The source uses AUTOINCREMENT IDs, so a rerun replaces the same fact and
+        a new request gets a new fact, even after all details have been deleted.
+        Triggers also cover older application writers and direct SQL corrections.
+        Install them and backfill in one write transaction so startup cannot race
+        with a save or cleanup. Do not use executescript here: it commits first.
+        """
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS inference_statistics_history (
+                record_id INTEGER PRIMARY KEY,
+                request_time TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                machine_no TEXT NOT NULL,
+                machine_judgment TEXT DEFAULT '',
+                ai_judgment TEXT DEFAULT '',
+                error_message TEXT DEFAULT ''
+            )
+        """)
+        # Intentionally no foreign key or DELETE trigger: detail cleanup must
+        # never delete the historical reporting facts.
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_inference_statistics_request_time
+            ON inference_statistics_history(datetime(request_time))
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS inference_statistics_metadata (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                initialized_at TEXT NOT NULL
+            )
+        """)
+
+        fields = (
+            "request_time", "model_id", "machine_no", "machine_judgment",
+            "ai_judgment", "error_message",
+        )
+        columns = ", ".join(fields)
+        new_values = ", ".join(f"NEW.{field}" for field in fields)
+        updates = ", ".join(f"{field} = excluded.{field}" for field in fields)
+        for name, event in (
+            ("inference_statistics_insert", "INSERT"),
+            ("inference_statistics_update", f"UPDATE OF {columns}"),
+        ):
+            conn.execute(f"""
+                CREATE TRIGGER IF NOT EXISTS {name}
+                AFTER {event} ON inference_records
+                BEGIN
+                    INSERT INTO inference_statistics_history (record_id, {columns})
+                    VALUES (NEW.id, {new_values})
+                    ON CONFLICT(record_id) DO UPDATE SET {updates};
+                END
+            """)
+
+        if conn.execute(
+            "SELECT 1 FROM inference_statistics_metadata WHERE singleton = 1"
+        ).fetchone() is None:
+            # Only surviving records can be backfilled. Keep the activation time
+            # so the report can disclose that earlier history may be incomplete.
+            conn.execute(f"""
+                INSERT INTO inference_statistics_history (record_id, {columns})
+                SELECT id, {columns} FROM inference_records WHERE 1
+                ON CONFLICT(record_id) DO UPDATE SET {updates}
+            """)
+            conn.execute("""
+                INSERT INTO inference_statistics_metadata (singleton, initialized_at)
+                VALUES (1, ?)
+            """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
 
     def save_inference_record(
         self,
@@ -4232,7 +4305,7 @@ class CAPIDatabase:
 
     def get_inference_stats(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict:
         """
-        取得推論紀錄統計資料（供 AI 推論紀錄 Tab 使用）
+        取得獨立保存的歷史推論統計（不受推論明細保留期限影響）。
 
         Args:
             start_date: 起始日期 YYYY-MM-DD（含）
@@ -4245,6 +4318,13 @@ class CAPIDatabase:
 
         conn = self._get_conn()
         try:
+            # All cards and charts must describe the same committed snapshot,
+            # even while inference saves or reruns are updating the history.
+            conn.execute("BEGIN")
+            history = dict(conn.execute("""
+                SELECT initialized_at FROM inference_statistics_metadata
+                WHERE singleton = 1
+            """).fetchone())
             # 建立日期篩選條件
             where_clauses = []
             params = []
@@ -4274,7 +4354,7 @@ class CAPIDatabase:
                            SUM(CASE WHEN ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ng_ok,
                            SUM(CASE WHEN NOT ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ok_ng,
                            SUM(CASE WHEN ({_aoi_ng}) AND ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ng_ng
-                    FROM inference_records{where_sql}""",
+                    FROM inference_statistics_history{where_sql}""",
                 params
             ).fetchone()
             s = dict(summary_row)
@@ -4288,7 +4368,7 @@ class CAPIDatabase:
                            SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
                            SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err,
                            SUM(CASE WHEN {_hy} THEN 1 ELSE 0 END) as hy
-                    FROM inference_records{where_sql}
+                    FROM inference_statistics_history{where_sql}
                     GROUP BY DATE(datetime(request_time), '-7 hours', '-30 minutes')
                     ORDER BY date""",
                 params
@@ -4346,7 +4426,7 @@ class CAPIDatabase:
                            COUNT(*) as total,
                            ROUND(SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as aoi_ng_rate,
                            ROUND(SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as ai_ng_rate
-                    FROM inference_records{where_sql}
+                    FROM inference_statistics_history{where_sql}
                     GROUP BY machine_no
                     ORDER BY total DESC""",
                 params
@@ -4356,7 +4436,7 @@ class CAPIDatabase:
             # ── 4. 產品型號統計 ──
             model_rows = conn.execute(
                 f"""SELECT model_id as model, COUNT(*) as total
-                    FROM inference_records{where_sql}
+                    FROM inference_statistics_history{where_sql}
                     GROUP BY model_id
                     ORDER BY total DESC""",
                 params
@@ -4367,7 +4447,7 @@ class CAPIDatabase:
             err_where = f" WHERE {_err}" if not where_clauses else where_sql + f" AND {_err}"
             err_rows = conn.execute(
                 f"""SELECT ai_judgment, error_message
-                    FROM inference_records{err_where}""",
+                    FROM inference_statistics_history{err_where}""",
                 params
             ).fetchall()
             err_type_counts = {}
@@ -4383,6 +4463,7 @@ class CAPIDatabase:
 
             return {
                 "success": True,
+                "history": history,
                 "summary": {
                     "total": total,
                     "aoi_ng": s["aoi_ng"] or 0,

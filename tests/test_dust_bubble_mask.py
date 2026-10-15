@@ -5,6 +5,7 @@ import uuid
 
 import cv2
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -170,6 +171,87 @@ def _regular_boundary_bubble_panel_image() -> tuple[np.ndarray, np.ndarray]:
     image[boundary_bubble > 0] = 72
 
     return cv2.GaussianBlur(image, (9, 9), 0), boundary_bubble
+
+
+@pytest.mark.parametrize("detect_bubbles", [False, True])
+@pytest.mark.parametrize("contrast", [-8, 8])
+def test_dark_substrate_bubble_detection_is_opt_in(detect_bubbles, contrast):
+    image = np.full((512, 512), 17, dtype=np.uint8)
+    expected = np.zeros_like(image)
+    cv2.ellipse(expected, (270, 335), (30, 35), 0, 0, 360, 255, -1)
+    image[expected > 0] = 17 + contrast
+    image = cv2.GaussianBlur(image, (9, 9), 0)
+    inferencer = _make_inferencer(detect_bubbles=detect_bubbles)
+
+    is_dust, mask, _, detail = inferencer.check_dust_or_scratch_feature(image)
+
+    covered = np.count_nonzero((mask > 0) & (expected > 0)) / np.count_nonzero(expected)
+    if detect_bubbles:
+        assert is_dust is True
+        assert covered >= 0.85
+        assert "Bub:1" in detail
+    else:
+        assert covered < 0.20
+        assert "Bub:" not in detail
+
+
+@pytest.mark.parametrize("detect_bubbles", [False, True])
+def test_dark_substrate_boundary_bubble_uses_context(detect_bubbles):
+    panel_image = np.full((700, 900), 17, dtype=np.uint8)
+    bubble = np.zeros_like(panel_image)
+    cv2.ellipse(bubble, (600, 330), (30, 35), 0, 0, 360, 255, -1)
+    panel_image[bubble > 0] = 25
+    panel_image = cv2.GaussianBlur(panel_image, (9, 9), 0)
+    tile_x, tile_y, tile_size = 100, 80, 512
+    crop = panel_image[tile_y:tile_y + tile_size, tile_x:tile_x + tile_size]
+    expected = bubble[tile_y:tile_y + tile_size, tile_x:tile_x + tile_size]
+    inferencer = _make_inferencer(detect_bubbles=detect_bubbles)
+
+    _, baseline_mask, _, _ = inferencer.check_dust_or_scratch_feature(crop)
+    is_dust, mask, _, detail = inferencer._check_dust_or_scratch_feature_with_context(
+        panel_image, tile_x, tile_y, tile_size, tile_size, crop, focus_x=511,
+    )
+
+    baseline_covered = np.count_nonzero((baseline_mask > 0) & (expected > 0)) / np.count_nonzero(expected)
+    covered = np.count_nonzero((mask > 0) & (expected > 0)) / np.count_nonzero(expected)
+    assert baseline_covered < 0.20
+    if detect_bubbles:
+        assert is_dust is True
+        assert covered >= 0.85
+        assert "Bub:1" in detail
+        assert "CtxShift:96" in detail
+    else:
+        assert covered < 0.20
+        assert "Bub:" not in detail
+        assert "CtxShift:" not in detail
+
+
+@pytest.mark.parametrize("background", ["flat", "noise", "stripes", "small_dust", "black_padding", "sparse_valid_pixels"])
+def test_dark_substrate_background_is_not_bubble(background):
+    image = np.full((512, 512), 17, dtype=np.uint8)
+    if background == "noise":
+        image = np.clip(np.random.default_rng(742).normal(17, 3, image.shape), 0, 255).astype(np.uint8)
+    elif background == "stripes":
+        image[:] = np.rint(17 + 3 * np.sin(np.arange(512) * 2 * np.pi / 8)).astype(np.uint8)
+    elif background == "small_dust":
+        cv2.ellipse(image, (256, 256), (14, 10), 0, 0, 360, 29, -1)
+        image = cv2.GaussianBlur(image, (9, 9), 0)
+    elif background == "black_padding":
+        image[:70, :] = 0
+        image[430:, :] = 0
+        image[:, :70] = 0
+        image[:, 430:] = 0
+    elif background == "sparse_valid_pixels":
+        image[:] = 0
+        image[250:260, 250:260] = 17
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    mask = inferencer._detect_bubble_mask(
+        image, inferencer.config.dust_area_min,
+        inferencer.config.dust_area_max, inferencer.config.dust_extension,
+    )
+
+    assert np.count_nonzero(mask) == 0
 
 
 def test_low_contrast_bubble_mask_is_opt_in():

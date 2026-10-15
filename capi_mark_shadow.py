@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import cv2
+import numpy as np
 
 
 logger = logging.getLogger("capi.mark_shadow")
@@ -203,9 +204,24 @@ def build_mark_shadow_payload(
     if x2 <= x1 or y2 <= y1:
         raise ValueError("MARK shadow crop is empty")
 
+    deskew_angle = float(detection.get("deskew_angle_deg") or 0.0)
+    if not math.isfinite(deskew_angle):
+        raise ValueError("MARK shadow deskew angle is invalid")
+    quad = detection.get("ocr_quad")
+    if quad is not None:
+        crop, crop_bbox = _rectify_mark_quad(image, quad, padding_ratio=ratio)
+        x1, y1 = crop_bbox["x"], crop_bbox["y"]
+        x2, y2 = x1 + crop_bbox["width"], y1 + crop_bbox["height"]
+    elif abs(deskew_angle) > 0.01:
+        # An angled bbox alone cannot identify the glyph envelope accurately.
+        # Require the locator's inverse-mapped rectangle rather than clipping
+        # an arbitrary rotation of the old horizontal envelope.
+        raise ValueError("deskewed MARK requires ocr_quad")
+    else:
+        crop = image[y1:y2, x1:x2].copy()
+
     # Locator orientation is relative to this image, which already includes
     # any optional full-image rotation. Keep normal (or unspecified) crops as-is.
-    crop = image[y1:y2, x1:x2].copy()
     if detection.get("orientation") == "rot180":
         crop = cv2.rotate(crop, cv2.ROTATE_180)
 
@@ -223,6 +239,11 @@ def build_mark_shadow_payload(
         "current_profile_version": int(detection.get("profile_version") or 0),
         "current_roi": str(detection.get("roi") or ""),
         "current_orientation": str(detection.get("orientation") or ""),
+        "current_deskew_angle_deg": deskew_angle,
+        "crop_rotation_deg": deskew_angle + (
+            180.0 if detection.get("orientation") == "rot180" else 0.0
+        ),
+        "crop_rectified": quad is not None,
         "machine_no": str(detection.get("mark_machine_no") or ""),
         "model_id": str(detection.get("mark_model_id") or ""),
         "stream_key": str(detection.get("mark_stream_key") or ""),
@@ -244,6 +265,47 @@ def build_mark_shadow_payload(
         "crop_sha256": hashlib.sha256(png_bytes).hexdigest(),
         "image_png_base64": base64.b64encode(png_bytes).decode("ascii"),
     }
+
+
+def _rectify_mark_quad(image, quad, *, padding_ratio: float):
+    """Extract the locator's glyph rectangle in its deskewed coordinate frame."""
+    points = np.asarray(quad, dtype=np.float32)
+    if points.shape != (4, 2) or not np.isfinite(points).all():
+        raise ValueError("MARK shadow ocr_quad is invalid")
+    if not cv2.isContourConvex(points) or cv2.contourArea(points) < 1.0:
+        raise ValueError("MARK shadow ocr_quad must be a nonempty convex rectangle")
+    horizontal = points[1] - points[0]
+    vertical = points[3] - points[0]
+    width = float(np.linalg.norm(horizontal))
+    height = float(np.linalg.norm(vertical))
+    if min(width, height) < 1.0 or max(width, height) > max(image.shape[:2]) * 2:
+        raise ValueError("MARK shadow ocr_quad size is invalid")
+    pad_x = max(4, int(round(width * padding_ratio)))
+    pad_y = max(4, int(round(height * padding_ratio)))
+    dx, dy = horizontal / width * pad_x, vertical / height * pad_y
+    padded = points + np.asarray([-dx - dy, dx - dy, dx + dy, -dx + dy])
+    output_width = int(math.ceil(width)) + pad_x * 2
+    output_height = int(math.ceil(height)) + pad_y * 2
+    destination = np.asarray([
+        [0, 0], [output_width - 1, 0],
+        [output_width - 1, output_height - 1], [0, output_height - 1],
+    ], dtype=np.float32)
+    image_height, image_width = image.shape[:2]
+    x1 = max(0, int(math.floor(float(padded[:, 0].min()))))
+    y1 = max(0, int(math.floor(float(padded[:, 1].min()))))
+    x2 = min(image_width, int(math.ceil(float(padded[:, 0].max()))) + 1)
+    y2 = min(image_height, int(math.ceil(float(padded[:, 1].max()))) + 1)
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError("MARK shadow ocr_quad is outside the image")
+    transform = cv2.getPerspectiveTransform(
+        (padded - np.asarray([x1, y1], dtype=np.float32)).astype(np.float32),
+        destination,
+    )
+    crop = cv2.warpPerspective(
+        image[y1:y2, x1:x2], transform, (output_width, output_height),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE,
+    )
+    return crop, {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
 
 
 class MarkShadowClient:
