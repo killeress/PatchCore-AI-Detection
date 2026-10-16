@@ -403,3 +403,50 @@ def test_black_bomb_matching_uses_surviving_pixels_without_reintroducing_label()
     np.testing.assert_array_equal(
         tile.bomb_region_diagnostics["heatmap_binary"] > 0, filtered_map > 0,
     )
+
+
+def _fragmented_faint_defect(shape=(64, 64), origin=(10, 10), rows=4, cols=6, step=6):
+    """A faint defect near diff_thr breaks into evenly spaced 2x2 fragments."""
+    amap = np.zeros(shape, np.float32)
+    top, left = origin
+    for row in range(rows):
+        for col in range(cols):
+            y, x = top + row * step, left + col * step
+            amap[y:y + 2, x:x + 2] = 1
+    return amap
+
+
+def test_black_dust_merges_fragments_of_one_faint_defect_into_one_report_point():
+    from capi_server import _tile_real_defect_points
+
+    amap = _fragmented_faint_defect()
+    dust = np.zeros((64, 64), np.uint8)
+    dust[10, 10] = 255  # OMIT evidence overlaps one fragment pixel only.
+    worker, result, tile = make_case(amap, dust, x=100, y=200, min_area=2)
+
+    apply_filter(worker, result)
+
+    real_regions = [region for region in tile.dust_region_details if not region["is_dust"]]
+    assert len(real_regions) == 1
+    assert real_regions[0]["area"] == int(np.count_nonzero(amap)) - 1
+    assert "merged_from=24" in tile.dust_detail_text
+    # A single real region keeps the existing one-point report path.
+    assert _tile_real_defect_points(tile) == []
+    local_x, local_y = tile.anomaly_peak_x - tile.x, tile.anomaly_peak_y - tile.y
+    assert result.anomaly_tiles[0][2][local_y, local_x] == 1
+
+
+def test_black_dust_keeps_distant_bright_defects_as_separate_points():
+    from capi_server import _tile_real_defect_points
+
+    amap = np.zeros((64, 64), np.float32)
+    amap[4:6, 4:6] = 1
+    amap[56:58, 56:58] = 1
+    dust = np.zeros((64, 64), np.uint8)
+    dust[30, 30] = 255
+    amap[30, 30] = 1
+    worker, result, tile = make_case(amap, dust, min_area=2)
+
+    apply_filter(worker, result)
+
+    assert len(_tile_real_defect_points(tile)) == 2

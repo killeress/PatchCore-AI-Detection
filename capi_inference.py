@@ -9160,6 +9160,66 @@ class CAPIInferencer:
             " -> REAL_NG"
         )
 
+    # Binary bright-spot fragments closer than this (tile pixels) form one defect.
+    BRIGHT_SPOT_REPORT_MERGE_DISTANCE_PX = 20
+
+    @staticmethod
+    def _group_bright_spot_real_pixels(
+        remaining: np.ndarray,
+        binary: np.ndarray,
+        distance: int,
+    ) -> Tuple[int, np.ndarray, int]:
+        """Group nearby surviving fragments into defects.
+
+        A faint defect near diff_thr breaks into many tiny components, which
+        must report one coordinate. Fragments that came from the same raw
+        candidate component were split only by removed OMIT pixels, so they
+        are never linked directly and keep separate report coordinates.
+
+        Returns (label_count including background, group labels, fragment count).
+        """
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            remaining.astype(np.uint8), connectivity=8,
+        )
+        fragment_count = max(0, count - 1)
+        if count <= 2 or distance <= 0:
+            return count, labels, fragment_count
+
+        _, source_labels = cv2.connectedComponents((binary > 0).astype(np.uint8), connectivity=8)
+        active = labels > 0
+        source = np.zeros(count, dtype=np.int32)
+        source[labels[active]] = source_labels[active]
+
+        parent = list(range(count))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * distance + 1, 2 * distance + 1))
+        height, width = labels.shape
+        for label in range(1, count):
+            x, y, w, h = (int(value) for value in stats[label, :4])
+            x1, y1 = max(0, x - distance), max(0, y - distance)
+            x2, y2 = min(width, x + w + distance), min(height, y + h + distance)
+            window = labels[y1:y2, x1:x2]
+            grown = cv2.dilate((window == label).astype(np.uint8), kernel) > 0
+            for other in np.unique(window[grown & (window > label)]):
+                other = int(other)
+                if source[other] == source[label]:
+                    continue
+                root_a, root_b = find(label), find(other)
+                if root_a != root_b:
+                    parent[max(root_a, root_b)] = min(root_a, root_b)
+
+        mapping = np.zeros(count, dtype=np.int32)
+        group_ids: Dict[int, int] = {}
+        for label in range(1, count):
+            mapping[label] = group_ids.setdefault(find(label), len(group_ids) + 1)
+        return len(group_ids) + 1, mapping[labels], fragment_count
+
     def _filter_bright_spot_dust(
         self,
         tile: TileInfo,
@@ -9192,19 +9252,27 @@ class CAPIInferencer:
         # Split removed and surviving pixels before making diagnostic regions.
         # A sticker can connect two real points; each surviving point must get
         # its own report coordinate and the removed connector must stay green.
+        # Nearby surviving fragments of one faint defect are grouped so the
+        # client receives one coordinate instead of one per fragment.
         region_labels = np.zeros(binary.shape, dtype=np.int32)
         details = []
         dust_area = int(np.count_nonzero(dust))
+        real_fragment_count = 0
         for is_dust, pixels in ((False, remaining), (True, (binary > 0) & ~remaining)):
-            region_count, part_labels, region_stats, _ = cv2.connectedComponentsWithStats(
-                pixels.astype(np.uint8), connectivity=8,
-            )
+            if is_dust:
+                region_count, part_labels = cv2.connectedComponents(
+                    pixels.astype(np.uint8), connectivity=8,
+                )
+            else:
+                region_count, part_labels, real_fragment_count = self._group_bright_spot_real_pixels(
+                    pixels, binary, self.BRIGHT_SPOT_REPORT_MERGE_DISTANCE_PX,
+                )
             offset = len(details)
             active = part_labels > 0
             region_labels[active] = part_labels[active] + offset
             for label in range(1, region_count):
                 region = part_labels == label
-                area = int(region_stats[label, cv2.CC_STAT_AREA])
+                area = int(np.count_nonzero(region))
                 overlap = int(np.count_nonzero(region & dust))
                 metric_denominator = (area if self.config.dust_heatmap_metric == "coverage"
                                       else area + dust_area - overlap)
@@ -9254,8 +9322,10 @@ class CAPIInferencer:
         except Exception as exc:
             logger.warning("Black-screen dust debug image failed: %s", exc)
         verdict = "DUST" if tile.is_suspected_dust_or_scratch else "REAL_NG"
+        merged_note = (f"(merged_from={real_fragment_count})"
+                       if real_fragment_count != len(real_regions) else "")
         return remaining.astype(np.float32), (
-            f" BINARY_DUST: {len(real_regions)}real+{dust_count}dust"
+            f" BINARY_DUST: {len(real_regions)}real{merged_note}+{dust_count}dust"
             f" overlap={intersection}/{candidate_area} remaining={remaining_area}"
             f" min_area={minimum} ext=0 -> {verdict}"
         )

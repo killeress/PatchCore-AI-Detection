@@ -936,6 +936,10 @@ def check_image_abnormal_precheck(
     return None
 
 
+# Client accepts at most 80 coordinates; keep a safety margin.
+QJPG_MAX_DEFECT_RECORDS = 60
+
+
 def _format_report_coord(value: int) -> str:
     return f"{max(0, min(99999, int(round(value)))):05d}"
 
@@ -1295,6 +1299,12 @@ def build_qjpg_response(
     )
     if not ai_judgment.startswith("ERR:"):
         records.extend((parsed or {}).get("aoi_passthrough_records", []))
+    if len(records) > QJPG_MAX_DEFECT_RECORDS:
+        logger.warning(
+            "[QJPG_RECORD_LIMIT] Glass=%s records=%d limit=%d -> truncated",
+            glass_id, len(records), QJPG_MAX_DEFECT_RECORDS,
+        )
+        records = records[:QJPG_MAX_DEFECT_RECORDS]
 
     if ai_judgment.startswith("ERR:HY"):
         defect_field = "NG" + _format_qjpg_defect_record(
