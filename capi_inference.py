@@ -290,6 +290,7 @@ class TileInfo:
     mark_exclusion_masked: bool = False      # 此 tile 的 heatmap 是否被 MARK binary 區域遮罩
     mark_exclusion_region_count: int = 0
     mark_patch_score_applied: bool = False   # 是否排除 MARK Patch 後重算正式分數
+    mark_patch_heatmap_applied: bool = False  # MARK patch 是否已於熱圖插值／平滑前排除
     mark_patchcore_score: float = 0.0        # 排除 MARK 後、其他遮罩前的正式分數
     mark_patch_valid_count: int = 0
     mark_patch_total_count: int = 0
@@ -2453,7 +2454,7 @@ class CAPIInferencer:
         inferencer: Any,
         input_image: np.ndarray,
     ) -> Tuple[Any, Dict[str, Any]]:
-        """Exclude MARK-affected patches before PatchCore selects its image score."""
+        """Exclude MARK patches from image scoring and heatmap source generation."""
         detail: Dict[str, Any] = {
             "applied": False,
             "reason": "unsupported_model_api",
@@ -2462,6 +2463,7 @@ class CAPIInferencer:
             "peak_x": -1,
             "peak_y": -1,
             "elapsed_ms": 0.0,
+            "heatmap_masked": False,
         }
         outer_model = getattr(inferencer, "model", None)
         patchcore_model = getattr(outer_model, "model", None)
@@ -2476,8 +2478,10 @@ class CAPIInferencer:
         instance_dict = getattr(patchcore_model, "__dict__", {})
         had_override = "compute_anomaly_score" in instance_dict
         previous_override = instance_dict.get("compute_anomaly_score")
+        heatmap_patch_mask = None
 
         def _mark_aware_score(patch_scores, locations, embedding):
+            nonlocal heatmap_patch_mask
             original_score = original_compute(patch_scores, locations, embedding)
             detail["original_raw_score"] = original_score.detach()
             started = time.perf_counter()
@@ -2532,6 +2536,11 @@ class CAPIInferencer:
                 mark_free_score = original_compute(
                     masked_scores, locations, embedding
                 )
+                core_weight, _ = self._apply_no_detect_region_weighting(
+                    tile, probe, getattr(tile, "mark_exclusion_regions", None) or [],
+                    hard_padding_px=max(0, int(getattr(self.config, "mark_exclusion_padding_px", 32))),
+                    soft_decay_px=0, core_weight=0.0,
+                )
                 peak_row, peak_col = divmod(peak_index, grid_size)
                 detail.update({
                     "applied": True,
@@ -2545,16 +2554,42 @@ class CAPIInferencer:
                     )),
                     "elapsed_ms": (time.perf_counter() - started) * 1000.0,
                 })
+                if np.any(core_weight < 1.0 - 1e-6):
+                    heatmap_patch_mask = torch.as_tensor(
+                        core_weight >= 1.0 - 1e-6, dtype=torch.bool, device=scores.device,
+                    )
                 return mark_free_score
             except Exception as exc:
                 detail["reason"] = f"score_recompute_failed:{type(exc).__name__}"
                 logger.warning("MARK PatchCore score recompute failed: %s", exc)
                 return original_score
 
+        def _mask_heatmap_source(_module, args):
+            if heatmap_patch_mask is None or not args:
+                return None
+            source = args[0]
+            if (not isinstance(source, torch.Tensor) or source.ndim != 4
+                    or source.shape[:2] != (1, 1)
+                    or source.shape[-2:] != heatmap_patch_mask.shape):
+                return None
+            # Removing MARK only after heatmap smoothing leaves its high patch
+            # scores interpolated into nearby background. Remove only the hard
+            # exclusion core here: nearby features in the soft-decay band must
+            # survive for the existing per-pixel weighting and AOI judgment.
+            cleaned = torch.where(heatmap_patch_mask, source, 0.0)
+            detail["heatmap_masked"] = True
+            return (cleaned, *args[1:])
+
         patchcore_model.compute_anomaly_score = _mark_aware_score
+        heatmap_handle = None
         try:
+            generator = getattr(patchcore_model, "anomaly_map_generator", None)
+            if isinstance(generator, torch.nn.Module):
+                heatmap_handle = generator.register_forward_pre_hook(_mask_heatmap_source)
             predictions = inferencer.predict(input_image)
         finally:
+            if heatmap_handle is not None:
+                heatmap_handle.remove()
             if had_override:
                 patchcore_model.compute_anomaly_score = previous_override
             else:
@@ -2640,6 +2675,7 @@ class CAPIInferencer:
         }
 
         tile.mark_patch_score_applied = False
+        tile.mark_patch_heatmap_applied = False
         tile.mark_patchcore_score = 0.0
         tile.mark_patch_valid_count = 0
         tile.mark_patch_total_count = 0
@@ -2728,6 +2764,7 @@ class CAPIInferencer:
         tile.mark_exclusion_masked = False
         if mark_patch_detail.get("applied"):
             tile.mark_patch_score_applied = True
+            tile.mark_patch_heatmap_applied = bool(mark_patch_detail.get("heatmap_masked"))
             tile.mark_patchcore_score = float(mark_patch_detail["score"])
             tile.mark_patch_valid_count = int(mark_patch_detail.get("valid_count", 0))
             tile.mark_patch_total_count = int(mark_patch_detail.get("total_count", 0))
@@ -2940,7 +2977,7 @@ class CAPIInferencer:
                 logger.info(
                     "[MARK_PATCH_SCORE] method=patchcore_valid_patch_v1 "
                     "model=%s raw=%.4f mark_free=%.4f final=%.4f threshold=%.4f "
-                    "patches=%d/%d peak=(%d,%d) other_decay=%.4f elapsed_ms=%.2f",
+                    "patches=%d/%d peak=(%d,%d) other_decay=%.4f elapsed_ms=%.2f heatmap_pre_mask=%s",
                     mark_patch_detail.get("model", "unknown"),
                     raw_pred_score,
                     tile.mark_patchcore_score,
@@ -2952,6 +2989,7 @@ class CAPIInferencer:
                     tile.mark_patch_peak_y,
                     decay_ratio,
                     float(mark_patch_detail.get("elapsed_ms", 0.0)),
+                    tile.mark_patch_heatmap_applied,
                 )
             elif pre_decay_max > 0:
                 # 無 Patch evidence 時保留既有比例計分，避免不支援模型中斷推論。

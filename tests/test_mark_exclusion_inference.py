@@ -66,6 +66,36 @@ class _FakePatchcoreInferencer:
         return SimpleNamespace(pred_score=pred_score, anomaly_map=anomaly_map)
 
 
+class _InterpolatedMap(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input_scores = None
+        self.fail = False
+
+    def forward(self, scores, size):
+        self.input_scores = scores.detach().clone()
+        if self.fail:
+            raise RuntimeError("heatmap generation failed")
+        upsampled = torch.nn.functional.interpolate(scores, size=size).numpy()[0, 0]
+        blurred = cv2.GaussianBlur(upsampled, (21, 21), 3)
+        return torch.from_numpy(blurred)[None, None]
+
+
+class _InterpolatedPatchcoreInferencer(_FakePatchcoreInferencer):
+    def __init__(self):
+        super().__init__()
+        self.patchcore.anomaly_map_generator = _InterpolatedMap()
+
+    def predict(self, _image):
+        self.patch_scores = torch.tensor([[0.60, 0.40, 0.30, 0.90]])
+        locations = torch.zeros((1, 4), dtype=torch.long)
+        embedding = torch.tensor([[0.10], [0.05], [0.02], [0.50]])
+        raw_score = self.patchcore.compute_anomaly_score(self.patch_scores, locations, embedding)
+        score = self.post_processor._normalize(raw_score, 0, 2, 1)
+        amap = self.patchcore.anomaly_map_generator(self.patch_scores.reshape(1, 1, 2, 2), (64, 64))
+        return SimpleNamespace(pred_score=score, anomaly_map=amap)
+
+
 @pytest.mark.parametrize("recognition_mode", ["hm", "deferred", "online"])
 def test_mark_underlines_are_masked_and_attached_in_every_recognition_mode(
     monkeypatch, capsys, recognition_mode
@@ -368,6 +398,105 @@ def test_mark_exclusion_recomputes_formal_score_from_strongest_valid_patch():
     assert masked_map[48, 48] == pytest.approx(0.09)
     assert masked_map[16, 16] == pytest.approx(0.60)
     assert "compute_anomaly_score" not in fake_model.patchcore.__dict__
+
+
+def _mark_heatmap_case():
+    inf = object.__new__(CAPIInferencer)
+    inf.config = CAPIConfig(
+        patchcore_filter_enabled=False, patchcore_concentration_enabled=False,
+        patchcore_diffuse_area_enabled=False, edge_margin_px=0,
+        mark_exclusion_padding_px=0, mark_exclusion_soft_decay_px=0,
+    )
+    inf.threshold = .5
+    tile = TileInfo(tile_id=0, x=0, y=0, width=64, height=64,
+                    image=np.zeros((64, 64), np.uint8),
+                    mark_exclusion_regions=[ExclusionRegion("mark_binary", 32, 32, 64, 64)])
+    return inf, tile, _InterpolatedPatchcoreInferencer()
+
+
+def test_mark_patches_are_excluded_before_heatmap_interpolation_and_blur():
+    inf, tile, model = _mark_heatmap_case()
+    unfiltered = model.predict(tile.image).anomaly_map.numpy()[0, 0]
+    score, filtered = inf.predict_tile(tile, inferencer=model)
+    generator = model.patchcore.anomaly_map_generator
+
+    assert tile.mark_patch_heatmap_applied is True
+    assert score == pytest.approx(.35)  # Keep valid-patch image-score normalization.
+    torch.testing.assert_close(generator.input_scores, torch.tensor([[[[.6, .4], [.3, 0]]]]))
+    torch.testing.assert_close(model.patch_scores, torch.tensor([[.6, .4, .3, .9]]))
+    assert unfiltered[48, 30] > .4  # MARK leaks into an unexcluded background pixel.
+    assert filtered[48, 30] < .3
+    assert filtered[16, 16] == pytest.approx(unfiltered[16, 16])  # Real feature remains.
+    assert not generator._forward_pre_hooks
+    assert "compute_anomaly_score" not in model.patchcore.__dict__
+    model.predict(tile.image)
+    assert generator.input_scores[0, 0, 1, 1] == pytest.approx(.9)  # No leaked override.
+
+
+def test_mark_heatmap_override_is_removed_after_prediction_error():
+    inf, tile, model = _mark_heatmap_case()
+    generator = model.patchcore.anomaly_map_generator
+    generator.fail = True
+    with pytest.raises(RuntimeError, match="heatmap generation failed"):
+        inf.predict_tile(tile, inferencer=model)
+    assert not generator._forward_pre_hooks
+    assert "compute_anomaly_score" not in model.patchcore.__dict__
+
+
+def test_mark_soft_decay_band_retains_nearby_feature_heatmap_sources():
+    inf, tile, model = _mark_heatmap_case()
+    inf.config.mark_exclusion_soft_decay_px = 16
+    tile.mark_exclusion_regions = [ExclusionRegion("mark_binary", 28, 32, 64, 64)]
+    inf.predict_tile(tile, inferencer=model)
+    source = model.patchcore.anomaly_map_generator.input_scores
+    assert source[0, 0, 1, 1] == 0  # MARK core.
+    assert source[0, 0, 1, 0] == pytest.approx(.3)  # A nearby feature in the soft band.
+    assert tile.mark_patch_heatmap_applied
+
+
+@pytest.mark.parametrize("real_feature", [False, True])
+def test_mark_heatmap_spillover_cannot_trigger_aoi_ng_but_nearby_real_patch_can(real_feature):
+    class Model(_InterpolatedPatchcoreInferencer):
+        def predict(self, _image):
+            scores = torch.full((8, 8), .1)
+            scores[1:3, 1:3] = .7  # Valid defect outside this AOI keeps full score high.
+            scores[4:7, 4:6] = .9  # Known MARK; smoothing spills into the adjacent AOI.
+            if real_feature:
+                scores[5, 3] = .7  # Independent defect immediately beside the MARK.
+            scores = scores.reshape(1, -1)
+            embedding = torch.full((64, 1), .5)
+            raw_score = self.patchcore.compute_anomaly_score(scores, torch.zeros_like(scores), embedding)
+            score = self.post_processor._normalize(raw_score, 0, 2, 1)
+            amap = self.patchcore.anomaly_map_generator(scores.reshape(1, 1, 8, 8), (64, 64))
+            return SimpleNamespace(pred_score=score, anomaly_map=amap)
+
+    inf, tile, _ = _mark_heatmap_case()
+    inf.config.aoi_judgment_roi_enabled = True
+    inf.config.aoi_judgment_radius_px = 25
+    tile.mark_exclusion_regions = [ExclusionRegion("mark_binary", 32, 32, 48, 56)]
+    tile.is_aoi_coord_tile = True
+    tile.aoi_image_x, tile.aoi_image_y = 30, 44
+    tile.aoi_product_x, tile.aoi_product_y = 240, 352
+    tile.score_threshold = .34
+    result = ImageResult(image_path=Path("W0F00000_sample.tif"), image_size=(64, 64),
+                         otsu_bounds=(0, 0, 64, 64), raw_bounds=(0, 0, 64, 64),
+                         exclusion_regions=[], tiles=[tile], excluded_tile_count=0,
+                         processed_tile_count=1, processing_time=0.)
+    score, amap = inf.predict_tile(tile, inferencer=Model(), threshold=.34)
+    result.anomaly_tiles = [(tile, score, amap)]
+    inf._apply_aoi_judgment_roi([result], (512, 512))
+    assert score == pytest.approx(.6)  # Do not lower the whole-tile defect score.
+    assert bool(tile.is_aoi_coord_below_threshold) is (not real_feature)
+    assert results_to_db_data([result], {})[0]["is_ng"] == int(real_feature)
+
+
+def test_no_valid_mark_patch_keeps_original_heatmap_source():
+    inf, tile, model = _mark_heatmap_case()
+    tile.mark_exclusion_regions = [ExclusionRegion("mark_binary", 0, 0, 64, 64)]
+    inf.predict_tile(tile, inferencer=model)
+    assert not tile.mark_patch_heatmap_applied
+    assert tile.mark_patch_score_reason == "all_patches_excluded"
+    assert model.patchcore.anomaly_map_generator.input_scores[0, 0, 1, 1] == pytest.approx(.9)
 
 
 def test_mark_exclusion_downweights_tile_heatmap_and_recalculates_score():
