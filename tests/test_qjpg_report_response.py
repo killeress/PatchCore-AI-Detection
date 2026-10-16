@@ -909,3 +909,20 @@ def test_qjpg_response_ok_i_reports_only_bomb_points():
     )
 
     assert response == "@QJPG-G1;OK;EJ;NGBMB990115200648W0F00000,"
+
+
+def test_qjpg_response_caps_defect_records_at_sixty():
+    from capi_server import QJPG_MAX_DEFECT_RECORDS
+
+    result = _image_result("W0F00000_114438.tif")
+    tiles = [_tile(index, 110 + index * 10, 450) for index in range(70)]
+    result.tiles = tiles
+    result.anomaly_tiles = [(tile, 0.91, None) for tile in tiles]
+
+    response = build_qjpg_response(
+        {"glass_id": "G1", "resolution": (2000, 1000)}, "NG", [result], CAPIConfig(),
+    )
+
+    assert QJPG_MAX_DEFECT_RECORDS == 60
+    assert response.count("W0F00000") == 60
+    assert response.startswith("@QJPG-G1;OK;EJ;NGPCDK2")
