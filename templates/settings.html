@@ -1118,7 +1118,8 @@
     }
 
     .within-spec-toolbar select,
-    .within-spec-toolbar input {
+    .within-spec-toolbar input,
+    .within-spec-machine-trigger {
         min-width: 240px;
         background: #0f172a;
         color: var(--text);
@@ -1127,6 +1128,91 @@
         padding: 8px 12px;
         font-family: 'Fira Code', monospace;
         font-size: 0.86rem;
+    }
+
+    .within-spec-machine-picker {
+        position: relative;
+        width: 280px;
+        max-width: 100%;
+    }
+
+    .within-spec-machine-trigger {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        min-width: 0;
+        cursor: pointer;
+        text-align: left;
+    }
+
+    .within-spec-machine-trigger span:first-child {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .within-spec-machine-trigger:focus-visible,
+    .within-spec-machine-search:focus {
+        outline: 2px solid #60a5fa;
+        outline-offset: 2px;
+    }
+
+    .within-spec-machine-popup {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        z-index: 20;
+        width: 100%;
+        padding: 8px;
+        box-sizing: border-box;
+        background: #0f172a;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+    }
+
+    .within-spec-toolbar .within-spec-machine-search {
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+    }
+
+    .within-spec-machine-status {
+        padding: 8px 4px;
+        color: var(--text-muted);
+        font-size: 0.76rem;
+    }
+
+    .within-spec-machine-options {
+        max-height: 240px;
+        overflow-y: auto;
+    }
+
+    .within-spec-machine-option {
+        display: block;
+        width: 100%;
+        padding: 8px 10px;
+        background: transparent;
+        border: 0;
+        border-radius: 4px;
+        color: var(--text);
+        font-family: 'Fira Code', monospace;
+        font-size: 0.86rem;
+        text-align: left;
+        overflow-wrap: anywhere;
+        cursor: pointer;
+    }
+
+    .within-spec-machine-option[aria-selected="true"] {
+        color: #93c5fd;
+        font-weight: 600;
+    }
+
+    .within-spec-machine-option:hover,
+    .within-spec-machine-option.is-active {
+        background: rgba(59, 130, 246, 0.24);
     }
 
     .within-spec-table-wrap {
@@ -2266,6 +2352,11 @@
             loadMarkShadow();
             if (currentTab === 'side-white') loadSideWhite();
         }
+    });
+
+    document.addEventListener('click', event => {
+        const picker = document.getElementById('within-spec-machine-picker');
+        if (picker && !picker.contains(event.target)) closeWithinSpecMachinePicker();
     });
 
     // ── Load Settings ──
@@ -4459,10 +4550,26 @@
                         <span>規格內判定</span>
                     </div>
                     <div class="within-spec-toolbar">
-                        <span class="within-spec-muted">機種</span>
-                        <select onchange="switchWithinSpecMachine(this.value)">
-                            ${machineIds.map(id => `<option value="${escapeAttr(id)}" ${id === currentWithinSpecMachine ? 'selected' : ''}>${escapeHtml(id)}</option>`).join('')}
-                        </select>
+                        <span id="within-spec-machine-label" class="within-spec-muted">機種</span>
+                        <div id="within-spec-machine-picker" class="within-spec-machine-picker"
+                            onkeydown="handleWithinSpecMachineKeydown(event)"
+                            onfocusout="if (!this.contains(event.relatedTarget)) closeWithinSpecMachinePicker()">
+                            <button id="within-spec-machine-trigger" class="within-spec-machine-trigger" type="button"
+                                aria-labelledby="within-spec-machine-label within-spec-machine-value"
+                                aria-haspopup="dialog" aria-expanded="false" aria-controls="within-spec-machine-popup"
+                                onclick="toggleWithinSpecMachinePicker()">
+                                <span id="within-spec-machine-value">${escapeHtml(currentWithinSpecMachine)}</span>
+                                <span aria-hidden="true">▾</span>
+                            </button>
+                            <div id="within-spec-machine-popup" class="within-spec-machine-popup" role="dialog" aria-label="搜尋並選擇機種" hidden>
+                                <input id="within-spec-machine-search" class="within-spec-machine-search" type="search"
+                                    placeholder="搜尋機種…" aria-label="搜尋機種" autocomplete="off"
+                                    role="combobox" aria-autocomplete="list" aria-expanded="false"
+                                    aria-controls="within-spec-machine-options" oninput="renderWithinSpecMachineOptions(this.value)">
+                                <div id="within-spec-machine-status" class="within-spec-machine-status" role="status"></div>
+                                <div id="within-spec-machine-options" class="within-spec-machine-options" role="listbox" aria-label="機種"></div>
+                            </div>
+                        </div>
                         <input id="within-spec-machine-input" type="text" placeholder="輸入機種 ID" onkeydown="if(event.key === 'Enter') addWithinSpecMachineFromInput()">
                         <button class="btn-edit" onclick="addWithinSpecMachineFromInput()">新增機種</button>
                     </div>
@@ -4582,6 +4689,88 @@
                 <td><input class="within-spec-input" type="number" min="0" step="1" value="${formatWithinSpecNumber(rule.screen_count_limit, 1)}" oninput='updateWithinSpecRule(${JSON.stringify(screenCode)}, ${JSON.stringify(dotType)}, "screen_count_limit", this.value)'></td>
             </tr>
         `;
+    }
+
+    function renderWithinSpecMachineOptions(query = '') {
+        const keyword = query.trim().toLowerCase();
+        const machineIds = Object.keys(withinSpecRules);
+        const matches = machineIds.filter(id => id.toLowerCase().includes(keyword));
+        const options = document.getElementById('within-spec-machine-options');
+        options.innerHTML = matches.map((id, index) => `
+            <button id="within-spec-machine-option-${index}" class="within-spec-machine-option" type="button"
+                role="option" tabindex="-1" aria-selected="${id === currentWithinSpecMachine}"
+                data-machine-id="${escapeAttr(id)}" onclick="selectWithinSpecMachine(this.dataset.machineId)">${escapeHtml(id)}</button>
+        `).join('');
+        document.getElementById('within-spec-machine-status').textContent = matches.length
+            ? `${matches.length} / ${machineIds.length} 個機種`
+            : '找不到符合的機種';
+        const selectedIndex = matches.indexOf(currentWithinSpecMachine);
+        setActiveWithinSpecMachineOption(selectedIndex >= 0 ? selectedIndex : 0);
+    }
+
+    function setActiveWithinSpecMachineOption(index) {
+        const options = document.querySelectorAll('#within-spec-machine-options .within-spec-machine-option');
+        const search = document.getElementById('within-spec-machine-search');
+        options.forEach((option, i) => option.classList.toggle('is-active', i === index));
+        if (options[index]) {
+            search.setAttribute('aria-activedescendant', options[index].id);
+            options[index].scrollIntoView({ block: 'nearest' });
+        } else {
+            search.removeAttribute('aria-activedescendant');
+        }
+    }
+
+    function toggleWithinSpecMachinePicker() {
+        const popup = document.getElementById('within-spec-machine-popup');
+        if (!popup.hidden) {
+            closeWithinSpecMachinePicker();
+            return;
+        }
+        const search = document.getElementById('within-spec-machine-search');
+        popup.hidden = false;
+        document.getElementById('within-spec-machine-trigger').setAttribute('aria-expanded', 'true');
+        search.setAttribute('aria-expanded', 'true');
+        search.value = '';
+        renderWithinSpecMachineOptions();
+        search.focus();
+    }
+
+    function closeWithinSpecMachinePicker() {
+        const popup = document.getElementById('within-spec-machine-popup');
+        if (!popup) return;
+        popup.hidden = true;
+        document.getElementById('within-spec-machine-trigger').setAttribute('aria-expanded', 'false');
+        document.getElementById('within-spec-machine-search').setAttribute('aria-expanded', 'false');
+    }
+
+    function handleWithinSpecMachineKeydown(event) {
+        if (event.isComposing) return;
+        const popup = document.getElementById('within-spec-machine-popup');
+        if (event.key === 'Escape' && !popup.hidden) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeWithinSpecMachinePicker();
+            document.getElementById('within-spec-machine-trigger').focus();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            if (popup.hidden) {
+                toggleWithinSpecMachinePicker();
+                return;
+            }
+            const options = Array.from(document.querySelectorAll('#within-spec-machine-options .within-spec-machine-option'));
+            const active = options.findIndex(option => option.classList.contains('is-active'));
+            const index = Math.max(0, Math.min(options.length - 1, active + (event.key === 'ArrowDown' ? 1 : -1)));
+            setActiveWithinSpecMachineOption(index);
+        } else if (event.key === 'Enter' && !popup.hidden && event.target.id === 'within-spec-machine-search') {
+            event.preventDefault();
+            const active = document.querySelector('#within-spec-machine-options .is-active');
+            if (active) selectWithinSpecMachine(active.dataset.machineId);
+        }
+    }
+
+    function selectWithinSpecMachine(machineId) {
+        switchWithinSpecMachine(machineId);
+        document.getElementById('within-spec-machine-trigger').focus();
     }
 
     function switchWithinSpecMachine(machineId) {
