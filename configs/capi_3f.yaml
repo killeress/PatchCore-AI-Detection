@@ -106,6 +106,15 @@ bright_spot_min_area: 5       # 亮點最小連通面積 (px, 小於此視為雜
 bright_spot_median_kernel: 21 # 背景估計 median filter 核大小 (越大背景越平滑)
 bright_spot_diff_threshold: 10 # 局部對比差異閾值 (與背景差值超過此值為異常)
 
+# 半黑半白畫面黑底白點偵測 (BWFHALF0=上黑下白 / WBFHALF0=上白下黑，僅 AOI 座標附近檢測)
+half_spot_diff_threshold: 10   # 局部對比差異閾值
+half_spot_median_kernel: 21    # 背景估計 median filter 核大小
+half_spot_min_area: 5          # 白點最小連通面積 (px)
+half_spot_max_area: 2000       # 白點最大連通面積 (px, 超過視為區塊異常判 OK; 實測真白點含光暈可達 ~1300px)
+half_spot_max_aspect_ratio: 3.0 # 白點長寬比上限 (超過視為長條漏光判 OK)
+half_spot_black_region_threshold: 60 # 黑區判定 (AOI 鄰域中位灰階低於此值才檢測, 否則視為白區直接 OK)
+half_spot_abs_threshold: 200   # 絕對亮度上限 (超過直接判定亮點)
+
 
 # 邊緣補漏 tile (Otsu 邊界處額外加一排錯開的 tile，避免缺陷落在 tile 邊緣漏檢)
 edge_overlap_enabled: false

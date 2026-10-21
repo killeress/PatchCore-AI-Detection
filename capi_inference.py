@@ -42,7 +42,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import logging
 import re
-from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix
+from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix, is_half_screen_prefix
 
 from capi_image_orientation import (
     read_detection_image, panel_image_cache, timed_inference_stage,
@@ -267,6 +267,11 @@ class TileInfo:
     bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
+    is_half_spot_detection: bool = False    # 是否為半屏黑底白點偵測（BWFHALF0/WBFHALF0）
+    half_spot_max_diff: int = 0             # HALF 偵測：最大局部差異值
+    half_spot_diff_threshold: int = 0       # HALF 偵測：使用的差異閾值
+    half_spot_area: int = 0                 # HALF 偵測：偵測到的白點面積 (px)
+    half_spot_min_area: int = 0             # HALF 偵測：使用的最小面積
     score_threshold: Optional[float] = None # 此 tile 推論時實際使用的門檻（v2 依 zone 不同）
     decision_context: Optional[dict] = field(default=None, repr=False)
     aoi_roi_mask: Optional[np.ndarray] = field(default=None, repr=False)
@@ -453,6 +458,132 @@ class ImageResult:
     @property
     def total_tiles(self) -> int:
         return len(self.tiles)
+
+
+# HALF 偵測 AOI 鄰域黑區門禁的觀察窗大小 (px)
+HALF_SPOT_GATE_WINDOW = 51
+
+
+def filter_half_spot_components(
+    binary: np.ndarray,
+    *,
+    min_area: int,
+    max_area: int,
+    max_aspect_ratio: float,
+) -> Tuple[np.ndarray, int]:
+    """連通區形態過濾：min_area<=面積<=max_area 且長寬比<=max_aspect_ratio。
+
+    用於排除長條漏光（長寬比過大）與區塊異常（面積過大），僅保留白點。
+
+    Returns: (filtered_binary uint8, kept_count)
+    """
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    filtered = np.zeros_like(binary)
+    keep: List[int] = []
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        cw = int(stats[i, cv2.CC_STAT_WIDTH])
+        ch = int(stats[i, cv2.CC_STAT_HEIGHT])
+        aspect = max(cw, ch) / max(1, min(cw, ch))
+        if min_area <= area <= max_area and aspect <= max_aspect_ratio:
+            keep.append(i)
+    if keep:
+        filtered[np.isin(labels, keep)] = 255
+    return filtered, len(keep)
+
+
+def detect_half_spot_binary(
+    image: np.ndarray,
+    *,
+    aoi_local_xy: Optional[Tuple[int, int]],
+    diff_threshold: int,
+    median_kernel: int,
+    min_area: int,
+    max_area: int,
+    max_aspect_ratio: float,
+    abs_threshold: int,
+    black_region_threshold: int,
+    gate_window: int = HALF_SPOT_GATE_WINDOW,
+) -> Tuple[float, np.ndarray, Dict[str, Any]]:
+    """半黑半白畫面黑底白點偵測（純函式，便於單測）。
+
+    流程：
+      1. AOI 鄰域黑區門禁：鄰域中位灰階 >= black_region_threshold 視為白區，直接 OK
+      2. median filter 背景估計 → 局部差異 > diff_threshold 或灰階 > abs_threshold 為候選
+      3. 候選必須位於黑色背景上（背景灰階 < black_region_threshold），白區不檢測
+      4. 連通區形態過濾：min_area <= 面積 <= max_area 且長寬比 <= max_aspect_ratio
+
+    Returns:
+        (score, filtered_binary, stats) - score: 0.0/1.0；filtered_binary: uint8 0/255
+    """
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+    h, w = gray.shape[:2]
+    empty = np.zeros((h, w), dtype=np.uint8)
+
+    # 1) AOI 鄰域黑區門禁
+    cx, cy = aoi_local_xy if aoi_local_xy is not None else (w // 2, h // 2)
+    r = max(1, gate_window // 2)
+    x1, x2 = max(0, cx - r), min(w, cx + r + 1)
+    y1, y2 = max(0, cy - r), min(h, cy + r + 1)
+    window = gray[y1:y2, x1:x2]
+    gate_median = float(np.median(window)) if window.size else 255.0
+    if gate_median >= black_region_threshold:
+        return 0.0, empty, {"region": "white", "gate_median": gate_median,
+                            "max_diff": 0, "max_pixel": int(gray.max()),
+                            "max_component_area": 0, "kept": 0,
+                            "too_small": 0, "bright_background": 0,
+                            "too_large": 0, "too_elongated": 0}
+
+    # 2) 局部對比 + 絕對亮度候選
+    mk = clamp_median_kernel(median_kernel, min(h, w) - 1)
+    bg = cv2.medianBlur(gray, mk)
+    diff = cv2.subtract(gray, bg)
+    _, binary_diff = cv2.threshold(diff, diff_threshold, 255, cv2.THRESH_BINARY)
+    _, binary_abs = cv2.threshold(gray, abs_threshold, 255, cv2.THRESH_BINARY)
+    binary = cv2.bitwise_or(binary_diff, binary_abs)
+
+    # 3) 連通區逐個過濾（排除長條漏光 / 區塊異常 / 白區內容 / 雜訊）：
+    #    - 面積 < min_area → 雜訊
+    #    - 連通區本地背景中位灰階 >= black_region_threshold → 位於白區或自身即大區塊
+    #      （白色區域不做任何檢測；大區塊內部經 median blur 後背景亦為亮，藉此排除）
+    #    - 面積 > max_area → 區塊異常
+    #    - 長寬比 > max_aspect_ratio → 長條漏光
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    filtered = np.zeros_like(binary)
+    keep: List[int] = []
+    rejected = {"too_small": 0, "bright_background": 0, "too_large": 0, "too_elongated": 0}
+    max_component_area = 0
+    for i in range(1, num):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        max_component_area = max(max_component_area, area)
+        if area < min_area:
+            rejected["too_small"] += 1
+            continue
+        comp_bg = float(np.median(bg[labels == i]))
+        if comp_bg >= black_region_threshold:
+            rejected["bright_background"] += 1
+            continue
+        if area > max_area:
+            rejected["too_large"] += 1
+            continue
+        cw = int(stats[i, cv2.CC_STAT_WIDTH])
+        ch = int(stats[i, cv2.CC_STAT_HEIGHT])
+        aspect = max(cw, ch) / max(1, min(cw, ch))
+        if aspect > max_aspect_ratio:
+            rejected["too_elongated"] += 1
+            continue
+        keep.append(i)
+    if keep:
+        filtered[np.isin(labels, keep)] = 255
+
+    return (1.0 if keep else 0.0), filtered, {
+        "region": "black", "gate_median": gate_median,
+        "max_diff": int(diff.max()), "max_pixel": int(gray.max()),
+        "max_component_area": max_component_area, "kept": len(keep), **rejected,
+    }
 
 
 class CAPIInferencer:
@@ -3121,6 +3252,79 @@ class CAPIInferencer:
                   f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
                   f"max_pixel={max_pixel_val}, raw_bright={raw_bright_count} px, "
                   f"max_component={max_component_area} px (min_area={min_area})")
+
+        return score, anomaly_map
+
+    def _detect_half_spots(self, tile: 'TileInfo') -> Tuple[float, Optional[np.ndarray]]:
+        """BWFHALF0/WBFHALF0 專用：僅在 AOI 座標附近的黑區偵測白點。
+
+        取代 PatchCore 推論；白區不檢測直接 OK，長條漏光/區塊異常以
+        面積上限與長寬比上限排除（判 OK）。
+        """
+        img = tile.image
+        if img is None:
+            return 0.0, None
+
+        aoi_local = None
+        if tile.aoi_image_x >= 0 and tile.aoi_image_y >= 0:
+            aoi_local = (tile.aoi_image_x - tile.x, tile.aoi_image_y - tile.y)
+
+        score, filtered, st = detect_half_spot_binary(
+            img,
+            aoi_local_xy=aoi_local,
+            diff_threshold=self.config.half_spot_diff_threshold,
+            median_kernel=self.config.half_spot_median_kernel,
+            min_area=self.config.half_spot_min_area,
+            max_area=self.config.half_spot_max_area,
+            max_aspect_ratio=self.config.half_spot_max_aspect_ratio,
+            abs_threshold=self.config.half_spot_abs_threshold,
+            black_region_threshold=self.config.half_spot_black_region_threshold,
+        )
+
+        # 與 PatchCore/B0F 共用四角不檢測與排除區域 mask
+        filtered, _ = self._mask_tile_corner_exclusion(tile, filtered)
+        if tile.mask is not None and np.any(filtered):
+            mask_resized = cv2.resize(tile.mask, (filtered.shape[1], filtered.shape[0]))
+            filtered = cv2.bitwise_and(filtered, mask_resized)
+            if not np.any(filtered):
+                score = 0.0
+
+        anomaly_map = filtered.astype(np.float32) / 255.0
+
+        tile.is_half_spot_detection = True
+        tile.half_spot_max_diff = int(st.get("max_diff", 0))
+        tile.half_spot_diff_threshold = self.config.half_spot_diff_threshold
+        tile.half_spot_area = int(np.sum(filtered > 0))
+        tile.half_spot_min_area = self.config.half_spot_min_area
+        tile.decision_context = {
+            "abs_threshold": int(self.config.half_spot_abs_threshold),
+            "black_region_threshold": int(self.config.half_spot_black_region_threshold),
+            "region": st["region"],
+            "gate_median": round(float(st["gate_median"]), 1),
+            "max_pixel": int(st.get("max_pixel", 0)),
+            "max_component_area": int(st.get("max_component_area", 0)),
+            "min_area": int(self.config.half_spot_min_area),
+            "max_area": int(self.config.half_spot_max_area),
+            "max_aspect_ratio": float(self.config.half_spot_max_aspect_ratio),
+            "rejected_too_large": int(st.get("too_large", 0)),
+            "rejected_too_elongated": int(st.get("too_elongated", 0)),
+            "rejected_bright_background": int(st.get("bright_background", 0)),
+        }
+
+        aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+        if st["region"] == "white":
+            print(f"  🌗 HALF 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: AOI 位於白區 "
+                  f"(median={st['gate_median']:.0f} >= {self.config.half_spot_black_region_threshold})，不檢測 → OK")
+        elif score > 0:
+            print(f"  🌗 HALF 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: 黑區發現白點 "
+                  f"({tile.half_spot_area} px), max_diff={tile.half_spot_max_diff}, "
+                  f"diff_thr={self.config.half_spot_diff_threshold}, "
+                  f"abs_thr={self.config.half_spot_abs_threshold} → NG")
+        else:
+            print(f"  🌗 HALF 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: 黑區無白點 → OK "
+                  f"(max_diff={st.get('max_diff', 0)}, max_component={st.get('max_component_area', 0)} px, "
+                  f"rejected: 亮底={st.get('bright_background', 0)} 過大={st.get('too_large', 0)} "
+                  f"過長={st.get('too_elongated', 0)} 過小={st.get('too_small', 0)})")
 
         return score, anomaly_map
 
@@ -8203,6 +8407,36 @@ class CAPIInferencer:
             # 多模型路由：依圖片前綴選擇對應的 inferencer 和 threshold
             img_prefix = self._get_image_prefix(result.image_path.name)
 
+            # === 半黑半白畫面（BWFHALF0/WBFHALF0）：僅檢 AOI 座標 tiles ===
+            if is_half_screen_prefix(img_prefix):
+                print(f"🌗 {result.image_path.name} (HALF) → 半屏黑底白點偵測（僅 AOI 座標）")
+                removed = len(result.tiles)
+                # 僅保留 AOI 座標 tiles；畫異記錄（PCO05）與無效原點座標 (0,0) 不檢測
+                result.tiles = [
+                    t for t in result.tiles
+                    if t.is_aoi_coord_tile
+                    and t.aoi_defect_code != self.config.report_image_abnormal_defect_code
+                    and not (t.aoi_product_x == 0 and t.aoi_product_y == 0)
+                ]
+                removed -= len(result.tiles)
+                if removed > 0:
+                    print(f"⏭️ HALF 不做全畫面掃描: 移除 {removed} 個 grid tiles")
+                for t in result.tiles:
+                    t.zone = "half_spot"
+                anomaly_tiles = []
+                for tile in result.tiles:
+                    score, anomaly_map = self._detect_half_spots(tile)
+                    tile.score_threshold = 0.5
+                    if score <= 0:
+                        tile.is_aoi_coord_below_threshold = True
+                    anomaly_tiles.append((tile, score, anomaly_map))
+                result.anomaly_tiles = anomaly_tiles
+                result.inference_time = 0.0
+                preprocessed_results[i] = result
+                if progress_callback:
+                    progress_callback(i + 1, len(preprocessed_results))
+                continue
+
             # === skip_files 圖片（如 B0F00000）：使用二值化偵測取代 PatchCore ===
             if self.config.should_skip_file(result.image_path.name, self.station_adapter):
                 print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")
@@ -8724,7 +8958,7 @@ class CAPIInferencer:
                                 amap_h, amap_w = anomaly_map.shape[:2]
                                 # 二值化偵測 (B0F00000 等): 使用亮點重心而非 argmax
                                 # argmax 在 binary map 上回傳最左上方像素，容易偏離實際缺陷位置
-                                if tile.is_bright_spot_detection:
+                                if tile.is_bright_spot_detection or tile.is_half_spot_detection:
                                     ys, xs = np.where(anomaly_map > 0.5)
                                     if len(xs) > 0:
                                         centroid_x = int(np.mean(xs))
@@ -8914,8 +9148,8 @@ class CAPIInferencer:
                         if not result.anomaly_tiles:
                             continue
                         for tile, score, anomaly_map in result.anomaly_tiles:
-                            # 亮點偵測 tile (B0F 等黑圖) 不受排除區域影響
-                            if tile.is_bright_spot_detection:
+                            # 亮點/半屏偵測 tile (B0F 等黑圖、BWFHALF0/WBFHALF0) 不受排除區域影響
+                            if tile.is_bright_spot_detection or tile.is_half_spot_detection:
                                 continue
                             # 使用熱力圖峰值座標 (更精確的缺陷位置)
                             if tile.anomaly_peak_x >= 0 and tile.anomaly_peak_y >= 0:
@@ -9680,15 +9914,26 @@ class CAPIInferencer:
                 tile.aoi_roi_mask = mask
                 tile.aoi_roi_full_map = amap.copy()
                 limited = np.where(mask > 0, amap, 0).astype(np.float32)
-                if tile.is_bright_spot_detection:
-                    # Recheck component area after clipping a bright spot at the ROI border.
-                    count, labels, stats, _ = cv2.connectedComponentsWithStats(
-                        (limited > 0).astype(np.uint8), connectivity=8)
-                    minimum = max(1, tile.bright_spot_min_area)
-                    keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= minimum]
-                    limited = np.isin(labels, keep).astype(np.float32)
+                if tile.is_bright_spot_detection or tile.is_half_spot_detection:
+                    # Recheck component shape after clipping a spot at the ROI border.
+                    if tile.is_half_spot_detection:
+                        _kept_map, _kept_count = filter_half_spot_components(
+                            (limited > 0).astype(np.uint8),
+                            min_area=max(1, tile.half_spot_min_area),
+                            max_area=int(self.config.half_spot_max_area),
+                            max_aspect_ratio=float(self.config.half_spot_max_aspect_ratio),
+                        )
+                        limited = _kept_map.astype(np.float32)
+                        keep = list(range(_kept_count)) if _kept_count else []
+                        tile.half_spot_area = int(np.count_nonzero(limited))
+                    else:
+                        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                            (limited > 0).astype(np.uint8), connectivity=8)
+                        minimum = max(1, tile.bright_spot_min_area)
+                        keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= minimum]
+                        limited = np.isin(labels, keep).astype(np.float32)
+                        tile.bright_spot_area = int(np.count_nonzero(limited))
                     roi_score = float(bool(keep))
-                    tile.bright_spot_area = int(np.count_nonzero(limited))
                 else:
                     peak = float(np.max(amap))
                     roi_score = float(score) * float(np.max(limited)) / peak if peak > 0 else 0.0
@@ -9696,7 +9941,7 @@ class CAPIInferencer:
                 if threshold is None:
                     threshold = getattr(self, "threshold", self.config.anomaly_threshold)
                     tile.score_threshold = threshold
-                if not tile.is_bright_spot_detection and score > 0:
+                if not (tile.is_bright_spot_detection or tile.is_half_spot_detection) and score > 0:
                     # Every above-threshold region inside the ROI participates,
                     # including weaker defects next to a stronger bomb or dust spot.
                     minimum_map_score = float(threshold) * float(np.max(amap)) / float(score)
@@ -9717,7 +9962,7 @@ class CAPIInferencer:
                     "product_bounds": [x1, y1, x2, y2],
                     "tile_polygon": local_polygon.tolist(),
                     "full_tile_score": float(score), "roi_score": roi_score,
-                    "score_method": "binary_roi" if tile.is_bright_spot_detection else "max_ratio",
+                    "score_method": "binary_roi" if (tile.is_bright_spot_detection or tile.is_half_spot_detection) else "max_ratio",
                     "outside_ignored": True,
                 })
                 logger.info("[AOI_ROI] image=%s tile=%s aoi=(%s,%s) radius=%s product_px "
@@ -9740,6 +9985,7 @@ class CAPIInferencer:
                     not tile.is_aoi_coord_tile
                     or getattr(tile, "is_aoi_coord_below_threshold", False)
                     or tile.is_bright_spot_detection
+                    or tile.is_half_spot_detection
                     or tile.aoi_roi_mask is not None
                 ):
                     continue
@@ -9878,7 +10124,7 @@ class CAPIInferencer:
         tile.bomb_region_diagnostics = None
         if (
             not tile.is_aoi_coord_tile
-            or (tile.is_bright_spot_detection and tile.aoi_roi_mask is None)
+            or ((tile.is_bright_spot_detection or tile.is_half_spot_detection) and tile.aoi_roi_mask is None)
             or tile.width <= 0 or tile.height <= 0
             or getattr(tile, "is_aoi_coord_below_threshold", False)
             or (tile.dust_two_stage_features is not None and tile.aoi_roi_mask is None)
@@ -9960,7 +10206,7 @@ class CAPIInferencer:
                                     peak_in_dust=False, max_score=float(amap[py, px]), peak_yx=(py, px)))
             if not details:
                 return False, ""
-        elif tile.is_bright_spot_detection:
+        elif tile.is_bright_spot_detection or tile.is_half_spot_detection:
             # The diagnostic binary includes filtered sticker pixels. Bomb
             # matching must use only the surviving bright-spot evidence.
             _real, _peak, _iou, details, binary, labels = self.check_dust_per_region(
@@ -10389,7 +10635,7 @@ class CAPIInferencer:
 
             for result in results:
                 for tile, _score, _anomaly_map in result.anomaly_tiles:
-                    if tile.is_bright_spot_detection:
+                    if tile.is_bright_spot_detection or tile.is_half_spot_detection:
                         continue
                     px = tile.anomaly_peak_x if tile.anomaly_peak_x >= 0 else tile.center[0]
                     py = tile.anomaly_peak_y if tile.anomaly_peak_y >= 0 else tile.center[1]
@@ -10638,8 +10884,12 @@ class CAPIInferencer:
             preprocess_prefixes = {
                 prefix for prefix in report_prefixes
                 if not prefix.upper().startswith("B0")
+                and not is_half_screen_prefix(prefix)
             }
-            has_black_image = any(p.upper().startswith("B0") for p in report_prefixes)
+            has_black_image = any(
+                p.upper().startswith("B0") or is_half_screen_prefix(p)
+                for p in report_prefixes
+            )
             if has_black_image:
                 from capi_preprocess import BOUNDARY_REFERENCE_PRIORITY
                 folder_prefixes = {self._get_image_prefix(f.name) for f in image_files}
@@ -10850,12 +11100,23 @@ class CAPIInferencer:
                 if report_prefix in existing_prefixes:
                     continue
 
-                # 只對 B 開頭（B = Black）的黑畫面走 bright_spot 補丁邏輯。
+                # 只對 B 開頭（B = Black）的黑畫面與半黑半白畫面
+                # （BWFHALF0/WBFHALF0）走二值化補丁邏輯。
                 # 新架構 machine_config.yaml 預設沒有 skip_files 欄位，因此這裡
                 # 不依賴 should_skip_file，直接以 prefix 判斷；OMIT/PINIGBI/側拍
                 # 開頭都不是 B，不會誤匹配。
-                if not report_prefix.upper().startswith("B0"):
+                if not report_prefix.upper().startswith("B0") and not is_half_screen_prefix(report_prefix):
                     continue
+
+                if is_half_screen_prefix(report_prefix):
+                    # 畫異記錄（PCO05）與無效原點座標 (0,0) 不是點缺陷，不建 tile
+                    defects = [
+                        d for d in defects
+                        if d.defect_code != self.config.report_image_abnormal_defect_code
+                        and not (d.product_x == 0 and d.product_y == 0)
+                    ]
+                    if not defects:
+                        continue
 
                 matched_file = next(
                     (
@@ -10901,11 +11162,19 @@ class CAPIInferencer:
                 if bomb_info is not None:
                     skip_result.client_bomb_info = bomb_info
 
+                half_screen = is_half_screen_prefix(report_prefix)
+                if half_screen:
+                    for _t in skip_result.tiles:
+                        _t.zone = "half_spot"
+
                 results.append(skip_result)
                 v2_entries.append({
                     "lighting": report_prefix,
                     "result": skip_result,
-                    "zone_by_tile_id": {t.tile_id: "bright_spot" for t in skip_result.tiles},
+                    "zone_by_tile_id": {
+                        t.tile_id: ("half_spot" if half_screen else "bright_spot")
+                        for t in skip_result.tiles
+                    },
                     "inner_thr": 1.0,
                     "edge_thr": 1.0,
                     "skip_file": True,
@@ -10959,6 +11228,26 @@ class CAPIInferencer:
 
             t_infer_start = time.time()
             anomaly_tiles: List[Tuple[TileInfo, float, Optional[np.ndarray]]] = []
+
+            if is_half_screen_prefix(lighting):
+                print(f"🌗 {result.image_path.name} (HALF) → 半屏黑底白點偵測")
+                for ti in result.tiles:
+                    score, anomaly_map = self._detect_half_spots(ti)
+                    ti.score_threshold = 0.5
+                    if score <= 0:
+                        ti.is_aoi_coord_below_threshold = True
+                    anomaly_tiles.append((ti, score, anomaly_map))
+
+                infer_elapsed = time.time() - t_infer_start
+                result.anomaly_tiles = anomaly_tiles
+                result.inference_time = infer_elapsed
+                result.processing_time = time.time() - t0
+                half_ng_count = sum(1 for _t, score, _m in anomaly_tiles if score > 0)
+                print(
+                    f"[v2] {lighting}: half_spot tiles={len(result.tiles)}, "
+                    f"NG={half_ng_count}, infer {infer_elapsed:.2f}s"
+                )
+                continue
 
             if entry.get("skip_file") or self.config.should_skip_file(result.image_path.name, self.station_adapter):
                 print(f"💡 {result.image_path.name} (skip_file) → 使用二值化偵測亮點")

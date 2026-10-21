@@ -1182,6 +1182,34 @@ def _iter_qjpg_defect_records(
                 )
 
         for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
+            # 半黑半白畫面（BWFHALF0/WBFHALF0）：照搬 AOI 原代碼；
+            # NG 報白點重心，OK 透傳 AOI 原座標回 Testing。
+            if getattr(tile, "is_half_spot_detection", False):
+                aoi_code = (
+                    str(getattr(tile, "aoi_defect_code", "") or "").strip()
+                    or _report_defect_code(config, "white")
+                )
+                if not bomb_only and _is_reportable_tile(tile):
+                    if getattr(tile, "anomaly_peak_x", -1) >= 0 and getattr(tile, "anomaly_peak_y", -1) >= 0:
+                        image_x, image_y = int(tile.anomaly_peak_x), int(tile.anomaly_peak_y)
+                    else:
+                        image_x, image_y = tile.center
+                    records.append(
+                        _format_qjpg_defect_record(
+                            aoi_code, image_x, image_y, image_prefix,
+                            raw_bounds, product_resolution, panel_polygon,
+                        )
+                    )
+                elif getattr(tile, "aoi_product_x", -1) >= 0 and getattr(tile, "aoi_product_y", -1) >= 0:
+                    records.append(
+                        _format_qjpg_product_defect_record(
+                            aoi_code,
+                            int(tile.aoi_product_x),
+                            int(tile.aoi_product_y),
+                            image_prefix,
+                        )
+                    )
+                continue
             if not _is_reportable_tile(tile):
                 continue
             if bomb_only and not getattr(tile, "is_bomb", False):

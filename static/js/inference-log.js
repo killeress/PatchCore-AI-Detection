@@ -41,7 +41,7 @@
         if ((m = raw.match(/reject non-linear (vertical|horizontal) edge: residual_p95=([\d.]+)px > ([\d.]+)px/))) return `${m[1] === 'vertical' ? '垂直' : '水平'}邊緣未通過直線檢查：偏差 ${m[2]} px，門檻 ${m[3]} px。`;
         if (raw.includes('BOMB_FORCE')) return '炸彈區域強制偵測未啟用，使用 AOI 報告座標（後續座標比對另行記錄）。';
         if (raw.includes('OMIT OK:')) return '灰塵檢查影像：系統回報檢查通過（OMIT OK）。';
-        if ((m = raw.match(/\[v2\] (\w+): (?:bright_spot )?tiles=(\d+).*?NG=(\d+), infer ([\d.]+)s/))) return `${m[1]} · 檢測 ${m[2]} 個區塊，階段 NG ${m[3]} 個 · ${m[4]} 秒`;
+        if ((m = raw.match(/\[v2\] (\w+): (?:bright_spot |half_spot )?tiles=(\d+).*?NG=(\d+), infer ([\d.]+)s/))) return `${m[1]} · 檢測 ${m[2]} 個區塊，階段 NG ${m[3]} 個 · ${m[4]} 秒`;
         if ((m = raw.match(/BOMB match: (.+)/))) return `炸彈座標比對結果：${m[1].replace('UNKNOWN', '未定（UNKNOWN）')}`;
         if ((m = raw.match(/^(.*?)Tile@.*?AOI\(([^)]+)\).*?Score:([\d.]+).*?PER_REGION: (\d+)real\+(\d+)dust -> (\w+)/))) return `AOI ${m[2]} · 異常分數 ${m[3]} · 缺陷區域 ${m[4]}、灰塵區域 ${m[5]} · 階段判定 ${m[6]}`;
         return raw.replace(/^\[[^\]]+\]\s+(?:INFO|WARNING|ERROR|DEBUG|CRITICAL)\s+\[[^\]]+\]\s*/, '').replace(/^\[v2\]\s*/, '');

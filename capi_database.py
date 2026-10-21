@@ -7014,6 +7014,14 @@ class CAPIDatabase:
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
             ("bright_spot_median_kernel", 21, "int", "背景估計 median filter 核大小"),
             ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
+            # 半黑半白畫面黑底白點偵測設定 (BWFHALF0/WBFHALF0)
+            ("half_spot_diff_threshold", 10, "int", "半屏白點局部對比差異閾值 (BWFHALF0/WBFHALF0)"),
+            ("half_spot_median_kernel", 21, "int", "半屏白點背景估計 median filter 核大小"),
+            ("half_spot_min_area", 5, "int", "半屏白點最小連通面積 (px)"),
+            ("half_spot_max_area", 2000, "int", "半屏白點最大連通面積 (px, 超過視為區塊異常判 OK; 實測真白點含光暈可達 ~1300px)"),
+            ("half_spot_max_aspect_ratio", 3.0, "float", "半屏白點長寬比上限 (超過視為長條漏光判 OK)"),
+            ("half_spot_black_region_threshold", 60, "int", "半屏黑區判定門檻 (AOI 鄰域中位灰階低於此值才檢測, 否則視為白區直接 OK)"),
+            ("half_spot_abs_threshold", 200, "int", "半屏白點絕對亮度上限 (超過直接判定亮點)"),
             ("within_spec_judgment_rules", config.within_spec_judgment_rules, "dict", "規格內點狀不良判定條件（依機種/畫面/黑白點分開設定；dot_detection.segmentation_method 可選 background_diff、hysteresis(V2 雙參數組)、morph_hat、adaptive_mean、halo、auto 或 off 關閉）"),
             # 畫異設定
             ("image_abnormal_detection_enabled", config.image_abnormal_detection_enabled, "bool", "啟用推論前畫異預檢（只檢查 AOI Report 涉及畫面的產品 polygon 內平均亮度，低於下限或高於上限時回報 PCO05）"),

@@ -728,7 +728,8 @@ class HeatmapManager:
             儲存的檔案路徑
         """
         tile_size = 512
-        is_bright_spot = getattr(tile_info, 'is_bright_spot_detection', False) if tile_info else False
+        is_half_spot = getattr(tile_info, 'is_half_spot_detection', False) if tile_info else False
+        is_bright_spot = (getattr(tile_info, 'is_bright_spot_detection', False) or is_half_spot) if tile_info else False
         tile_score_threshold = getattr(tile_info, 'score_threshold', None) if tile_info else None
         if tile_score_threshold is not None:
             try:
@@ -860,10 +861,18 @@ class HeatmapManager:
             header = np.zeros((header_h, comp_w, 3), dtype=np.uint8)
 
             # 取得偵測統計
-            max_diff = getattr(tile_info, 'bright_spot_max_diff', 0) if tile_info else 0
-            diff_thr = getattr(tile_info, 'bright_spot_diff_threshold', 0) if tile_info else 0
-            spot_area = getattr(tile_info, 'bright_spot_area', 0) if tile_info else 0
-            spot_min_area = getattr(tile_info, 'bright_spot_min_area', 0) if tile_info else 0
+            if is_half_spot:
+                max_diff = getattr(tile_info, 'half_spot_max_diff', 0)
+                diff_thr = getattr(tile_info, 'half_spot_diff_threshold', 0)
+                spot_area = getattr(tile_info, 'half_spot_area', 0)
+                spot_min_area = getattr(tile_info, 'half_spot_min_area', 0)
+                spot_label = "HALF"
+            else:
+                max_diff = getattr(tile_info, 'bright_spot_max_diff', 0) if tile_info else 0
+                diff_thr = getattr(tile_info, 'bright_spot_diff_threshold', 0) if tile_info else 0
+                spot_area = getattr(tile_info, 'bright_spot_area', 0) if tile_info else 0
+                spot_min_area = getattr(tile_info, 'bright_spot_min_area', 0) if tile_info else 0
+                spot_label = "B0F"
 
             if is_bomb:
                 verdict = f"BOMB: {bomb_code} (Filtered as OK)"
@@ -879,7 +888,7 @@ class HeatmapManager:
                 verdict_color = (0, 255, 0)
 
             # 資訊段 + 判定段分色顯示
-            info_text = f"B0F | Diff:{max_diff} Area:{spot_area}px | DiffThr:{diff_thr} MinArea:{spot_min_area} | "
+            info_text = f"{spot_label} | Diff:{max_diff} Area:{spot_area}px | DiffThr:{diff_thr} MinArea:{spot_min_area} | "
             self._draw_split_color_header(header, info_text, verdict, verdict_color, y=25, font_scale=0.6)
             detail_line = f"Tile#{tile_id} | {image_name}"
             dust_detail = getattr(tile_info, 'dust_detail_text', '')

@@ -117,7 +117,10 @@ def _context(raw):
 def tile_decision_context(tile):
     """Snapshot the actual detector settings, never the current global settings."""
     context = dict(_context(getattr(tile, "decision_context", None)))
-    context["detector"] = "bright_spot" if getattr(tile, "is_bright_spot_detection", False) else "patchcore"
+    if getattr(tile, "is_half_spot_detection", False):
+        context["detector"] = "half_spot"
+    else:
+        context["detector"] = "bright_spot" if getattr(tile, "is_bright_spot_detection", False) else "patchcore"
     context["score_threshold"] = _number(getattr(tile, "score_threshold", None))
     bomb_diagnostics = getattr(tile, "bomb_region_diagnostics", None) or {}
     context["aoi_bomb_priority_applied"] = bool(bomb_diagnostics.get("priority_applied"))
@@ -131,6 +134,9 @@ def tile_decision_context(tile):
     if context["detector"] == "bright_spot":
         for name in ("max_diff", "diff_threshold", "area", "min_area"):
             context[name] = _number(getattr(tile, "bright_spot_" + name, None))
+    if context["detector"] == "half_spot":
+        for name in ("max_diff", "diff_threshold", "area", "min_area"):
+            context[name] = _number(getattr(tile, "half_spot_" + name, None))
     return context
 
 
@@ -200,6 +206,18 @@ def decision_evidence(item, is_cv=False):
             label = "混合模式 · " + label
         if item.get("fusion_fallback_reason"):
             notes.append("模式回退：" + str(item["fusion_fallback_reason"]))
+    elif ctx.get("detector") == "half_spot" or item.get("zone") == "half_spot":
+        label, title = "半屏亮點偵測", "黑底白點條件命中" if ng else "半屏亮點檢查"
+        metrics = [
+            _metric("AOI 鄰域中位灰階", ctx.get("gate_median"), ctx.get("black_region_threshold"), op="<", digits=0),
+            _metric("全 tile 最大灰階差", ctx.get("max_diff"), ctx.get("diff_threshold"), op=">", digits=0),
+            _metric("全 tile 最大亮度", ctx.get("max_pixel"), ctx.get("abs_threshold"), op=">", digits=0),
+            _metric("最大連通區面積", ctx.get("max_component_area"), ctx.get("min_area"), unit=" px", digits=0),
+            _metric("面積上限", ctx.get("max_component_area"), ctx.get("max_area"), op="≤", unit=" px", digits=0),
+        ]
+        notes.append("AOI 位於白區（鄰域中位灰階達門檻）時不檢測直接 OK；面積超過上限或長寬比超過 {} 視為長條/區塊判 OK。".format(ctx.get("max_aspect_ratio") or 3.0))
+        if ctx.get("region") == "white":
+            notes.append("本筆 AOI 位於白區，依規則不檢測。")
     elif ctx.get("detector") == "bright_spot" or item.get("zone") == "bright_spot":
         label, title = "亮點偵測", "亮點條件命中" if ng else "亮點檢查"
         metrics = [
