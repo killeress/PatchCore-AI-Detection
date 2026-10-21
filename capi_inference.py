@@ -7210,8 +7210,8 @@ class CAPIInferencer:
     ) -> int:
         """v2 新架構：以 AOI 機檢座標為 anchor 建 512x512 tile。
 
-        若 AOI 靠近 panel polygon 邊，ROI 會往產品內側推到完整落在 polygon
-        內，避免 edge.pt 看到黑色背景邊界；AOI 不一定在 tile 中心。
+        若 AOI 靠近 panel polygon 邊，ROI 以最小必要位移往產品內側修正，
+        保留 AOI 四周 32px；無法兼顧完整內縮時，優先保留缺陷範圍。
 
         差異重點：
           - 邊緣不 bail 到 CV，每筆 AOI 座標都建立 PatchCore tile
@@ -7316,7 +7316,7 @@ class CAPIInferencer:
                     )
 
             # Inference/training aligned inward ROI：先用 AOI-centered origin，
-            # 若跨出 polygon 則往產品內側推；不 zero-pad、不帶黑背景進 edge.pt。
+            # 跨出 polygon 時採最小必要位移，並保留 AOI 周圍的缺陷範圍。
             centered_tx = img_x - half
             centered_ty = img_y - half
             tx = max(0, centered_tx)

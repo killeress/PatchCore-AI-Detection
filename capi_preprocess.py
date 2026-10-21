@@ -1151,24 +1151,30 @@ def _clamp_tile_origin_keep_anchor(
     img_w: int,
     img_h: int,
     tile_size: int,
+    anchor_margin_px: int = 0,
 ) -> Tuple[int, int]:
-    """Clamp tile origin to image bounds while keeping anchor inside when possible."""
+    """Keep the anchor's image-clipped neighbourhood inside the crop."""
     tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
-    ax, ay = int(anchor_xy[0]), int(anchor_xy[1])
-    max_x = max(0, img_w - tile_size)
-    max_y = max(0, img_h - tile_size)
+    lo_x, hi_x, lo_y, hi_y = _aoi_tile_origin_bounds(
+        anchor_xy, img_w, img_h, tile_size, anchor_margin_px,
+    )
+    return max(lo_x, min(tx, hi_x)), max(lo_y, min(ty, hi_y))
 
-    lo_x = max(0, ax - tile_size + 1)
-    hi_x = min(max_x, ax)
-    if lo_x <= hi_x:
-        tx = max(lo_x, min(tx, hi_x))
 
-    lo_y = max(0, ay - tile_size + 1)
-    hi_y = min(max_y, ay)
-    if lo_y <= hi_y:
-        ty = max(lo_y, min(ty, hi_y))
-
-    return tx, ty
+def _aoi_tile_origin_bounds(
+    anchor_xy: Tuple[int, int], img_w: int, img_h: int, tile_size: int, margin: int,
+) -> Tuple[int, int, int, int]:
+    """Origins that retain a square AOI neighbourhood, clipped only at the image."""
+    margin = max(0, min(int(margin), (tile_size - 1) // 2))
+    ax = max(0, min(int(anchor_xy[0]), img_w - 1))
+    ay = max(0, min(int(anchor_xy[1]), img_h - 1))
+    width, height = min(tile_size, img_w), min(tile_size, img_h)
+    return (
+        max(0, min(img_w - 1, ax + margin) - width + 1),
+        min(img_w - width, max(0, ax - margin)),
+        max(0, min(img_h - 1, ay + margin) - height + 1),
+        min(img_h - height, max(0, ay - margin)),
+    )
 
 
 def _tile_polygon_coverage(
@@ -1208,6 +1214,93 @@ def _tile_corner_signed_distances(
     ]
 
 
+def _resolve_aoi_inward_polygon_tile(
+    anchor_xy: Tuple[int, int], polygon: np.ndarray, image_shape: Tuple[int, int],
+    tile_size: int, original: Tuple[int, int], target_coverage: float,
+    shift_axes: str, anchor_margin_px: int,
+) -> Tuple[int, int, float, bool]:
+    """Find the nearest integer origin in a convex panel's feasible region.
+
+    Containing the AOI neighbourhood bounds the search to at most tile_size**2
+    origins. Each polygon edge defines a half-plane for the entire crop, so all
+    candidates can be checked without rasterizing a mask for every origin.
+    """
+    img_h, img_w = image_shape[:2]
+    width, height = min(tile_size, img_w), min(tile_size, img_h)
+    lo_x, hi_x, lo_y, hi_y = _aoi_tile_origin_bounds(
+        anchor_xy, img_w, img_h, tile_size, anchor_margin_px,
+    )
+    xs = np.arange(lo_x, hi_x + 1)[None, :]
+    ys = np.arange(lo_y, hi_y + 1)[:, None]
+    distance_sq = (xs - original[0]) ** 2 + (ys - original[1]) ** 2
+    clearance = np.full(distance_sq.shape, np.inf)
+    poly = np.asarray(polygon, dtype=np.float64)
+    winding = 1.0 if cv2.contourArea(polygon, oriented=True) > 0 else -1.0
+    crossed_axes = set()
+    for start, end in zip(poly, np.roll(poly, -1, axis=0)):
+        edge = end - start
+        normal = winding * np.array([-edge[1], edge[0]]) / np.linalg.norm(edge)
+        # The least favourable of the four inclusive pixel corners.
+        corner_offset = min(0.0, normal[0] * (width - 1)) + min(0.0, normal[1] * (height - 1))
+        if np.dot(normal, np.asarray(original) - start) + corner_offset < -0.5:
+            crossed_axes.add("x" if abs(normal[0]) > abs(normal[1]) else "y")
+        clearance = np.minimum(
+            clearance,
+            normal[0] * (xs - start[0]) + normal[1] * (ys - start[1]) + corner_offset,
+        )
+
+    def score(x, y):
+        coverage = _tile_polygon_coverage((x, y, x + width, y + height), polygon)
+        corners = ((x, y), (x + width - 1, y),
+                   (x + width - 1, y + height - 1), (x, y + height - 1))
+        min_distance = min(cv2.pointPolygonTest(polygon, p, True) for p in corners)
+        return coverage, min_distance
+
+    fits = clearance >= -0.5
+    axes_to_try = [shift_axes] if shift_axes == "xy" else [shift_axes, "xy"]
+    for axes in axes_to_try:
+        candidates = fits.copy()
+        if axes == "x":
+            candidates &= ys == original[1]
+        elif axes == "y":
+            candidates &= xs == original[0]
+        # Rasterization and distances at polygon vertices can reject a candidate
+        # within the half-pixel tolerance. Check the next nearest in that case.
+        while np.any(candidates):
+            index = int(np.argmin(np.where(candidates, distance_sq, np.inf)))
+            row, col = np.unravel_index(index, candidates.shape)
+            x, y = int(xs[0, col]), int(ys[row, 0])
+            coverage, min_distance = score(x, y)
+            if coverage >= target_coverage and min_distance >= -0.5:
+                return x, y, coverage, (x, y) != original
+            candidates[row, col] = False
+            fits[row, col] = False
+
+    # A real edge defect can be closer to the panel edge than the safety margin.
+    # Keep its neighbourhood and minimize the worst boundary protrusion, then
+    # movement. The caller's existing polygon mask handles the remaining outside.
+    # A sloping top/bottom edge must not cause a large sideways move merely to
+    # gain a few pixels of coverage when the protected margin cannot fit inside.
+    # Correct the axes of the crossed panel edges, including a missed corner.
+    fallback_axes = crossed_axes or set(shift_axes)
+    allowed = np.ones(clearance.shape, dtype=bool)
+    if "x" not in fallback_axes:
+        allowed &= xs == np.clip(original[0], lo_x, hi_x)
+    if "y" not in fallback_axes:
+        allowed &= ys == np.clip(original[1], lo_y, hi_y)
+    best_clearance = np.max(np.where(allowed, clearance, -np.inf))
+    candidates = allowed & np.isclose(clearance, best_clearance, rtol=0.0, atol=1e-6)
+    index = int(np.argmin(np.where(candidates, distance_sq, np.inf)))
+    row, col = np.unravel_index(index, candidates.shape)
+    x, y = int(xs[0, col]), int(ys[row, 0])
+    coverage, _ = score(x, y)
+    logger.debug(
+        "[inward-roi] retained AOI neighbourhood anchor=%s margin=%s origin=%s coverage=%.4f",
+        anchor_xy, anchor_margin_px, (x, y), coverage,
+    )
+    return x, y, coverage, (x, y) != original
+
+
 def resolve_inward_polygon_tile(
     anchor_xy: Tuple[int, int],
     polygon: Optional[np.ndarray],
@@ -1217,16 +1310,16 @@ def resolve_inward_polygon_tile(
     target_coverage: float = 0.999,
     keep_anchor_inside: bool = False,
     shift_axes: str = "xy",
+    anchor_margin_px: int = 32,
 ) -> Tuple[int, int, float, bool]:
     """Resolve a tile origin that stays inside the product polygon when possible.
 
     ``anchor_xy`` is the AOI point or the synthetic edge-sampling center. The
-    returned tile is first clamped to the image, then iteratively pushed toward
-    the polygon centroid until its corners are inside the polygon. If the panel
-    geometry cannot fit a full tile, the best-coverage origin found so far is
-    returned instead of padding or masking black background into the sample.
-    When ``keep_anchor_inside`` is True, movement is constrained so the AOI
-    anchor remains inside the tile whenever image bounds make that possible.
+    returned tile is first clamped to the image. With ``keep_anchor_inside``,
+    convex panels use the nearest feasible integer origin while retaining
+    ``anchor_margin_px`` image pixels around the AOI (default 32). If no full
+    tile fits, preserve this neighbourhood and minimize boundary protrusion.
+    Other samples retain the iterative polygon-centroid correction.
 
     ``shift_axes`` can be "xy", "x", or "y". AOI single-edge samples use this
     to avoid correcting the unrelated axis when only one panel edge is close.
@@ -1248,14 +1341,15 @@ def resolve_inward_polygon_tile(
         ty = int(anchor_xy[1]) - half
     else:
         tx, ty = int(initial_origin[0]), int(initial_origin[1])
-    if keep_anchor_inside:
-        tx, ty = _clamp_tile_origin_keep_anchor(tx, ty, anchor_xy, img_w, img_h, tile_size)
-    else:
-        tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
+    tx, ty = _clamp_tile_origin(tx, ty, img_w, img_h, tile_size)
     original = (tx, ty)
+    if keep_anchor_inside:
+        tx, ty = _clamp_tile_origin_keep_anchor(
+            tx, ty, anchor_xy, img_w, img_h, tile_size, anchor_margin_px,
+        )
 
     if polygon is None or len(polygon) < 3:
-        return tx, ty, 1.0, False
+        return tx, ty, 1.0, (tx, ty) != original
 
     poly = np.asarray(polygon, dtype=np.float32)
     centroid = poly.mean(axis=0)
@@ -1270,6 +1364,12 @@ def resolve_inward_polygon_tile(
     best_cov, best_dist = _score(best)
     if best_cov >= target_coverage and best_dist >= -0.5:
         return tx, ty, best_cov, best != original
+
+    if keep_anchor_inside and cv2.isContourConvex(poly):
+        return _resolve_aoi_inward_polygon_tile(
+            anchor_xy, poly, image_shape, tile_size, original,
+            target_coverage, "".join(sorted(allowed_axes)), anchor_margin_px,
+        )
 
     for _ in range(64):
         distances = _tile_corner_signed_distances(tx, ty, tile_size, poly)
@@ -1309,7 +1409,7 @@ def resolve_inward_polygon_tile(
 
         if keep_anchor_inside:
             ntx, nty = _clamp_tile_origin_keep_anchor(
-                tx + dx, ty + dy, anchor_xy, img_w, img_h, tile_size
+                tx + dx, ty + dy, anchor_xy, img_w, img_h, tile_size, anchor_margin_px,
             )
         else:
             ntx, nty = _clamp_tile_origin(tx + dx, ty + dy, img_w, img_h, tile_size)
@@ -1334,6 +1434,7 @@ def resolve_inward_polygon_tile(
             target_coverage=target_coverage,
             keep_anchor_inside=keep_anchor_inside,
             shift_axes="xy",
+            anchor_margin_px=anchor_margin_px,
         )
         fallback_dist = min(_tile_corner_signed_distances(
             fallback_x, fallback_y, tile_size, poly,

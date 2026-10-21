@@ -86,6 +86,124 @@ def test_inward_roi_preserves_single_axis_when_it_fits(transpose, axes):
         assert ty >= 500 and tx == anchor[0] - 256
 
 
+@pytest.mark.parametrize("flip_x,flip_y", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("reverse_winding", [False, True])
+def test_logged_aoi_corner_uses_minimum_shift_and_retains_defect_context(
+    flip_x, flip_y, reverse_winding,
+):
+    # YQ512H230C41 / CM00 (1850, 1184): the old centroid walk returned
+    # (5283, 3015), leaving the anchor at x=511 and cropping its right half.
+    polygon = np.array(
+        [[816.1, 289.7], [5973.3, 297.7], [5967.4, 3527.7], [821.1, 3514.9]],
+        dtype=np.float32,
+    )
+    anchor = [5794, 3485]
+    expected = [5456, 3015]
+    for axis, flip, span in ((0, flip_x, 6576), (1, flip_y, 4384)):
+        if flip:
+            polygon[:, axis] = span - 1 - polygon[:, axis]
+            anchor[axis] = span - 1 - anchor[axis]
+            expected[axis] = span - 512 - expected[axis]
+    if reverse_winding:
+        polygon = polygon[::-1].copy()
+
+    x, y, coverage, shifted = resolve_inward_polygon_tile(
+        tuple(anchor), polygon, (4384, 6576), 512, keep_anchor_inside=True,
+    )
+
+    assert (x, y) == tuple(expected)
+    assert coverage >= 0.999 and shifted
+    assert 32 <= anchor[0] - x <= 511 - 32
+    assert 32 <= anchor[1] - y <= 511 - 32
+
+
+@pytest.mark.parametrize("anchor", [(12, 12), (42, 28), (25, 25)])
+def test_aoi_origin_is_nearest_valid_integer_crop(anchor):
+    polygon = np.array([[8, 8], [47, 11], [43, 39], [11, 37]], dtype=np.float32)
+    size, margin = 16, 2
+    original = (anchor[0] - size // 2, anchor[1] - size // 2)
+    candidates = []
+    # Independent exhaustive oracle, including raster coverage and AOI margin.
+    for y in range(48 - size + 1):
+        for x in range(60 - size + 1):
+            if not (margin <= anchor[0] - x < size - margin
+                    and margin <= anchor[1] - y < size - margin):
+                continue
+            corners = ((x, y), (x + size - 1, y),
+                       (x + size - 1, y + size - 1), (x, y + size - 1))
+            if min(cv2.pointPolygonTest(polygon, p, True) for p in corners) < -0.5:
+                continue
+            mask = np.zeros((size, size), dtype=np.uint8)
+            cv2.fillPoly(mask, [(polygon - [x, y]).astype(np.int32)], 1)
+            if mask.mean() >= 0.999:
+                candidates.append(((x - original[0]) ** 2 + (y - original[1]) ** 2, x, y))
+    assert candidates
+
+    x, y, coverage, _ = resolve_inward_polygon_tile(
+        anchor, polygon, (48, 60), size, keep_anchor_inside=True, anchor_margin_px=margin,
+    )
+    assert (x - original[0]) ** 2 + (y - original[1]) ** 2 == min(c[0] for c in candidates)
+    assert coverage >= 0.999
+
+
+def test_aoi_near_panel_corner_keeps_margin_when_full_inward_crop_is_impossible():
+    polygon = np.array([[500, 500], [1900, 500], [1900, 1500], [500, 1500]], dtype=np.float32)
+    anchor = (1895, 1495)
+    x, y, coverage, shifted = resolve_inward_polygon_tile(
+        anchor, polygon, (2000, 2400), 512, keep_anchor_inside=True,
+    )
+    assert (x, y) == (1416, 1016)
+    assert (x + 511 - anchor[0], y + 511 - anchor[1]) == (32, 32)
+    assert coverage < 0.999 and shifted
+
+
+@pytest.mark.parametrize("image_shape,tile_size,anchor", [((80, 100), 64, (1, 78)), ((20, 30), 64, (29, 19))])
+def test_aoi_margin_clips_at_image_bounds_without_padding(image_shape, tile_size, anchor):
+    height, width = image_shape
+    polygon = np.array([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
+    x, y, coverage, _ = resolve_inward_polygon_tile(
+        anchor, polygon, image_shape, tile_size, keep_anchor_inside=True,
+    )
+    assert 0 <= x <= max(0, width - tile_size)
+    assert 0 <= y <= max(0, height - tile_size)
+    assert x <= max(0, anchor[0] - 31) and x + tile_size > min(width - 1, anchor[0] + 31)
+    assert y <= max(0, anchor[1] - 31) and y + tile_size > min(height - 1, anchor[1] + 31)
+    assert coverage == 1.0
+
+
+def test_v2_logged_aoi_crop_preserves_defect_pixels_and_original_coordinates():
+    cfg = CAPIConfig()
+    cfg.tile_size = 512
+    inferencer = CAPIInferencer.__new__(CAPIInferencer)
+    inferencer.config = cfg
+    inferencer._map_aoi_coords = lambda *_args, **_kwargs: (5794, 3485)
+    image = np.full((4384, 6576), 180, dtype=np.uint8)
+    image[3485 - 32:3485 + 33, 5794 - 32:5794 + 33] = 17
+    polygon = np.array(
+        [[816.1, 289.7], [5973.3, 297.7], [5967.4, 3527.7], [821.1, 3514.9]], dtype=np.float32,
+    )
+    result = ImageResult(
+        image_path=Path("YQ512H230C41W0F00000133258.tif"), image_size=(6576, 4384),
+        otsu_bounds=(818, 296, 5972, 3524), raw_bounds=(818, 296, 5972, 3524),
+        exclusion_regions=[], tiles=[], excluded_tile_count=0, processed_tile_count=0,
+        processing_time=0.0, panel_polygon=polygon,
+    )
+    count = inferencer._create_aoi_centered_tiles_v2(
+        image, result,
+        [AOIReportDefect(defect_code="CM00", product_x=1850, product_y=1184, image_prefix="W0F00000")],
+        (1920, 1200), PreprocessConfig(tile_size=512),
+    )
+    assert count == 1
+    tile = result.tiles[0]
+    assert (tile.x, tile.y) == (5456, 3015)
+    assert (tile.aoi_tile_shift_dx, tile.aoi_tile_shift_dy) == (-82, -214)
+    assert (tile.aoi_product_x, tile.aoi_product_y, tile.aoi_defect_code) == (1850, 1184, "CM00")
+    assert (tile.aoi_image_x, tile.aoi_image_y) == (5794, 3485)
+    assert tile.zone == "edge"
+    assert np.count_nonzero(tile.image == 17) == 65 * 65
+    assert np.count_nonzero(tile.original_image == 17) == 65 * 65
+
+
 def test_v2_aoi_logged_bottom_right_tile_fits_polygon_with_extended_raw_bounds():
     cfg = CAPIConfig()
     cfg.is_new_architecture = True
@@ -112,6 +230,9 @@ def test_v2_aoi_logged_bottom_right_tile_fits_polygon_with_extended_raw_bounds()
         raw_bounds=(840, 898, 5919, 4366),
         panel_polygon=polygon,
     )
+    # This regression isolates ROI correction using the original logged anchor.
+    # Product-coordinate remapping has its own tests and may correct this raw box.
+    inferencer._map_aoi_coords = lambda *_args, **_kwargs: (5868, 3990)
 
     created = inferencer._create_aoi_centered_tiles_v2(
         image=image,
