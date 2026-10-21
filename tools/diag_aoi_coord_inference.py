@@ -27,6 +27,7 @@ from capi_config import CAPIConfig
 from capi_inference import CAPIInferencer, AOIReportDefect, TileInfo, DEFAULT_PRODUCT_RESOLUTION
 from capi_edge_cv import EdgeDefect
 from capi_heatmap import HeatmapManager
+from capi_image_naming import is_half_screen_prefix
 from capi_station_adapter import local_station_adapter
 
 
@@ -262,8 +263,21 @@ def run_aoi_coord_inference(
         # === Phase 2: GPU 推論 (與 server 一致) ===
         img_prefix = inferencer._get_image_prefix(img_path.name)
         is_skip_file = config.should_skip_file(img_path.name, inferencer.station_adapter)
+        is_half = is_half_screen_prefix(img_prefix)
 
-        if is_skip_file:
+        if is_half:
+            # BWFHALF0/WBFHALF0 半屏畫面: 黑底白點偵測（與 server v1 分支一致）
+            print(f"  🌗 {img_path.name} (HALF) → 半屏黑底白點偵測")
+            anomaly_tiles = []
+            for tile in result.tiles:
+                tile.zone = "half_spot"
+                score, anomaly_map = inferencer._detect_half_spots(tile)
+                tile.score_threshold = 0.5
+                if score <= 0:
+                    tile.is_aoi_coord_below_threshold = True
+                anomaly_tiles.append((tile, score, anomaly_map))
+            result.anomaly_tiles = anomaly_tiles
+        elif is_skip_file:
             # B0F 等黑圖: 二值化亮點偵測
             print(f"  💡 {img_path.name} (skip_file) → 二值化偵測")
             anomaly_tiles = []
@@ -292,7 +306,8 @@ def run_aoi_coord_inference(
             print(f"  ✅ 推論完成 ({time.time() - infer_start:.2f}s)")
 
         # === Phase 3: 灰塵交叉驗證 (與 server _dust_check_one 一致) ===
-        if not is_skip_file and result.anomaly_tiles and omit_image is not None and not omit_overexposed:
+        # HALF 畫面無 OMIT 對應圖，不做灰塵過濾（與 server 一致）
+        if not is_skip_file and not is_half and result.anomaly_tiles and omit_image is not None and not omit_overexposed:
             print(f"  🧹 灰塵檢測中...")
             for tile, score, anomaly_map in result.anomaly_tiles:
                 tx, ty, tw, th = tile.x, tile.y, tile.width, tile.height
@@ -397,7 +412,7 @@ def run_aoi_coord_inference(
                 if anomaly_map is not None and anomaly_map.size > 0:
                     try:
                         amap_h, amap_w = anomaly_map.shape[:2]
-                        if tile.is_bright_spot_detection:
+                        if tile.is_bright_spot_detection or tile.is_half_spot_detection:
                             ys, xs = np.where(anomaly_map > 0.5)
                             if len(xs) > 0:
                                 cx = int(np.mean(xs))
@@ -448,8 +463,15 @@ def run_aoi_coord_inference(
 
 
 if __name__ == "__main__":
+    # 用法: python tools/diag_aoi_coord_inference.py [image_dir] [產品寬] [產品高]
+    # image_dir 內放圖片 + 座標 TXT（檔名格式: PREFIX_X數字Y數字.txt）
+    _image_dir = sys.argv[1] if len(sys.argv) > 1 else "./test_images"
+    _resolution = None
+    if len(sys.argv) > 3:
+        _resolution = (int(sys.argv[2]), int(sys.argv[3]))
     run_aoi_coord_inference(
-        image_dir="./test_images",
+        image_dir=_image_dir,
+        product_resolution=_resolution,
         disable_edge=True,
         config_overrides={
             "dust_brightness_threshold": 20,

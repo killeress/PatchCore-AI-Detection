@@ -1891,6 +1891,15 @@ bright_spot_min_area: 5
 bright_spot_median_kernel: 21
 bright_spot_diff_threshold: 10
 
+# === 半黑半白畫面黑底白點偵測（BWFHALF0/WBFHALF0，僅 AOI 座標附近檢測）===
+half_spot_diff_threshold: 10
+half_spot_median_kernel: 21
+half_spot_min_area: 5
+half_spot_max_area: 2000
+half_spot_max_aspect_ratio: 3.0
+half_spot_black_region_threshold: 60
+half_spot_abs_threshold: 200
+
 # === 檔案過濾 ===
 # B0F00000 改走亮點偵測；side_shot 前綴 S* 自動跳過（無模型訓練資料）
 skip_files:

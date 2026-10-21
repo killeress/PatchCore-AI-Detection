@@ -19,10 +19,22 @@ CAPI_LIGHTING_PREFIXES: Tuple[str, ...] = (
     "G0F00000", "R0F00000", "W0F00000", "WGF50500", "U0F00000", "STANDARD",
 )
 
+# 半黑半白畫面（BWFHALF0=上黑下白, WBFHALF0=上白下黑）：
+# 無 PatchCore 模型，僅在 AOI 座標附近做黑底白點偵測（half_spot_* 參數）。
+HALF_SCREEN_PREFIXES: Tuple[str, ...] = (
+    "BWFHALF0",
+    "WBFHALF0",
+)
+
+
+def is_half_screen_prefix(name: str) -> bool:
+    """判斷圖片前綴是否為半黑半白畫面（BWFHALF0/WBFHALF0）。"""
+    return str(name or "") in HALF_SCREEN_PREFIXES
+
 # WHITEFRA is handled by the dedicated white-frame inspector, but its
 # machine defect record is still part of the AOI report format.
 AOI_REPORT_PREFIXES: Tuple[str, ...] = (
-    CANONICAL_IMAGE_PREFIXES + ("WHITEFRA",)
+    CANONICAL_IMAGE_PREFIXES + ("WHITEFRA",) + HALF_SCREEN_PREFIXES
 )
 
 

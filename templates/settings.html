@@ -1980,6 +1980,56 @@
     </div>
 </div>
 
+<!-- HALF Help Modal -->
+<div class="modal-overlay" id="half-help-modal" onclick="if(event.target===this) this.classList.remove('show')">
+    <div class="modal-box" style="max-width: 560px;">
+        <div class="modal-header">
+            <h3>🌗 半屏黑底白點偵測 — 參數說明</h3>
+            <button class="modal-close" onclick="document.getElementById('half-help-modal').classList.remove('show')">&times;</button>
+        </div>
+        <div class="modal-body" style="padding: 20px 24px; font-size: 0.85rem; line-height: 1.7; color: #cbd5e1;">
+            <div style="margin-bottom: 16px; color: #94a3b8;">
+                BWFHALF0(上黑下白) / WBFHALF0(上白下黑) 圖片使用局部對比偵測取代 PatchCore，<br>
+                僅檢測 AOI 機檢座標附近的黑色區域：黑底白點判 NG，長條漏光 / 區塊異常 / 白區內容判 OK。
+            </div>
+
+            <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-bottom: 18px;">
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #818cf8; font-weight: 600; white-space: nowrap; width: 170px;">black_region_threshold</td>
+                    <td style="padding: 8px 10px;">黑區判定門檻（AOI 鄰域中位灰階低於此值才檢測，否則視為白區直接 OK）</td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #818cf8; font-weight: 600;">diff_threshold</td>
+                    <td style="padding: 8px 10px;">局部對比差異閾值（越低越敏感）</td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #818cf8; font-weight: 600;">median_kernel</td>
+                    <td style="padding: 8px 10px;">背景估計觀察範圍（必須為奇數，最小 3）</td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #818cf8; font-weight: 600;">min_area / max_area</td>
+                    <td style="padding: 8px 10px;">白點連通面積範圍（低於下限視為雜訊；高於上限視為區塊異常判 OK）</td>
+                </tr>
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <td style="padding: 8px 10px; color: #818cf8; font-weight: 600;">max_aspect_ratio</td>
+                    <td style="padding: 8px 10px;">白點長寬比上限（超過視為長條漏光判 OK）</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 10px; color: #818cf8; font-weight: 600;">abs_threshold</td>
+                    <td style="padding: 8px 10px;">絕對亮度上限（超過直接判定亮點）</td>
+                </tr>
+            </table>
+
+            <div style="padding: 14px 16px; background: rgba(99, 102, 241, 0.08); border-left: 3px solid #6366f1; border-radius: 0 8px 8px 0;">
+                <div style="color: #818cf8; font-weight: 600; margin-bottom: 8px; font-size: 0.88rem;">💡 調參方向</div>
+                <div style="color: #94a3b8; font-size: 0.82rem;">
+                    漏檢白點 → 調低 diff_threshold 或 min_area；誤檢長條漏光 → 調低 max_aspect_ratio 或 max_area；黑白分界附近誤判 → 調整 black_region_threshold。
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Two-Stage Help Modal -->
 <div class="modal-overlay" id="two-stage-help-modal" onclick="if(event.target===this) this.classList.remove('show')">
     <div class="modal-box" style="max-width: 680px;">
@@ -2222,6 +2272,12 @@
     const B0F_BRIGHT_SPOT_PARAMS = [
         'bright_spot_diff_threshold', 'bright_spot_median_kernel',
         'bright_spot_min_area', 'bright_spot_threshold'
+    ];
+    const HALF_SPOT_PARAMS = [
+        'half_spot_diff_threshold', 'half_spot_median_kernel',
+        'half_spot_min_area', 'half_spot_max_area',
+        'half_spot_max_aspect_ratio', 'half_spot_black_region_threshold',
+        'half_spot_abs_threshold'
     ];
     const IMAGE_ABNORMAL_PARAMS = [
         'image_abnormal_detection_enabled',
@@ -3541,6 +3597,7 @@
             .filter(Boolean);
         const aoiCoordParams = AOI_COORD_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const b0fParams = B0F_BRIGHT_SPOT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
+        const halfSpotParams = HALF_SPOT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const imageAbnormalParams = IMAGE_ABNORMAL_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const reportResultParams = REPORT_RESULT_PARAMS.map(name => allParams.find(p => p.param_name === name)).filter(Boolean);
         const withinSpecParam = allParams.find(p => p.param_name === WITHIN_SPEC_PARAM);
@@ -4055,7 +4112,8 @@
                 </div>
             </div>
             <div id="pane-aoi-coord" class="settings-tab-pane ${currentTab === 'aoi-coord' ? 'active' : ''}">
-                <div class="settings-section" style="border-left: 3px solid #10b981;">
+                <!-- 面板本身為兩欄 grid：AOI 卡佔左欄；B0F/半屏卡在右欄 flex 容器上下疊放 -->
+                <div class="settings-section" style="border-left: 3px solid #10b981; grid-column: 1;">
                     <div class="settings-section-header">
                         <div class="icon">🎯</div>
                         <span>AOI 機檢座標設定</span>
@@ -4066,8 +4124,9 @@
                     </div>
                     ${aoiCoordParams.map(p => paramRow(p)).join('')}
                 </div>
+                <div style="grid-column: 2; display: flex; flex-direction: column; gap: 16px; align-self: start;">
                 ${b0fParams.length > 0 ? `
-                <div class="settings-section" style="border-left: 3px solid #f59e0b; margin-top: 16px;">
+                <div class="settings-section" style="border-left: 3px solid #f59e0b;">
                     <div class="settings-section-header">
                         <div class="icon">💡</div>
                         <span>B0F 亮點偵測設定</span>
@@ -4080,6 +4139,24 @@
                     ${b0fParams.map(p => paramRow(p)).join('')}
                 </div>
                 ` : ''}
+                ${halfSpotParams.length > 0 ? `
+                <div class="settings-section" style="border-left: 3px solid #6366f1;">
+                    <div class="settings-section-header">
+                        <div class="icon">🌗</div>
+                        <span>半屏黑底白點偵測設定 (BWFHALF0/WBFHALF0)</span>
+                        <span onclick="document.getElementById('half-help-modal').classList.add('show')"
+                              style="margin-left: 8px; cursor: pointer; font-size: 0.85rem; color: #64748b; background: rgba(100,116,139,0.15); padding: 2px 8px; border-radius: 4px; transition: all 0.2s;"
+                              onmouseover="this.style.color='#818cf8'; this.style.background='rgba(99,102,241,0.15)'"
+                              onmouseout="this.style.color='#64748b'; this.style.background='rgba(100,116,139,0.15)'"
+                              title="參數說明">&#x2753; 參數說明</span>
+                    </div>
+                    <div style="padding: 12px 16px; color: #94a3b8; font-size: 0.82rem; line-height: 1.6; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                        僅在 AOI 座標附近的黑色區域偵測白點（排除 AOI 過檢）；白區不檢測直接 OK，長條漏光/區塊異常以面積上限與長寬比排除。
+                    </div>
+                    ${halfSpotParams.map(p => paramRow(p)).join('')}
+                </div>
+                ` : ''}
+                </div>
             </div>
             ${renderReportResultPane(reportResultParams)}
             ${renderImageAbnormalPane(imageAbnormalParams)}

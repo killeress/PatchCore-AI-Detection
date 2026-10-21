@@ -342,6 +342,14 @@ class CAPIConfig:
     bright_spot_min_area: int = 5             # 亮點最小連通面積 (px, 小於此視為雜訊)
     bright_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
     bright_spot_diff_threshold: int = 10      # 局部對比差異閾值 (與背景差值超過此值為異常)
+    # 半黑半白畫面黑底白點偵測設定 (BWFHALF0/WBFHALF0，僅 AOI 座標附近)
+    half_spot_diff_threshold: int = 10      # 局部對比差異閾值
+    half_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
+    half_spot_min_area: int = 5             # 白點最小連通面積 (px)
+    half_spot_max_area: int = 2000          # 白點最大連通面積 (px, 超過視為區塊異常判 OK)
+    half_spot_max_aspect_ratio: float = 3.0 # 白點長寬比上限 (超過視為長條漏光判 OK)
+    half_spot_black_region_threshold: int = 60  # 黑區判定：AOI 鄰域中位灰階低於此值才檢測
+    half_spot_abs_threshold: int = 200      # 絕對亮度上限 (超過此值直接判定為亮點)
     within_spec_judgment_rules: Dict[str, Any] = field(default_factory=_default_within_spec_judgment_rules)
 
     # 回報結果設定
@@ -678,6 +686,13 @@ class CAPIConfig:
             bright_spot_min_area=data.get("bright_spot_min_area", 5),
             bright_spot_median_kernel=data.get("bright_spot_median_kernel", 21),
             bright_spot_diff_threshold=data.get("bright_spot_diff_threshold", 10),
+            half_spot_diff_threshold=data.get("half_spot_diff_threshold", 10),
+            half_spot_median_kernel=data.get("half_spot_median_kernel", 21),
+            half_spot_min_area=data.get("half_spot_min_area", 5),
+            half_spot_max_area=data.get("half_spot_max_area", 2000),
+            half_spot_max_aspect_ratio=float(data.get("half_spot_max_aspect_ratio", 3.0)),
+            half_spot_black_region_threshold=data.get("half_spot_black_region_threshold", 60),
+            half_spot_abs_threshold=data.get("half_spot_abs_threshold", 200),
             within_spec_judgment_rules=cls._normalize_within_spec_judgment_rules(
                 data.get("within_spec_judgment_rules", {})
             ),
@@ -1191,6 +1206,20 @@ class CAPIConfig:
             self.bright_spot_median_kernel = int(param_map["bright_spot_median_kernel"])
         if "bright_spot_diff_threshold" in param_map:
             self.bright_spot_diff_threshold = int(param_map["bright_spot_diff_threshold"])
+        if "half_spot_diff_threshold" in param_map:
+            self.half_spot_diff_threshold = int(param_map["half_spot_diff_threshold"])
+        if "half_spot_median_kernel" in param_map:
+            self.half_spot_median_kernel = int(param_map["half_spot_median_kernel"])
+        if "half_spot_min_area" in param_map:
+            self.half_spot_min_area = int(param_map["half_spot_min_area"])
+        if "half_spot_max_area" in param_map:
+            self.half_spot_max_area = int(param_map["half_spot_max_area"])
+        if "half_spot_max_aspect_ratio" in param_map:
+            self.half_spot_max_aspect_ratio = float(param_map["half_spot_max_aspect_ratio"])
+        if "half_spot_black_region_threshold" in param_map:
+            self.half_spot_black_region_threshold = int(param_map["half_spot_black_region_threshold"])
+        if "half_spot_abs_threshold" in param_map:
+            self.half_spot_abs_threshold = int(param_map["half_spot_abs_threshold"])
         if "within_spec_judgment_rules" in param_map and isinstance(param_map["within_spec_judgment_rules"], dict):
             self.within_spec_judgment_rules = self._normalize_within_spec_judgment_rules(
                 param_map["within_spec_judgment_rules"]
