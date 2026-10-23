@@ -23,7 +23,7 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
     import capi_side_white
     from capi_station_adapter import create_station_adapter
 
-    side, _ = write_pair(tmp_path)
+    side, front = write_pair(tmp_path)
     omit = np.zeros((500, 700), np.uint8)
     cv2.circle(omit, (350, 250), 12, 230, -1)
     cv2.imwrite(str(tmp_path / 'SPINIGBI _153501.tif'), omit)
@@ -36,7 +36,7 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
         config=config, station_adapter=create_station_adapter('capi'),
         edge_inspector=SimpleNamespace(config=SimpleNamespace(
             all_exclude_zones_by_product={'J': [{'enabled': True, 'x': 0, 'y': 0, 'w': 10, 'h': 10}]})),
-        process_panel=MagicMock(return_value=([SimpleNamespace(edge_defects=[], preprocess_steps=[])], None, False, '', False, None, {})),
+        process_panel=MagicMock(return_value=([SimpleNamespace(image_path=front, edge_defects=[], preprocess_steps=[])], None, False, '', False, None, {})),
     )
     db = CAPIDatabase(str(tmp_path / 'results.db'))
     record = db.save_inference_record(
@@ -45,6 +45,7 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
         ng_details='[]', request_time='2026-09-29 12:00:00', response_time='2026-09-29 12:00:01',
         processing_seconds=.1, client_response_text='unchanged')
     old_id = db.save_side_white_result(record, {'status': 'CANDIDATES', 'candidates': [{'id': 99}], 'algorithm': 'old'})
+    db.save_side_statistics_review(old_id, 'confirmed', 'previous observation', 'QA', '')
     cls = CAPIWebHandler
     for name, value in {'inferencer': inferencer, '_capi_server_instance': None, 'db': db,
                         '_gpu_lock': None, '_rerun_lock': threading.Lock(),
@@ -78,6 +79,7 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
         assert db.list_side_white_results()['total'] == 0
         return
     row = updated['side_white_result']
+    assert row['review_decision'] == 'unreviewed' and row['review_note'] == ''
     payload = row['payload']
     assert row['id'] != old_id and db.list_side_white_results()['total'] == 1
     if scenario in {'missing', 'error'}:

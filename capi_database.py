@@ -2124,6 +2124,126 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_side_statistics(self, *, start_date, end_date, group="with_csjbl", machine_no="",
+                            model_id="", glass_id="", status="", review="", limit=10, offset=0,
+                            include_rows=True) -> Dict:
+        """Compare all retained inference records, including observations not yet run.
+
+        Summary counts cover both AOI groups under the same filters, independent
+        of pagination. Heavy evidence payloads are loaded only for the current page.
+        """
+        from capi_side_report import REVIEW_DECISIONS, has_csjbl
+        if group not in {"with_csjbl", "without_csjbl"}:
+            raise ValueError("未知的 AOI 分組")
+        if status not in {"", "CANDIDATES", "FILTERED", "NO_CANDIDATES", "NO_IMAGE", "ERROR", "NOT_RUN"}:
+            raise ValueError("未知的側拍狀態")
+        if review and review not in REVIEW_DECISIONS:
+            raise ValueError("未知的驗證結果")
+        start, end = datetime.strptime(start_date, "%Y-%m-%d"), datetime.strptime(end_date, "%Y-%m-%d")
+        if start > end:
+            raise ValueError("開始日期不可晚於結束日期")
+        conditions = ["datetime(r.request_time) >= ?", "datetime(r.request_time) < ?"]
+        params = [start.strftime("%Y-%m-%d %H:%M:%S"), (end + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")]
+        for column, value in (("r.machine_no", machine_no), ("r.model_id", model_id)):
+            if value:
+                conditions.append(column + " = ?")
+                params.append(value)
+        if glass_id:
+            conditions.append("r.glass_id LIKE ? ESCAPE '\\'")
+            params.append("%" + glass_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        if status:
+            conditions.append("COALESCE(s.status, 'NOT_RUN') = ?")
+            params.append(status)
+        if review:
+            conditions.append("COALESCE(s.review_decision, 'unreviewed') = ?")
+            params.append(review)
+        join = " FROM inference_records r LEFT JOIN side_white_results s ON s.record_id = r.id"
+        where = " WHERE " + " AND ".join(conditions)
+        conn = self._get_conn()
+        conn.create_function("side_has_csjbl", 2, has_csjbl, deterministic=True)
+        try:
+            conn.execute("BEGIN")
+            summary = {key: {"total": 0, "candidates": 0, "clear": 0, "unavailable": 0,
+                             **{decision: 0 for decision in REVIEW_DECISIONS}}
+                       for key in ("with_csjbl", "without_csjbl")}
+            counts = conn.execute(
+                "SELECT side_has_csjbl(r.aoi_machine_coords, r.ng_details) AS has_csjbl, "
+                "COALESCE(s.status, 'NOT_RUN') AS status, "
+                "COALESCE(s.review_decision, 'unreviewed') AS decision, COUNT(*) AS count"
+                + join + where + " GROUP BY has_csjbl, COALESCE(s.status, 'NOT_RUN'), "
+                "COALESCE(s.review_decision, 'unreviewed')", params).fetchall()
+            for row in counts:
+                stats = summary["with_csjbl" if row["has_csjbl"] else "without_csjbl"]
+                count = row["count"]
+                stats["total"] += count
+                stats["candidates" if row["status"] == "CANDIDATES" else
+                      "clear" if row["status"] in {"NO_CANDIDATES", "FILTERED"} else "unavailable"] += count
+                stats[row["decision"] if row["decision"] in REVIEW_DECISIONS else "unreviewed"] += count
+            for stats in summary.values():
+                verified = sum(stats[k] for k in ("confirmed", "correct_clear", "false_positive", "missed"))
+                stats["verified"] = verified
+                stats["accuracy"] = round(100 * (stats["confirmed"] + stats["correct_clear"]) / verified, 1) if verified else None
+            if not include_rows:
+                return {"rows": [], "summary": summary, "total": summary[group]["total"]}
+            rows = conn.execute(
+                "SELECT s.*, r.id AS inference_record_id, r.glass_id, r.model_id, r.machine_no, r.request_time, "
+                "r.ai_judgment, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
+                + join + where + " AND side_has_csjbl(r.aoi_machine_coords, r.ng_details) = ?"
+                " ORDER BY r.id DESC LIMIT ? OFFSET ?",
+                params + [int(group == "with_csjbl"), max(1, min(int(limit), 20)), max(0, int(offset))],
+            ).fetchall()
+            decoded = []
+            for row in rows:
+                item = dict(row)
+                item["record_id"] = item.pop("inference_record_id")
+                item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
+                item["status"] = item["status"] or "NOT_RUN"
+                item["review_decision"] = item["review_decision"] or "unreviewed"
+                decoded.append(item)
+            return {"rows": decoded, "summary": summary, "total": summary[group]["total"]}
+        finally:
+            conn.close()
+
+    def get_side_statistics_record(self, result_id: int) -> Optional[Dict]:
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT s.*, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y "
+                "FROM side_white_results s JOIN inference_records r ON r.id = s.record_id WHERE s.id = ?",
+                (result_id,)).fetchone()
+            return self._decode_side_white_row(row) if row else None
+        finally:
+            conn.close()
+
+    def save_side_statistics_review(self, result_id, decision, note, reviewer, expected_reviewed_at):
+        """An observation annotation only. A rerun creates a new result ID."""
+        from capi_side_report import REVIEW_DECISIONS
+        if not isinstance(decision, str) or decision not in REVIEW_DECISIONS:
+            raise ValueError("請選擇有效的驗證結果")
+        if not isinstance(note, str) or len(note) > 2000:
+            raise ValueError("備註上限為 2000 字")
+        if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer) > 80:
+            raise ValueError("請填寫驗證人（最多 80 字）")
+        if not isinstance(expected_reviewed_at, str):
+            raise ValueError("缺少原始驗證版本，請重新查詢")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                timestamp = datetime.now().isoformat(sep=" ", timespec="microseconds")
+                cursor = conn.execute(
+                    "UPDATE side_white_results SET review_decision=?, review_note=?, reviewed_by=?, reviewed_at=? "
+                    "WHERE id=? AND reviewed_at=?",
+                    (decision, note.strip(), reviewer.strip(), timestamp, result_id, expected_reviewed_at))
+                if not cursor.rowcount:
+                    if conn.execute("SELECT 1 FROM side_white_results WHERE id=?", (result_id,)).fetchone():
+                        raise RuntimeError("此筆已由其他人更新，請重新查詢後再儲存")
+                    raise LookupError("側拍結果不存在或已重新推論，請重新查詢")
+                conn.commit()
+                return {"review_decision": decision, "review_note": note.strip(),
+                        "reviewed_by": reviewer.strip(), "reviewed_at": timestamp}
+            finally:
+                conn.close()
+
     def get_record_detail(self, record_id: int) -> Optional[Dict]:
         """取得完整推論記錄 (含圖片和 tile 結果)"""
         conn = self._get_conn()

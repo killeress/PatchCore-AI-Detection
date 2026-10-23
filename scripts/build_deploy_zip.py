@@ -77,6 +77,7 @@ CODE_FILES = [
     "capi_web.py",
     "capi_white_frame.py",
     "capi_side_white.py",
+    "capi_side_report.py",
     "configs/mes_defect_codes.json",
     "configs/aapi_mes_defect_codes.json",
     "requirements.txt",
@@ -92,6 +93,9 @@ CODE_FILES = [
     "templates/_side_white_result.html",
     "templates/_side_white_settings.js",
     "templates/_side_white_styles.html",
+    "templates/_side_statistics.html",
+    "templates/_side_statistics_row.html",
+    "static/js/side_statistics.js",
     "templates/white_frame.html",
     "templates/record_detail.html",
     "templates/record_detail_v3.html",
@@ -207,6 +211,7 @@ CODEONLY_REQUIRED_STATIC_FILES = {
     "static/js/inference-log.js",
     "static/css/edge-ng-evidence.css",
     "static/js/edge-ng-evidence.js",
+    "static/js/side_statistics.js",
 }
 
 SERVER_CONFIG_PATCH = """# === 新機種 PatchCore 訓練 wizard 需要在 server_config.yaml 加入以下欄位 ===

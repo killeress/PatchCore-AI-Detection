@@ -3981,6 +3981,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._handle_within_spec_suggestion_log_api(query)
             elif path == "/api/ric/inference-stats":
                 self._handle_inference_stats_api(query)
+            elif path == "/api/ric/side-stats":
+                self._handle_side_statistics_api(query)
+            elif path == "/api/ric/side-stats/image":
+                self._handle_side_statistics_image(query)
             elif path == "/api/ric/mes-comparison":
                 self._handle_mes_comparison_api(query)
             elif path == "/api/ric/mes-report-detail":
@@ -4280,6 +4284,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     self._handle_api_settings_update()
             elif path == "/api/settings/side-white/review":
                 self._handle_api_side_white_review()
+            elif path == "/api/ric/side-stats/review":
+                self._handle_side_statistics_review()
             elif path == "/api/settings/reload":
                 if self._require_settings_user(api=True):
                     self._handle_api_settings_reload()
@@ -12406,6 +12412,69 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 interpolation=cv2.INTER_AREA,
             )
         self._send_image_array_png(image)
+
+    def _handle_side_statistics_api(self, query):
+        from capi_side_report import REVIEW_DECISIONS, compare_side_record
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            filters = {key: query.get(key, [default])[0] for key, default in (
+                ("start_date", today), ("end_date", today), ("group", "with_csjbl"),
+                ("machine_no", ""), ("model_id", ""), ("glass_id", ""), ("status", ""), ("review", ""))}
+            limit = max(1, min(int(query.get("limit", [10])[0]), 20))
+            offset = max(0, int(query.get("offset", [0])[0]))
+            tolerance = float(query.get("tolerance", [50])[0])
+            # Validate even an empty result page.
+            compare_side_record({}, tolerance)
+            data = self.db.get_side_statistics(**filters, limit=limit, offset=offset,
+                                               include_rows=query.get("summary_only", [""])[0] != "1")
+            self.init_jinja()
+            template = self.jinja_env.get_template("_side_statistics_row.html")
+            rows_html = []
+            for row in data.pop("rows"):
+                comparison = compare_side_record(row, tolerance)
+                rows_html.append(template.render(row=row, comparison=comparison, review_decisions=REVIEW_DECISIONS))
+            self._send_json({**data, "rows_html": "".join(rows_html), "limit": limit,
+                             "offset": offset, "group": filters["group"]})
+        except (ValueError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
+    def _handle_side_statistics_review(self):
+        data = self._read_json_body()
+        if data is None:
+            return
+        if not isinstance(data, dict):
+            self._send_json({"error": "驗證資料格式錯誤"}, status=400)
+            return
+        try:
+            result_id = data.get("id")
+            if isinstance(result_id, bool) or not isinstance(result_id, int) or result_id < 1:
+                raise ValueError("側拍結果 ID 格式錯誤")
+            user = self._current_settings_user() or {}
+            review = self.db.save_side_statistics_review(
+                result_id, data.get("decision"), data.get("note", ""),
+                user.get("username") or data.get("reviewer"), data.get("expected_reviewed_at"))
+            self._send_json({"success": True, **review})
+        except (ValueError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except LookupError as exc:
+            self._send_json({"error": str(exc)}, status=404)
+        except RuntimeError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+
+    def _handle_side_statistics_image(self, query):
+        from capi_side_report import compare_side_record, render_comparison_image
+        try:
+            row = self.db.get_side_statistics_record(int(query.get("id", [0])[0]))
+            if not row:
+                self._send_404()
+                return
+            comparison = compare_side_record(row, float(query.get("tolerance", [50])[0]))
+            point_id = int(query["point"][0]) if query.get("point") else None
+            image = render_comparison_image(row, comparison, self.heatmap_base_dir,
+                                            query.get("kind", ["side"])[0], point_id)
+            self._send_image_array_png(image)
+        except (ValueError, TypeError, OSError):
+            self._send_404()
 
     def _handle_api_side_white(self, query):
         try:

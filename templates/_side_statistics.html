@@ -1,0 +1,42 @@
+{% include '_side_white_styles.html' %}
+<style>
+#side-statistics .ss-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
+#side-statistics .ss-summary button{text-align:left;padding:20px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);cursor:pointer;font:inherit}
+#side-statistics .ss-summary button[aria-pressed=true]{border-color:#38bdf8;box-shadow:inset 0 0 0 1px #38bdf8}
+#side-statistics .ss-summary strong{font-size:17px;display:block;margin-bottom:10px}
+#side-statistics .ss-metrics{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;line-height:1.8}
+#side-statistics .ss-metrics b{color:#38bdf8;font-size:18px}
+#side-statistics .ss-row{margin-top:20px}
+#side-statistics .ss-row h3{margin:0;font-size:17px}
+#side-statistics .ss-review{padding-top:16px;border-top:1px solid var(--border)}
+#side-statistics .ss-review textarea{min-height:72px;flex-basis:100%}
+#side-statistics .ss-review input{width:140px}
+#side-statistics .ss-review-state{flex-basis:100%;margin:0}
+#side-statistics .sw-table{min-width:700px}
+#side-statistics .sw-table td:last-child{white-space:normal;min-width:160px}
+#side-statistics .ss-saved{color:#4ade80}
+</style>
+<section id="side-statistics">
+    <div class="sw-card">
+        <div class="sw-head"><h3>側拍統計</h3><span class="sw-badge">正確性驗證 · 觀察模式</span></div>
+        <p class="sw-note">依 AOI 是否提供 CSJBL 分組，比對目前側拍白畫面 SW0F00000 的候選。CSJBL 是正拍座標，先映射至側拍再尋找附近候選；位置以同次拍攝面板邊界估算，需人工驗證。</p>
+        <form id="ss-filters" class="sw-controls">
+            <label>開始日期 <input type="date" name="start_date" required></label>
+            <label>結束日期 <input type="date" name="end_date" required></label>
+            <label>機台 <input name="machine_no" size="12" placeholder="全部／完整機台名稱"></label>
+            <label>機種 <input name="model_id" size="14" placeholder="全部／完整機種名稱"></label>
+            <label>玻璃 ID <input name="glass_id" size="16" placeholder="可輸入部分 ID"></label>
+            <label>側拍狀態 <select name="status"><option value="">全部</option><option value="CANDIDATES">保留可疑候選</option><option value="NO_CANDIDATES">未發現候選</option><option value="FILTERED">候選已排除／炸彈</option><option value="NOT_RUN">未執行／待處理</option><option value="NO_IMAGE">無側拍圖</option><option value="ERROR">檢測失敗</option></select></label>
+            <label>驗證結果 <select name="review"><option value="">全部</option><option value="unreviewed">待驗證</option><option value="confirmed">檢出正確</option><option value="correct_clear">無缺陷確認</option><option value="false_positive">系統過檢</option><option value="missed">系統漏檢</option><option value="mapping_error">座標映射不正確</option><option value="uncertain">無法確認</option></select></label>
+            <label>比對容許誤差 <input name="tolerance" type="number" min="0" max="500" step="1" value="50" required style="width:80px">產品 px</label>
+            <button class="sw-btn" type="submit">查詢／重新整理</button>
+        </form>
+        <p class="sw-note">日期以 00:00～24:00 計算，統計仍保留的推論明細，每筆計一次。容許誤差僅用於此報表的距離比對，不更動檢測參數。無 CSJBL／無候選均不代表無缺陷；未執行、無圖與檢測失敗另列。</p>
+        <div id="ss-summary" class="ss-summary"></div>
+        <p class="sw-note">人工確認正確率＝（檢出正確＋無缺陷確認）÷（檢出正確＋無缺陷確認＋系統過檢＋系統漏檢）；待驗證、無法確認及映射不正確不列入分母。各組分開計算，僅代表已驗證樣本。</p>
+        <p id="ss-message" class="sw-note" role="status" aria-live="polite"></p>
+    </div>
+    <div id="ss-rows"></div>
+    <div class="sw-controls"><button id="ss-prev" type="button" class="sw-btn" disabled>上一頁</button><span id="ss-page"></span><button id="ss-next" type="button" class="sw-btn" disabled>下一頁</button></div>
+</section>
+<script src="/static/js/side_statistics.js"></script>

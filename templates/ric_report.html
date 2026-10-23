@@ -1575,6 +1575,7 @@
     <div class="top-tab active" data-top-tab="inference" onclick="switchTopTab('inference')">🤖 AI 推論紀錄</div>
     <div class="top-tab" data-top-tab="ric" onclick="switchTopTab('ric')">📊 RIC Report</div>
     <div class="top-tab" data-top-tab="mes" onclick="switchTopTab('mes')">🔗 Report數據比對</div>
+    <div class="top-tab" data-top-tab="side-statistics" onclick="switchTopTab('side-statistics')">📷 側拍統計</div>
     <div class="top-tab" data-top-tab="scratch" onclick="switchTopTab('scratch')">🩹 Scratch 審查</div>
     <a class="top-tab" href="/ric/within-spec-logs">📏 規格內明細</a>
 </div>
@@ -2158,7 +2159,12 @@
     </div>
 </div>
 
-<!-- Tab 3: Scratch 審查 -->
+<!-- 側拍統計 -->
+<div class="top-tab-content" id="tab-side-statistics">
+    {% include '_side_statistics.html' %}
+</div>
+
+<!-- Scratch 審查 -->
 <div class="top-tab-content" id="tab-scratch">
     {% include '_scratch_review_content.html' %}
 </div>
@@ -4043,6 +4049,9 @@
         if (tabName === 'scratch' && typeof srInit === 'function') {
             srInit();
         }
+        if (tabName === 'side-statistics') {
+            sideStatistics.init();
+        }
     }
 
     // ══════════════════════════════════════════
@@ -5803,6 +5812,8 @@
     if (initialParams.get('open_ng_validation') === '1') {
         switchTopTab('mes');
         mesReportTab.openNgDatabase();
+    } else if (initialParams.get('tab') === 'side-statistics') {
+        switchTopTab('side-statistics');
     } else {
         inferenceTab.quickFilter('today');
     }
