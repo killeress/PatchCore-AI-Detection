@@ -153,6 +153,14 @@ def test_previews_apply_saved_crop_and_resize_and_reject_external_paths(tmp_path
     crop = render_comparison_image(row, comparison, root, point_id=1)
     assert 90 <= crop.shape[0] < 300 and 90 <= crop.shape[1] < 500
     assert np.all(crop == 90)  # local evidence is not covered by the AOI marker
+    # When an unannotated preview exists, point crops use it instead of the marked preview.
+    clean_path = root / "side_clean.jpg"
+    assert cv2.imwrite(str(clean_path), np.full((300, 500), 40, np.uint8))
+    row["payload"]["artifacts"]["side_clean"] = str(clean_path)
+    row["payload"]["preview_bounds"]["side_clean"] = row["payload"]["preview_bounds"]["side"]
+    assert np.all(render_comparison_image(row, comparison, root, point_id=1) == 40)
+    assert np.array_equal(render_comparison_image(row, comparison, root)[xy[1], xy[0]], [255, 255, 0])
+    del row["payload"]["artifacts"]["side_clean"]
     with pytest.raises(FileNotFoundError):
         render_comparison_image(row, comparison, root / "different")
     with pytest.raises(FileNotFoundError):
@@ -191,6 +199,15 @@ def test_groups_and_summary_are_independent_of_pagination_and_include_not_run(db
     assert query(db, glass_id="' OR 1=1 --")["total"] == 0
     assert query(db, status="NOT_RUN")["total"] == 1
     assert query(db, review="missed")["total"] == 1
+    # Merged summary categories filter with comma-separated values.
+    assert query(db, status="NOT_RUN,NO_IMAGE,ERROR")["total"] == 1
+    assert query(db, status="NOT_RUN,NO_IMAGE,ERROR", group="without_csjbl")["total"] == 2
+    assert query(db, review="false_positive,missed")["total"] == 1
+    assert query(db, review="confirmed,correct_clear")["total"] == 0
+    with pytest.raises(ValueError):
+        query(db, status="CANDIDATES,BOGUS")
+    with pytest.raises(ValueError):
+        query(db, review="missed,bogus")
     assert query(db, model_id="OTHER")["total"] == 0
     assert query(db, include_rows=False)["rows"] == []
 
@@ -216,6 +233,46 @@ def test_review_persists_and_cannot_change_formal_verdict_or_overwrite_newer_rev
     with pytest.raises(LookupError):
         db.save_side_statistics_review(result_id, "confirmed", "old", "QA", saved["reviewed_at"])
     assert db.get_side_white_result(new_id)["review_decision"] == "unreviewed"
+
+
+def test_detail_filters_keep_overview_scope_and_refresh_after_review(db):
+    coords = json.dumps({"W0F00000": [coordinate()]})
+    ids = []
+    for status, decision in (("CANDIDATES", "confirmed"), ("NO_CANDIDATES", "correct_clear"),
+                             ("CANDIDATES", "false_positive"), ("FILTERED", "unreviewed")):
+        _, result_id = record(db, coords=coords, status=status, glass="SCOPE")
+        ids.append(result_id)
+        if decision != "unreviewed":
+            db.save_side_statistics_review(result_id, decision, "", "QA", "")
+    record(db, glass="SCOPE")  # Other AOI group, not yet inspected.
+    record(db, coords=coords, status="ERROR", machine="OTHER", glass="SCOPE")
+    record(db, coords=coords, status="ERROR", when="2026-10-23 00:00:00", glass="SCOPE")
+    record(db, coords=coords, status="ERROR", glass="OTHER")
+    scope = dict(machine_no="CAPI1", model_id="MODEL", glass_id="SCOPE")
+    baseline = query(db, **scope)["summary"]
+    assert baseline["with_csjbl"]["accuracy"] == 66.7
+    assert baseline["with_csjbl"]["total"] == 4
+    assert baseline["without_csjbl"]["total"] == 1
+    for filters, expected in (
+        ({"review": "confirmed,correct_clear"}, 2),
+        ({"review": "false_positive,missed"}, 1),
+        ({"status": "CANDIDATES", "review": "confirmed,correct_clear"}, 1),
+        ({"review": "mapping_error,uncertain"}, 0),
+        ({"group": "without_csjbl", "status": "NOT_RUN,NO_IMAGE,ERROR"}, 1),
+    ):
+        for include_rows in (True, False):
+            filtered = query(db, **scope, **filters, limit=1, offset=1, include_rows=include_rows)
+            assert filtered["summary"] == baseline
+            assert filtered["total"] == expected
+            assert len(filtered["rows"]) == (min(1, max(0, expected - 1)) if include_rows else 0)
+    matching = query(db, **scope, status="CANDIDATES", review="confirmed,correct_clear")
+    assert [row["id"] for row in matching["rows"]] == [ids[0]]
+    db.save_side_statistics_review(ids[-1], "correct_clear", "", "QA", "")
+    refreshed = query(db, **scope, review="unreviewed", include_rows=False)
+    assert refreshed["total"] == 0
+    assert refreshed["summary"]["with_csjbl"]["accuracy"] == 75.0
+    assert refreshed["summary"]["with_csjbl"]["total"] == 4
+    assert query(db, **dict(scope, model_id="OTHER"))["summary"]["with_csjbl"]["total"] == 0
 
 
 @pytest.mark.parametrize("field,value", [("decision", "bogus"), ("note", "x" * 2001), ("note", []), ("reviewer", " "), ("expected_reviewed_at", None)])
@@ -250,6 +307,33 @@ def test_side_report_dependencies_are_in_codeonly_release_inputs():
                  "templates/_side_statistics_row.html", "static/js/side_statistics.js"):
         assert path in CODE_FILES
         assert not _is_codeonly_excluded_file(path)
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_original_crop_keeps_file_pixels_depth_and_orientation(tmp_path, rotated):
+    from capi_side_report import crop_original_image
+    # 16-bit, 3-channel position code (row, col, constant): any rescale, rotation
+    # or colour conversion changes the values, and crop[0, 0] reveals its origin.
+    yy, xx = np.mgrid[0:800, 0:1200]
+    raw = np.dstack([yy, xx, np.full_like(yy, 40000)]).astype(np.uint16)
+    assert cv2.imwrite(str(tmp_path / "SW0F00000.tif"), raw)
+    row = mapped_row(rotated)
+    row["payload"]["side_image"] = "SW0F00000.tif"
+    comparison = compare_side_record(row)
+    crop = crop_original_image(row, comparison, tmp_path, "side", 1)
+    assert crop.dtype == np.uint16 and crop.shape[2] == 3 and 0 < crop.size < raw.size
+    xy = np.array(comparison["points"][0]["side_xy"])
+    if rotated:
+        xy = np.array([1200, 800]) - 1 - xy
+    # The crop is an exact, unrotated slice of the file containing the mapped point.
+    top, left = int(crop[0, 0, 0]), int(crop[0, 0, 1])
+    assert np.array_equal(crop, raw[top:top + crop.shape[0], left:left + crop.shape[1]])
+    assert left <= xy[0] < left + crop.shape[1] and top <= xy[1] < top + crop.shape[0]
+    with pytest.raises(FileNotFoundError):
+        crop_original_image(row, comparison, tmp_path / "missing", "side", 1)
+    row["payload"]["side_image"] = "../SW0F00000.tif"
+    with pytest.raises(FileNotFoundError):
+        crop_original_image(row, comparison, tmp_path, "side", 1)
 
 
 def test_http_report_images_and_review_roundtrip(db, tmp_path):
@@ -289,10 +373,24 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
             return json.load(response)
 
     try:
+        assert 'id="ss-summary"' in get("/ric?tab=side-statistics").decode("utf-8")
         query_url = "/api/ric/side-stats?start_date=2026-10-22&end_date=2026-10-22"
         data = json.loads(get(query_url))
         assert data["total"] == 1 and "附近未找到候選" in data["rows_html"]
         assert get(f"/api/ric/side-stats/image?id={result_id}&point=1").startswith(b"\x89PNG")
+        # With the AOI original still on disk, the point crop is cut from it untouched.
+        original = np.random.default_rng(0).integers(0, 256, (800, 1200), dtype=np.uint8)
+        assert cv2.imwrite(str(tmp_path / "SW0F00000.png"), original)
+        with db._get_conn() as conn:
+            conn.execute("UPDATE inference_records SET image_dir=?", (str(tmp_path),))
+            row_payload = dict(payload, side_image="SW0F00000.png")
+            conn.execute("UPDATE side_white_results SET payload=? WHERE id=?", (json.dumps(row_payload), result_id))
+        with opener.open(base + f"/api/ric/side-stats/image?id={result_id}&point=1", timeout=10) as response:
+            assert response.headers["X-Side-Image-Source"] == "original"
+            served = cv2.imdecode(np.frombuffer(response.read(), np.uint8), cv2.IMREAD_UNCHANGED)
+        assert served.ndim == 2 and served.size < original.size
+        top_left = np.argwhere(cv2.matchTemplate(original, served, cv2.TM_SQDIFF) == 0)
+        assert len(top_left) == 1
         with pytest.raises(HTTPError) as error:
             get(query_url + "&tolerance=nan")
         assert error.value.code == 400
@@ -303,6 +401,8 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
         assert saved["success"]
         data = json.loads(get(query_url + "&summary_only=1"))
         assert data["rows_html"] == "" and data["summary"]["with_csjbl"]["missed"] == 1
+        filtered = json.loads(get(query_url + "&review=confirmed,correct_clear&summary_only=1"))
+        assert filtered["total"] == 0 and filtered["summary"] == data["summary"]
         assert "AOI confirmed" in json.loads(get(query_url))["rows_html"]
         with pytest.raises(HTTPError) as error:
             post({"id": result_id, "decision": "confirmed", "reviewer": "QA", "expected_reviewed_at": ""})

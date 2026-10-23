@@ -1,13 +1,64 @@
 {% include '_side_white_styles.html' %}
 <style>
-#side-statistics .ss-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
-#side-statistics .ss-summary button{text-align:left;padding:20px;border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);cursor:pointer;font:inherit}
-#side-statistics .ss-summary button[aria-pressed=true]{border-color:#38bdf8;box-shadow:inset 0 0 0 1px #38bdf8}
-#side-statistics .ss-summary strong{font-size:17px;display:block;margin-bottom:10px}
-#side-statistics .ss-metrics{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;line-height:1.8}
-#side-statistics .ss-metrics b{color:#38bdf8;font-size:18px}
-#side-statistics .ss-row{margin-top:20px}
-#side-statistics .ss-row h3{margin:0;font-size:17px}
+#side-statistics .ss-title{display:flex;align-items:center;gap:10px}
+#side-statistics .ss-help{position:relative}
+#side-statistics .ss-help>summary{list-style:none;margin:0;font-size:12px;padding:3px 9px;border:1px solid var(--border);border-radius:20px}
+#side-statistics .ss-help>summary::-webkit-details-marker{display:none}
+#side-statistics .ss-help-body{position:absolute;z-index:30;top:30px;left:0;width:min(600px,85vw);padding:14px 18px;border:1px solid var(--border);border-radius:10px;background:var(--surface,#172033);box-shadow:0 10px 30px rgba(0,0,0,.45)}
+#side-statistics .ss-help-body ul{margin:0;padding-left:18px;font-size:13px;line-height:1.8;color:var(--text-muted,#94a3b8)}
+#side-statistics .ss-help-body b{color:var(--text,#e2e8f0);font-weight:500}
+#side-statistics .ss-more-btn[aria-expanded=true]{border-color:#38bdf8}
+#side-statistics .ss-advanced{padding:12px 14px;margin-top:0;border:1px dashed var(--border);border-radius:10px}
+#side-statistics .ss-advanced[hidden]{display:none}
+#side-statistics .ss-clear[hidden]{display:none}
+#side-statistics .ss-overview{display:flex;gap:28px;flex-wrap:wrap;align-items:baseline;margin:18px 0 4px;padding:12px 18px;border-radius:10px;background:rgba(56,189,248,.06)}
+#side-statistics .ss-overview span{font-size:13px;color:var(--text-muted,#94a3b8)}
+#side-statistics .ss-overview b{font-size:22px;margin-left:6px}
+#side-statistics .ss-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px;margin:14px 0}
+#side-statistics .ss-card{padding:18px 20px;border:1px solid var(--border);border-radius:12px;background:var(--surface);cursor:pointer;outline:none}
+#side-statistics .ss-card:focus-visible{box-shadow:0 0 0 2px #38bdf8}
+#side-statistics .ss-card[aria-pressed=true]{border-color:#38bdf8;box-shadow:inset 0 0 0 1px #38bdf8}
+#side-statistics .ss-card[aria-disabled=true]{opacity:.6;cursor:progress}
+#side-statistics .ss-card-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
+#side-statistics .ss-card-head strong{font-size:16px}
+#side-statistics .ss-card-head span{font-size:13px;color:var(--text-muted,#94a3b8)}
+#side-statistics .ss-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+#side-statistics .ss-kpi{display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:6px 8px;border:1px solid transparent;border-radius:8px;background:none;color:inherit;font:inherit;text-align:left}
+#side-statistics button.ss-kpi{cursor:pointer}
+#side-statistics button.ss-kpi:hover,#side-statistics .ss-chip:hover{background:rgba(148,163,184,.1)}
+#side-statistics .ss-kpi small{font-size:12px;color:var(--text-muted,#94a3b8)}
+#side-statistics .ss-kpi b{font-size:26px;line-height:1.2}
+#side-statistics .ss-bar{display:flex;height:8px;margin:12px 0 4px;border-radius:4px;overflow:hidden;background:rgba(245,158,11,.25)}
+#side-statistics .ss-bar i{display:block;height:100%}
+#side-statistics .ss-bar-caption{font-size:12px;color:var(--text-muted,#94a3b8)}
+#side-statistics .ss-lines{margin-top:10px;display:flex;flex-direction:column;gap:6px;font-size:13px}
+#side-statistics .ss-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+#side-statistics .ss-line>em{font-style:normal;color:var(--text-muted,#94a3b8);min-width:36px}
+#side-statistics .ss-chip{padding:2px 9px;border:1px solid var(--border);border-radius:20px;background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+#side-statistics .ss-chip b{margin-left:4px}
+#side-statistics .ss-chip.is-zero{opacity:.45}
+#side-statistics .ss-kpi.is-active,#side-statistics .ss-chip.is-active{border-color:#38bdf8;background:rgba(56,189,248,.12)}
+#side-statistics .c-pending{color:#fbbf24}#side-statistics .c-ok{color:#4ade80}#side-statistics .c-bad{color:#f87171}#side-statistics .c-muted{color:#94a3b8}#side-statistics .c-info{color:#38bdf8}
+#side-statistics .bg-ok{background:#22c55e}#side-statistics .bg-bad{background:#ef4444}#side-statistics .bg-muted{background:#64748b}
+#side-statistics .ss-pager{justify-content:flex-end}
+#side-statistics .ss-detail-toolbar{justify-content:space-between;margin:16px 0 8px}
+#side-statistics .ss-detail-toolbar p{margin:0}
+#side-statistics .ss-row{margin:10px 0;padding:0}
+#side-statistics .ss-record>summary{display:flex;align-items:center;gap:18px;list-style:none;margin:0;padding:16px 20px;color:var(--text);border-radius:14px}
+#side-statistics .ss-record>summary::-webkit-details-marker{display:none}
+#side-statistics .ss-record>summary::before{content:'▸';color:#38bdf8}
+#side-statistics .ss-record[open]>summary::before{transform:rotate(90deg)}
+#side-statistics .ss-record>summary:focus-visible{outline:2px solid #38bdf8;outline-offset:2px}
+#side-statistics .ss-record-title{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px;overflow-wrap:anywhere}
+#side-statistics .ss-record-title strong{font-size:16px}
+#side-statistics .ss-record-title small{color:var(--text-muted);font-size:12px}
+#side-statistics .ss-record-status{display:flex;flex-direction:column;gap:4px;min-width:100px}
+#side-statistics .ss-record-status small{color:var(--text-muted);font-size:12px}
+#side-statistics .ss-record-action{color:#38bdf8;white-space:nowrap}
+#side-statistics .ss-record[open] .ss-expand,#side-statistics .ss-record:not([open]) .ss-collapse{display:none}
+#side-statistics .ss-record-body{border-top:1px solid var(--border);padding:4px 20px 18px}
+#side-statistics [data-review-dirty]{color:#fbbf24;font-size:12px}
+@media(max-width:700px){ #side-statistics .ss-record>summary{flex-wrap:wrap;gap:12px;padding:14px}#side-statistics .ss-record-title{flex-basis:calc(100% - 35px)}#side-statistics .ss-record-status{flex:1}#side-statistics .ss-record-body{padding:4px 14px 14px}}
 #side-statistics .ss-review{padding-top:16px;border-top:1px solid var(--border)}
 #side-statistics .ss-review textarea{min-height:72px;flex-basis:100%}
 #side-statistics .ss-review input{width:140px}
@@ -18,25 +69,74 @@
 </style>
 <section id="side-statistics">
     <div class="sw-card">
-        <div class="sw-head"><h3>側拍統計</h3><span class="sw-badge">正確性驗證 · 觀察模式</span></div>
-        <p class="sw-note">依 AOI 是否提供 CSJBL 分組，比對目前側拍白畫面 SW0F00000 的候選。CSJBL 是正拍座標，先映射至側拍再尋找附近候選；位置以同次拍攝面板邊界估算，需人工驗證。</p>
-        <form id="ss-filters" class="sw-controls">
-            <label>開始日期 <input type="date" name="start_date" required></label>
-            <label>結束日期 <input type="date" name="end_date" required></label>
-            <label>機台 <input name="machine_no" size="12" placeholder="全部／完整機台名稱"></label>
-            <label>機種 <input name="model_id" size="14" placeholder="全部／完整機種名稱"></label>
-            <label>玻璃 ID <input name="glass_id" size="16" placeholder="可輸入部分 ID"></label>
-            <label>側拍狀態 <select name="status"><option value="">全部</option><option value="CANDIDATES">保留可疑候選</option><option value="NO_CANDIDATES">未發現候選</option><option value="FILTERED">候選已排除／炸彈</option><option value="NOT_RUN">未執行／待處理</option><option value="NO_IMAGE">無側拍圖</option><option value="ERROR">檢測失敗</option></select></label>
-            <label>驗證結果 <select name="review"><option value="">全部</option><option value="unreviewed">待驗證</option><option value="confirmed">檢出正確</option><option value="correct_clear">無缺陷確認</option><option value="false_positive">系統過檢</option><option value="missed">系統漏檢</option><option value="mapping_error">座標映射不正確</option><option value="uncertain">無法確認</option></select></label>
-            <label>比對容許誤差 <input name="tolerance" type="number" min="0" max="500" step="1" value="50" required style="width:80px">產品 px</label>
-            <button class="sw-btn" type="submit">查詢／重新整理</button>
+        <div class="sw-head">
+            <div class="ss-title">
+                <h3>側拍統計</h3>
+                <details class="ss-help">
+                    <summary>使用說明</summary>
+                    <div class="ss-help-body">
+                        <ul>
+                            <li><b>總覽</b>：依日期（整日）、機台、機種與玻璃 ID 統計現存紀錄，每筆計一次。</li>
+                            <li><b>明細</b>：點卡片切換 AOI 分組；點分類篩選明細，再點一次取消。總覽範圍不變。</li>
+                            <li><b>人工確認</b>：正確包含檢出正確、無缺陷確認；錯誤包含過檢、漏檢。映射不正確或無法確認不計入正確率。</li>
+                            <li><b>正確率</b>＝人工確認正確 ÷ 有效驗證，只代表已驗證樣本；處理進度包含不計入正確率的紀錄。</li>
+                            <li><b>圖片</b>：青色 A# 是 AOI 估算位置，黃框是系統候選。局部圖優先裁切原圖，保留原解析度與方向；無法讀取時使用保存預覽。</li>
+                            <li><b>比對</b>：CSJBL 由正拍位置估算至側拍，容許誤差只影響此報表。無 CSJBL、無候選或位置接近，都需人工確認。</li>
+                        </ul>
+                    </div>
+                </details>
+            </div>
+            <span class="sw-badge">人工驗證 · 不影響正式判定</span>
+        </div>
+        <form id="ss-filters">
+            <div class="sw-controls">
+                <label>日期 <input type="date" name="start_date" required></label>
+                <label>～ <input type="date" name="end_date" required></label>
+                <label>機台 <input name="machine_no" size="12" placeholder="全部"></label>
+                <label>玻璃 ID <input name="glass_id" size="16" placeholder="可輸入部分 ID"></label>
+                <button class="sw-btn" type="submit">查詢</button>
+                <button class="sw-btn ss-more-btn" id="ss-more" type="button" aria-expanded="false" aria-controls="ss-advanced">更多篩選 ▾</button>
+            </div>
+            <div class="sw-controls ss-advanced" id="ss-advanced" hidden>
+                <label>機種 <input name="model_id" size="14" placeholder="全部／完整機種名稱"></label>
+                <label>明細側拍狀態 <select name="status">
+                    <option value="">全部</option>
+                    <option value="CANDIDATES">保留候選</option>
+                    <option value="NO_CANDIDATES,FILTERED">無保留候選</option>
+                    <option value="NO_CANDIDATES">　未發現候選</option>
+                    <option value="FILTERED">　候選已排除</option>
+                    <option value="NOT_RUN,NO_IMAGE,ERROR">未完成檢測</option>
+                    <option value="NOT_RUN">　尚未檢測</option>
+                    <option value="NO_IMAGE">　無側拍圖</option>
+                    <option value="ERROR">　檢測失敗</option>
+                </select></label>
+                <label>明細人工驗證 <select name="review">
+                    <option value="">全部</option>
+                    <option value="unreviewed">待驗證</option>
+                    <option value="confirmed,correct_clear">人工確認正確</option>
+                    <option value="confirmed">　檢出正確</option>
+                    <option value="correct_clear">　無缺陷確認</option>
+                    <option value="false_positive,missed">人工確認錯誤</option>
+                    <option value="false_positive">　系統過檢</option>
+                    <option value="missed">　系統漏檢</option>
+                    <option value="mapping_error,uncertain">不計入正確率</option>
+                    <option value="mapping_error">　座標映射不正確</option>
+                    <option value="uncertain">　無法確認</option>
+                </select></label>
+                <label>比對範圍 <input name="tolerance" type="number" min="0" max="500" step="1" value="50" required style="width:80px">產品 px</label>
+            </div>
         </form>
-        <p class="sw-note">日期以 00:00～24:00 計算，統計仍保留的推論明細，每筆計一次。容許誤差僅用於此報表的距離比對，不更動檢測參數。無 CSJBL／無候選均不代表無缺陷；未執行、無圖與檢測失敗另列。</p>
+        <p id="ss-scope" class="sw-note"></p>
+        <div id="ss-overview" class="ss-overview" aria-live="polite"></div>
         <div id="ss-summary" class="ss-summary"></div>
-        <p class="sw-note">人工確認正確率＝（檢出正確＋無缺陷確認）÷（檢出正確＋無缺陷確認＋系統過檢＋系統漏檢）；待驗證、無法確認及映射不正確不列入分母。各組分開計算，僅代表已驗證樣本。</p>
+        <p class="sw-note">點分類篩選明細，總覽維持查詢範圍。</p>
         <p id="ss-message" class="sw-note" role="status" aria-live="polite"></p>
     </div>
+    <div class="sw-controls ss-detail-toolbar">
+        <p id="ss-current-filter" class="sw-note" role="status" aria-live="polite"></p>
+        <button class="sw-btn ss-clear" id="ss-clear" type="button" hidden>清除明細篩選</button>
+    </div>
     <div id="ss-rows"></div>
-    <div class="sw-controls"><button id="ss-prev" type="button" class="sw-btn" disabled>上一頁</button><span id="ss-page"></span><button id="ss-next" type="button" class="sw-btn" disabled>下一頁</button></div>
+    <div class="sw-controls ss-pager"><span id="ss-page" class="sw-note"></span><button id="ss-prev" type="button" class="sw-btn" disabled>上一頁</button><button id="ss-next" type="button" class="sw-btn" disabled>下一頁</button></div>
 </section>
 <script src="/static/js/side_statistics.js"></script>

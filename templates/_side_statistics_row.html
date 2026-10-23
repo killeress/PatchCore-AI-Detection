@@ -1,24 +1,32 @@
 {% autoescape true %}
 {% set p = row.payload %}
-{% set states = {'CANDIDATES':'保留可疑候選','FILTERED':'候選已排除／炸彈','NO_CANDIDATES':'未發現候選','NO_IMAGE':'無側拍圖','ERROR':'檢測失敗','NOT_RUN':'未執行／待處理'} %}
-{% set matches = {'matched':'附近有保留候選','filtered':'附近僅有已排除／炸彈候選','unmatched':'附近未找到候選','unavailable':'無法映射','unverified':'候選資料不完整'} %}
+{% set states = {'CANDIDATES':'保留候選','FILTERED':'候選已排除','NO_CANDIDATES':'未發現候選','NO_IMAGE':'無側拍圖','ERROR':'檢測失敗','NOT_RUN':'尚未檢測'} %}
+{% set matches = {'matched':'附近有保留候選','filtered':'附近候選已排除','unmatched':'附近未找到候選','unavailable':'無法定位','unverified':'候選資料不完整'} %}
 {% macro image(kind, label, point=none) %}
     {% if p.get('artifacts',{}).get(kind) %}
     {% if comparison.has_csjbl and p.get('preview_bounds',{}).get(kind) %}
     {% set url = '/api/ric/side-stats/image?id=' ~ row.id ~ '&kind=' ~ kind ~ '&tolerance=' ~ comparison.tolerance ~ ('&point=' ~ point if point else '') %}
     {% else %}{% set url = '/api/side-white/image?id=' ~ row.id ~ '&kind=' ~ kind %}{% endif %}
-    <figure><a href="{{ url }}" target="_blank" rel="noopener"><img loading="lazy" src="{{ url }}" alt="{{ label }}" onerror="this.replaceWith(document.createTextNode('預覽已過期、遺失或無法顯示此映射位置'))"></a><figcaption>{{ label }}</figcaption></figure>
+    <figure><a href="{{ url }}" target="_blank" rel="noopener"><img loading="lazy" src="{{ url }}" alt="{{ label }}" onerror="this.replaceWith(document.createTextNode('圖片無法顯示'))"></a><figcaption>{{ label }}</figcaption></figure>
     {% endif %}
 {% endmacro %}
 <article class="sw-card ss-row" data-record-id="{{ row.record_id }}">
-    <div class="sw-head"><h3>{{ row.glass_id }} · {{ row.machine_no }} · {{ row.model_id }}</h3><a href="/record/{{ row.record_id }}#side-white-result" target="_blank" rel="noopener">推論紀錄 #{{ row.record_id }} →</a></div>
-    <p class="sw-note">{{ row.request_time }} · 正式結果：{{ row.ai_judgment }} · 側拍：<strong>{{ states.get(row.status,row.status) }}</strong> · 人工驗證：<span data-review-label>{{ review_decisions.get(row.review_decision,'待驗證') }}</span></p>
+    <details class="ss-record">
+    <summary>
+        <span class="ss-record-title"><strong>{{ row.glass_id }}</strong><small>{{ row.machine_no }} · {{ row.model_id }} · {{ row.request_time }}</small></span>
+        <span class="ss-record-status"><small>側拍狀態</small><span>{{ states.get(row.status,row.status) }}</span></span>
+        <span class="ss-record-status"><small>人工驗證</small><span data-review-label>{{ review_decisions.get(row.review_decision,'待驗證') }}</span><span data-review-dirty hidden>尚未儲存</span></span>
+        <span class="ss-record-action"><span class="ss-expand">{{ '查看／驗證' if row.id else '查看' }}</span><span class="ss-collapse">收合</span></span>
+    </summary>
+    <div class="ss-record-body">
+    <div class="sw-head"><p class="sw-note">正式結果：{{ row.ai_judgment }}</p><a href="/record/{{ row.record_id }}#side-white-result" target="_blank" rel="noopener">推論紀錄 #{{ row.record_id }} →</a></div>
     {% if comparison.has_csjbl %}
-    <p><span class="sw-badge">AOI 有 CSJBL · {{ comparison.points|length }} 點</span> 已映射 {{ comparison.mapped }} 點，附近有保留候選 {{ comparison.matched }} 點</p>
-    <p class="sw-note">青色 A# 十字為 AOI 映射位置，圈線為 {{ comparison.tolerance|round(2) }} 產品 px 容許範圍；黃框為系統候選。命中僅表示位置接近，仍需人工確認缺陷與映射正確性。</p>
-    {% if comparison.source == 'legacy' %}<p class="sw-note">此筆使用舊版 CSJBL 透傳明細還原 AOI 座標。</p>{% endif %}
+    <p class="sw-note">AOI {{ comparison.points|length }} 點 · 已定位 {{ comparison.mapped }} 點 · 附近有候選 {{ comparison.matched }} 點</p>
+    {% if comparison.source == 'legacy' %}<p class="sw-note">AOI 座標由舊版紀錄還原。</p>{% endif %}
     {% if comparison.reason %}<p class="sw-note">{{ comparison.reason }}</p>{% endif %}
-    {% if comparison.incomplete %}<p class="sw-badge sw-warn">舊版候選曾截斷，無法據此確認未命中。</p>{% endif %}
+    {% if comparison.incomplete %}<p class="sw-badge sw-warn">候選資料不完整，請確認原圖。</p>{% endif %}
+    <details><summary>AOI 座標與比對</summary>
+    <p class="sw-note">比對範圍：{{ comparison.tolerance|round(2) }} 產品 px；座標以原圖左上角為原點。</p>
     <div class="sw-scroll"><table class="sw-table"><thead><tr><th>AOI／正拍來源</th><th>來源座標 (X,Y)</th><th>正拍原圖 (X,Y)</th><th>側拍原圖 (X,Y)</th><th>比對結果</th></tr></thead><tbody>
     {% for a in comparison.points %}
     <tr><td>A{{ a.id }} · {{ a.image_prefix }}</td><td>{{ a.source_xy }}<br>{{ '產品座標' if a.coordinate_space == 'product' else '原圖像素' }}</td>
@@ -26,31 +34,32 @@
         <td>{% if a.get('side_raw_xy') %}{{ a.side_raw_xy[0]|round(1) }}, {{ a.side_raw_xy[1]|round(1) }}{% else %}—{% endif %}</td>
         <td>{{ matches.get(a.status,a.status) }}{% if a.retained_candidate_ids %} #{{ a.retained_candidate_ids|join(', #') }}{% elif a.candidate_ids %} #{{ a.candidate_ids|join(', #') }}{% endif %}{% if a.reason %}<br>{{ a.reason }}{% endif %}</td></tr>
     {% endfor %}
-    </tbody></table></div>
+    </tbody></table></div></details>
     {% else %}
-    <p><span class="sw-badge">AOI 無 CSJBL</span></p>
-    <p class="sw-note">已保存的 AOI 資料未提供 CSJBL；請檢視側拍候選與原圖，人工確認是否過檢或有 AOI 未標出的缺陷。舊資料未保存完整 AOI 時，無法追溯當時是否漏記。</p>
+    <p class="sw-note">AOI 未提供 CSJBL，請查看圖片並人工確認。</p>
     {% endif %}
-    {% if p.get('rotation_applied') %}<p class="sw-note">預覽已旋轉 180°；表格座標仍為原始 TIF 左上角 (0,0)。</p>{% endif %}
-    <div class="sw-images">{{ image('front','正拍位置對照（估算）') }}{{ image('side','側拍候選與 AOI 位置' if comparison.has_csjbl else '側拍候選') }}</div>
-    {% if not p.get('artifacts',{}).get('side') %}<p class="sw-note">{{ p.get('reason') or '未保存側拍圖片。啟用「參數設定 → 推論設定 → 側拍白畫面檢測」後，新推論將在背景產生結果；舊紀錄可由推論詳情重新推論。' }}</p>{% endif %}
+    {% if p.get('rotation_applied') %}<p class="sw-note">保存預覽已旋轉 180°；局部原圖維持原方向。</p>{% endif %}
+    <div class="sw-images">{{ image('front','正拍定位預覽') }}{{ image('side','側拍候選與 AOI 位置' if comparison.has_csjbl else '側拍候選') }}</div>
+    {% if not p.get('artifacts',{}).get('side') %}<p class="sw-note">{{ p.get('reason') or '尚無側拍圖片。啟用側拍檢測後，可由推論紀錄重新推論。' }}</p>{% endif %}
     {% if p.get('preview_bounds',{}).get('side') %}
     {% for a in comparison.points %}{% if a.status != 'unavailable' %}
-    <details><summary>A{{ a.id }} · CSJBL 映射位置局部圖（即使無候選仍可查看）</summary><p class="sw-note">裁切保存的預覽，局部圖不加青色定位標記，避免遮住缺陷；如需更多候選細節，可展開下方同區域組合圖。</p><div class="sw-images">{{ image('front','A' ~ a.id ~ ' 正拍局部',a.id) }}{{ image('side','A' ~ a.id ~ ' 側拍局部',a.id) }}</div></details>
+    <details><summary>A{{ a.id }} · 局部圖片</summary><div class="sw-images">{{ image('front','A' ~ a.id ~ ' 正拍局部',a.id) }}{{ image('side','A' ~ a.id ~ ' 側拍局部',a.id) }}</div></details>
     {% endif %}{% endfor %}{% endif %}
     {% if row.id %}
-    <details><summary>查看系統候選、灰塵／排除證據與同區域組合圖</summary>
+    <details><summary>候選與排除證據</summary>
         {% set detail = {'glass_id':row.glass_id, 'side_white_result':row} %}{% set embedded = true %}{% include '_side_white_result.html' %}
     </details>
     <form class="sw-controls ss-review" data-result-id="{{ row.id }}">
         <input type="hidden" name="expected_reviewed_at" value="{{ row.reviewed_at or '' }}">
-        <label>驗證結果 <select name="decision">{% for value,label in review_decisions.items() %}<option value="{{ value }}" {{ 'selected' if row.review_decision == value else '' }}>{{ label }}</option>{% endfor %}</select></label>
+        <label>人工驗證 <select name="decision">{% for value,label in review_decisions.items() %}<option value="{{ value }}" {{ 'selected' if row.review_decision == value else '' }}>{{ label }}</option>{% endfor %}</select></label>
         <label>驗證人 <input name="reviewer" value="{{ row.reviewed_by or '' }}" maxlength="80" required></label>
-        <label for="ss-note-{{ row.id }}">驗證備註</label>
-        <textarea id="ss-note-{{ row.id }}" name="note" maxlength="2000" placeholder="記錄缺陷是否存在、AOI 映射是否準確、候選編號及判斷依據">{{ row.review_note or '' }}</textarea>
+        <label for="ss-note-{{ row.id }}">備註</label>
+        <textarea id="ss-note-{{ row.id }}" name="note" maxlength="2000" placeholder="缺陷、定位或判斷依據">{{ row.review_note or '' }}</textarea>
         <button class="sw-btn" type="submit">儲存驗證結果</button>
         <p class="sw-note ss-review-state" role="status" data-review-state>{% if row.reviewed_at %}{{ row.reviewed_by }} · {{ row.reviewed_at }}{% else %}尚未驗證{% endif %}</p>
     </form>
     {% endif %}
+    </div>
+    </details>
 </article>
 {% endautoescape %}

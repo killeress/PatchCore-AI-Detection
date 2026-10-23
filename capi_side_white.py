@@ -625,10 +625,14 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                 cv2.polylines(front_view, [contour], True, (0, 210, 255), 3)
                 px, py = np.rint(item["front_xy"]).astype(int)
                 cv2.putText(front_view, str(item["id"]), (px + 8, py), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 210, 255), 3)
-        for name, view in (("side", side_view), ("residual", residual_view), ("front", front_view)):
+        # Unannotated, unadjusted copies: report crops must show the defect as captured.
+        side_clean = side
+        front_clean = front if front_view is not None else None
+        for name, view in (("side", side_view), ("residual", residual_view), ("front", front_view),
+                           ("side_clean", side_clean), ("front_clean", front_clean)):
             if view is not None:
                 # Show the panel at a useful size; coordinates remain those of the full image.
-                preview_quad = front_quad if name == "front" else quad
+                preview_quad = front_quad if name.startswith("front") else quad
                 bx, by, bw, bh = cv2.boundingRect(preview_quad)
                 left, top = max(0, bx - 20), max(0, by - 20)
                 crop = view[top:min(view.shape[0], by + bh + 20), left:min(view.shape[1], bx + bw + 20)]

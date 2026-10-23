@@ -2129,15 +2129,21 @@ class CAPIDatabase:
                             include_rows=True) -> Dict:
         """Compare all retained inference records, including observations not yet run.
 
-        Summary counts cover both AOI groups under the same filters, independent
-        of pagination. Heavy evidence payloads are loaded only for the current page.
+        Summary counts cover both AOI groups within the date/machine/model/glass
+        scope. Status and review filter only the detail rows and their total.
+        Heavy evidence payloads are loaded only for the current page.
         """
         from capi_side_report import REVIEW_DECISIONS, has_csjbl
         if group not in {"with_csjbl", "without_csjbl"}:
             raise ValueError("未知的 AOI 分組")
-        if status not in {"", "CANDIDATES", "FILTERED", "NO_CANDIDATES", "NO_IMAGE", "ERROR", "NOT_RUN"}:
+        # status / review accept a comma-separated list so merged summary
+        # categories (e.g. 判定正確 = confirmed + correct_clear) can be filtered.
+        statuses = [value for value in str(status or "").split(",") if value]
+        reviews = [value for value in str(review or "").split(",") if value]
+        if any(value not in {"CANDIDATES", "FILTERED", "NO_CANDIDATES", "NO_IMAGE", "ERROR", "NOT_RUN"}
+               for value in statuses):
             raise ValueError("未知的側拍狀態")
-        if review and review not in REVIEW_DECISIONS:
+        if any(value not in REVIEW_DECISIONS for value in reviews):
             raise ValueError("未知的驗證結果")
         start, end = datetime.strptime(start_date, "%Y-%m-%d"), datetime.strptime(end_date, "%Y-%m-%d")
         if start > end:
@@ -2151,12 +2157,14 @@ class CAPIDatabase:
         if glass_id:
             conditions.append("r.glass_id LIKE ? ESCAPE '\\'")
             params.append("%" + glass_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
-        if status:
-            conditions.append("COALESCE(s.status, 'NOT_RUN') = ?")
-            params.append(status)
-        if review:
-            conditions.append("COALESCE(s.review_decision, 'unreviewed') = ?")
-            params.append(review)
+        summary_where = " WHERE " + " AND ".join(conditions)
+        summary_params = list(params)
+        if statuses:
+            conditions.append("COALESCE(s.status, 'NOT_RUN') IN (" + ",".join("?" * len(statuses)) + ")")
+            params.extend(statuses)
+        if reviews:
+            conditions.append("COALESCE(s.review_decision, 'unreviewed') IN (" + ",".join("?" * len(reviews)) + ")")
+            params.extend(reviews)
         join = " FROM inference_records r LEFT JOIN side_white_results s ON s.record_id = r.id"
         where = " WHERE " + " AND ".join(conditions)
         conn = self._get_conn()
@@ -2170,11 +2178,16 @@ class CAPIDatabase:
                 "SELECT side_has_csjbl(r.aoi_machine_coords, r.ng_details) AS has_csjbl, "
                 "COALESCE(s.status, 'NOT_RUN') AS status, "
                 "COALESCE(s.review_decision, 'unreviewed') AS decision, COUNT(*) AS count"
-                + join + where + " GROUP BY has_csjbl, COALESCE(s.status, 'NOT_RUN'), "
-                "COALESCE(s.review_decision, 'unreviewed')", params).fetchall()
+                + join + summary_where + " GROUP BY has_csjbl, COALESCE(s.status, 'NOT_RUN'), "
+                "COALESCE(s.review_decision, 'unreviewed')", summary_params).fetchall()
+            total = 0
             for row in counts:
-                stats = summary["with_csjbl" if row["has_csjbl"] else "without_csjbl"]
+                row_group = "with_csjbl" if row["has_csjbl"] else "without_csjbl"
+                stats = summary[row_group]
                 count = row["count"]
+                if (row_group == group and (not statuses or row["status"] in statuses)
+                        and (not reviews or row["decision"] in reviews)):
+                    total += count
                 stats["total"] += count
                 stats["candidates" if row["status"] == "CANDIDATES" else
                       "clear" if row["status"] in {"NO_CANDIDATES", "FILTERED"} else "unavailable"] += count
@@ -2184,7 +2197,7 @@ class CAPIDatabase:
                 stats["verified"] = verified
                 stats["accuracy"] = round(100 * (stats["confirmed"] + stats["correct_clear"]) / verified, 1) if verified else None
             if not include_rows:
-                return {"rows": [], "summary": summary, "total": summary[group]["total"]}
+                return {"rows": [], "summary": summary, "total": total}
             rows = conn.execute(
                 "SELECT s.*, r.id AS inference_record_id, r.glass_id, r.model_id, r.machine_no, r.request_time, "
                 "r.ai_judgment, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
@@ -2200,7 +2213,7 @@ class CAPIDatabase:
                 item["status"] = item["status"] or "NOT_RUN"
                 item["review_decision"] = item["review_decision"] or "unreviewed"
                 decoded.append(item)
-            return {"rows": decoded, "summary": summary, "total": summary[group]["total"]}
+            return {"rows": decoded, "summary": summary, "total": total}
         finally:
             conn.close()
 
@@ -2208,7 +2221,7 @@ class CAPIDatabase:
         conn = self._get_conn()
         try:
             row = conn.execute(
-                "SELECT s.*, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y "
+                "SELECT s.*, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y, r.image_dir "
                 "FROM side_white_results s JOIN inference_records r ON r.id = s.record_id WHERE s.id = ?",
                 (result_id,)).fetchone()
             return self._decode_side_white_row(row) if row else None

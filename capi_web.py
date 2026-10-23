@@ -12470,11 +12470,49 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 return
             comparison = compare_side_record(row, float(query.get("tolerance", [50])[0]))
             point_id = int(query["point"][0]) if query.get("point") else None
-            image = render_comparison_image(row, comparison, self.heatmap_base_dir,
-                                            query.get("kind", ["side"])[0], point_id)
+            kind = query.get("kind", ["side"])[0]
+            if point_id is not None and self._send_side_original_crop(row, comparison, kind, point_id):
+                return
+            image = render_comparison_image(row, comparison, self.heatmap_base_dir, kind, point_id)
             self._send_image_array_png(image)
         except (ValueError, TypeError, OSError):
             self._send_404()
+
+    def _send_side_original_crop(self, row, comparison, kind, point_id) -> bool:
+        """Send the AOI point region cut from the original file, byte-for-byte pixel values.
+
+        Returns False when the original is gone or unreadable so the caller can
+        fall back to the saved preview.
+        """
+        import cv2
+        from capi_side_report import crop_original_image
+
+        image_dir = str(row.get("image_dir") or "").strip()
+        if not image_dir:
+            return False
+        try:
+            # Reuse the running server's UNC resolver; importing capi_server here
+            # would load the whole inference stack on a report image request.
+            server = getattr(self, "_capi_server_instance", None)
+            module = sys.modules.get(type(server).__module__) if server is not None else None
+            resolve = getattr(module, "resolve_unc_path", None)
+            path_mapping = getattr(server, "path_mapping", {}) or {}
+            folder = Path(resolve(image_dir, path_mapping) if resolve else image_dir)
+            crop = crop_original_image(row, comparison, folder, kind, point_id)
+            # PNG is lossless and keeps 8/16-bit depth; nothing is rescaled.
+            ok, buf = cv2.imencode(".png", crop) if crop.size else (False, None)
+        except (OSError, ValueError, TypeError, cv2.error):
+            return False
+        if not ok:
+            return False
+        content = buf.tobytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("X-Side-Image-Source", "original")
+        self.end_headers()
+        self.wfile.write(content)
+        return True
 
     def _handle_api_side_white(self, query):
         try:

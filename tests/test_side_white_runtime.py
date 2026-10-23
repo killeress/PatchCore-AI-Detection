@@ -217,6 +217,11 @@ def test_side_omit_without_front_uses_same_rotation_and_generates_evidence(tmp_p
     assert c['dust']['overlap_ratio'] > .8, c
     assert c['crop_bounds']['omit'] == c['crop_bounds']['side']
     assert Path(payload['artifacts'][c['composite_key']]).is_file()
+    # Report crops use an unannotated grayscale copy with the same bounds as the marked preview.
+    clean = cv2.imread(payload['artifacts']['side_clean'], cv2.IMREAD_UNCHANGED)
+    assert clean.ndim == 2 and clean.shape == cv2.imread(payload['artifacts']['side']).shape[:2]
+    assert payload['preview_bounds']['side_clean'] == payload['preview_bounds']['side']
+    assert 'front_clean' not in payload['artifacts']
     CAPIWebHandler.init_jinja()
     html = CAPIWebHandler.jinja_env.get_template('_side_white_result.html').render(
         detail={'side_white_result': {'id': 1, 'status': payload['status'], 'payload': payload}})

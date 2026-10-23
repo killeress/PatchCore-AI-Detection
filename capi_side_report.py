@@ -156,8 +156,12 @@ def render_comparison_image(row, comparison, root, kind="side", point_id=None):
     if kind not in {"side", "front"}:
         raise ValueError("不支援的圖片種類")
     payload = row.get("payload") or {}
-    stored = payload.get("artifacts", {}).get(kind)
-    bounds = payload.get("preview_bounds", {}).get(kind)
+    artifact = kind
+    if point_id is not None and payload.get("artifacts", {}).get(kind + "_clean"):
+        # Point crops use the unannotated preview; older records fall back to the marked one.
+        artifact = kind + "_clean"
+    stored = payload.get("artifacts", {}).get(artifact)
+    bounds = payload.get("preview_bounds", {}).get(artifact)
     if not stored or not bounds or len(bounds) != 4 or min(bounds[2:]) <= 0:
         raise FileNotFoundError("預覽或裁切座標未保存")
     path = Path(stored).resolve()
@@ -193,3 +197,42 @@ def render_comparison_image(row, comparison, root, kind="side", point_id=None):
         high = np.minimum(image.shape[1::-1], np.ceil(np.maximum(roi.max(axis=0) + 20, xy + 48))).astype(int)
         image = image[low[1]:high[1], low[0]:high[0]]
     return image
+
+
+def crop_original_image(row, comparison, folder, kind="side", point_id=None):
+    """Cut the AOI point region straight from the original image file.
+
+    No rotation, resizing, brightness change, colour conversion or annotation:
+    the returned array keeps the file's own orientation, bit depth and channels.
+    """
+    if kind not in {"side", "front"} or point_id is None:
+        raise ValueError("原始圖只提供 AOI 點局部圖")
+    payload = row.get("payload") or {}
+    name = str(payload.get(kind + "_image") or "")
+    size = payload.get(kind + "_size")
+    if not name or Path(name).name != name or not folder or not size or len(size) != 2:
+        raise FileNotFoundError("沒有原始圖檔資訊")
+    path = Path(folder) / name
+    if not path.is_file():
+        raise FileNotFoundError("原始圖檔已不存在")
+    image = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise FileNotFoundError("原始圖檔無法讀取")
+    width, height = int(size[0]), int(size[1])
+    if image.shape[1] != width or image.shape[0] != height:
+        raise FileNotFoundError("原始圖檔尺寸與檢測紀錄不符")
+    points = [p for p in comparison["points"] if p["id"] == point_id]
+    if not points or points[0]["status"] == "unavailable":
+        raise FileNotFoundError("此 AOI 點沒有可用映射")
+    point = points[0]
+    # Same crop rule as the preview crop, in detection (possibly rotated) pixels.
+    roi = np.array(point[kind + "_roi"], np.float64)
+    xy = np.array(point[kind + "_xy"], np.float64)
+    if np.any(xy < 0) or xy[0] >= width or xy[1] >= height:
+        raise FileNotFoundError("AOI 映射位置不在原始圖範圍")
+    low = np.maximum(0, np.floor(np.minimum(roi.min(axis=0) - 20, xy - 48))).astype(int)
+    high = np.minimum([width, height], np.ceil(np.maximum(roi.max(axis=0) + 20, xy + 48))).astype(int)
+    if payload.get("rotation_applied"):
+        # Detection pixels were rotated 180 degrees; map the box back to file pixels.
+        low, high = np.array([width, height]) - high, np.array([width, height]) - low
+    return image[low[1]:high[1], low[0]:high[0]].copy()
