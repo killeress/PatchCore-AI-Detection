@@ -47,7 +47,7 @@
     </tbody></table></div>
     {% for c in p.candidates %}
     {% if c.get('composite_key') %}<details class="sw-candidate"><summary>#{{ c.id }} · {{ kinds.get(c.kind,c.kind) }} · {{ dispositions.get(c.disposition,c.disposition) }} · 查看同區域組合圖</summary>
-        <p class="sw-note">{{ dust_states.get(c.get('dust',{}).get('status',''),'') }} · {{ c.get('dust',{}).get('reason','') }}。排除區域：{{ c.get("excluded_zone_names",[])|join("、") or "無" }}。左至右：側拍、正拍對照、{{ omit_label }}、{{ omit_label }} 表面特徵遮罩；側拍藍色為不檢測區，綠色輪廓為處理後保留範圍。</p>
+        <p class="sw-note">{{ dust_states.get(c.get('dust',{}).get('status',''),'') }} · {{ c.get('dust',{}).get('reason','') }}。排除區域：{{ c.get("excluded_zone_names",[])|join("、") or "無" }}。左至右：側拍、正拍對照、{{ omit_label }}、{{ omit_label }} 表面特徵遮罩。</p>
         <a href="/api/side-white/image?id={{ sw.id }}&amp;kind={{ c.composite_key }}" target="_blank" rel="noopener"><img class="sw-composite" loading="lazy" src="/api/side-white/image?id={{ sw.id }}&amp;kind={{ c.composite_key }}" alt="候選 {{ c.id }} 同區域側拍、正拍、OMIT 與遮罩" onerror="this.replaceWith(document.createTextNode('組合圖已過期或遺失'))"></a>
     </details>{% endif %}{% endfor %}
     {% endif %}

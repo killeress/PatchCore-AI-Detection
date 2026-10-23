@@ -43,7 +43,7 @@ def inspect_side_white_folder(folder, output_dir, *, rotate_180=False, params=No
 
 
 def find_side_white_pair(folder: Path):
-    """Select the newest white side shot and its exact acquisition-name partner."""
+    """Prefer exact acquisition names, then a unique white pair for the same glass."""
     files = [p for p in Path(folder).iterdir()
              if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS]
     sides = [p for p in files if _SIDE_NAME.fullmatch(p.stem)]
@@ -54,6 +54,16 @@ def find_side_white_pair(folder: Path):
     front_stem = (match[1] + "W0F00000" + (match[2] or "")).upper()
     fronts = [p for p in files if p.stem.upper() == front_stem]
     front = max(fronts, key=lambda p: (p.stat().st_mtime_ns, p.name)) if fronts else None
+    if front is None:
+        # Front and side exposures are sequential, so their HHMMSS can differ.
+        # Only fall back when this glass has one shot per camera; a lone old
+        # front must not be reused for a newer side in a multi-acquisition folder.
+        same_glass_sides = [p for p in sides
+                            if _SIDE_NAME.fullmatch(p.stem)[1].casefold() == match[1].casefold()]
+        front_pattern = re.compile(re.escape(match[1]) + r"W0F00000(?:_?\d{6})?", re.IGNORECASE)
+        fronts = [p for p in files if front_pattern.fullmatch(p.stem)]
+        if len(same_glass_sides) == 1 and len(fronts) == 1:
+            front = fronts[0]
     return side, front
 
 
@@ -482,9 +492,8 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
     item["remaining_contours"] = [(c.reshape(-1, 2) + [x, y]).tolist() for c in contours]
     item["disposition"] = ("retained" if remaining.any() else
                            "dust_suppressed" if item["dust"]["status"] == "suppressed" else "excluded")
-    sx1, sy1, sx2, sy2 = item["crop_bounds"]["side"]
-    panels = [_panel(side, item["crop_bounds"]["side"], f"Side #{item['id']}", item["side_contour"],
-                     zone_mask[sy1:sy2, sx1:sx2], (255, 140, 50), item["remaining_contours"]),
+    # Keep the side crop unannotated so overlays cannot obscure the defect.
+    panels = [_panel(side, item["crop_bounds"]["side"], f"Side #{item['id']}"),
               _panel(front, front_bounds, "Front (estimated)", item.get("front_contour")),
               _panel(omit if aligned else None, omit_bounds, "Side OMIT", item["side_contour"]),
               _panel(omit if aligned and mask is not None else None, omit_bounds, "Side OMIT surface mask", item["side_contour"], mask)]

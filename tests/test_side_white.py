@@ -63,6 +63,78 @@ def test_glass_prefixed_and_compact_names_match(tmp_path):
     assert find_side_white_pair(tmp_path) == (side, front)
 
 
+@pytest.mark.parametrize("prefix, separator, extension", [
+    ("", "_", ".tif"),
+    ("YQ6004201B15", "", ".TIF"),
+    ("GLASS_", "_", ".tiff"),
+])
+def test_unique_white_pair_allows_sequential_exposures(tmp_path, prefix, separator, extension):
+    # Production acquisition: front white at 09:31:57, side white one second later.
+    shots = {
+        "PINIGBI ": "093154", "SPINIGBI ": "093155",
+        "W0F00000": "093157", "SW0F00000": "093158",
+        "WGF50500": "093200", "SWGF50500": "093201",
+        "STANDARD": "093204", "SSTANDARD": "093204",
+        "G0F00000": "093205", "SG0F00000": "093205",
+        "R0F00000": "093207", "SR0F00000": "093207",
+        "B0F00000": "093208", "SB0F00000": "093208",
+    }
+    paths = {shot: tmp_path / f"{prefix}{shot}{separator}{stamp}{extension}"
+             for shot, stamp in shots.items()}
+    for path in paths.values():
+        path.touch()
+    (tmp_path / "Optics.log").touch()
+    assert find_side_white_pair(tmp_path) == (paths["SW0F00000"], paths["W0F00000"])
+
+
+def test_sequential_white_pair_stays_with_same_glass_prefix(tmp_path):
+    other_side = tmp_path / "OTHER_SW0F00000_093158.tif"
+    other_side.touch()
+    os.utime(other_side, (1, 1))
+    (tmp_path / "OTHER_W0F00000_093158.tif").touch()
+    side = tmp_path / "GLASS_SW0F00000_093158.tif"
+    side.touch()
+    assert find_side_white_pair(tmp_path) == (side, None)
+    front = tmp_path / "glass_w0f00000_093157.TIF"
+    front.touch()
+    assert find_side_white_pair(tmp_path) == (side, front)
+
+
+def test_sequential_white_pair_rejects_ambiguity_and_prefers_exact_match(tmp_path):
+    side = tmp_path / "SW0F00000_093158.tif"
+    side.touch()
+    for stamp in ("093157", "093159"):
+        (tmp_path / f"W0F00000_{stamp}.tif").touch()
+    assert find_side_white_pair(tmp_path) == (side, None)
+    exact = tmp_path / "W0F00000_093158.tif"
+    exact.touch()
+    os.utime(exact, (1, 1))
+    assert find_side_white_pair(tmp_path) == (side, exact)
+
+
+def test_folder_sequential_exposures_produce_front_and_aoi_mapping(tmp_path):
+    from capi_side_report import compare_side_record
+    from capi_side_white import inspect_side_white_folder
+
+    side, front, _ = _pair(tmp_path)
+    side = side.rename(tmp_path / "SW0F00000_093158.tif")
+    front = front.rename(tmp_path / "W0F00000_093157.tif")
+    payload = inspect_side_white_folder(
+        tmp_path, tmp_path / "out", context={"product_resolution": [1920, 1080]})
+    assert payload["status"] == "CANDIDATES", payload.get("reason")
+    assert payload["side_image"] == side.name and payload["front_image"] == front.name
+    assert payload["mapping"]["status"] == "estimated"
+    assert Path(payload["artifacts"]["front"]).is_file()
+    assert all(c["front_xy"] is not None and "front" in c["crop_bounds"]
+               for c in payload["candidates"])
+    comparison = compare_side_record({
+        "status": payload["status"], "payload": payload,
+        "aoi_machine_coords": {"W0F00000": [{"defect_code": "CSJBL",
+            "coordinate_space": "product", "product_x": 960, "product_y": 540}]},
+    })
+    assert comparison["mapped"] == 1 and comparison["points"][0]["status"] != "unavailable"
+
+
 def test_plane_mapping_uses_independent_points(tmp_path):
     side, front, forward = _pair(tmp_path)
     sq = detect_panel_quad(cv2.imread(str(side), 0))
