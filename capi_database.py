@@ -2126,16 +2126,21 @@ class CAPIDatabase:
 
     def get_side_statistics(self, *, start_date, end_date, group="with_csjbl", machine_no="",
                             model_id="", glass_id="", status="", review="", limit=10, offset=0,
-                            include_rows=True) -> Dict:
-        """Compare all retained inference records, including observations not yet run.
+                            include_rows=True, conversion="", tolerance=50) -> Dict:
+        """Compare AOI CSJBL records, including observations not yet run.
 
-        Summary counts cover both AOI groups within the date/machine/model/glass
+        Summary counts cover only AOI CSJBL within the date/machine/model/glass
         scope. Status and review filter only the detail rows and their total.
-        Heavy evidence payloads are loaded only for the current page.
+        Conversion estimates stream saved evidence in bounded batches across the
+        whole scope; pagination and detail filters never change the rate denominator.
         """
-        from capi_side_report import REVIEW_DECISIONS, has_csjbl
-        if group not in {"with_csjbl", "without_csjbl"}:
-            raise ValueError("未知的 AOI 分組")
+        from capi_side_report import (REVIEW_DECISIONS, CONVERSION_FILTERS, has_csjbl, compare_side_record,
+                                      record_conversion, matches_conversion_filter, conversion_rate_projection)
+        if group != "with_csjbl":
+            raise ValueError("側拍統計僅提供 AOI 有 CSJBL 的資料")
+        if conversion and conversion not in CONVERSION_FILTERS:
+            raise ValueError("未知的轉 OK 分類")
+        compare_side_record({}, tolerance)  # Validate even an empty scope.
         # status / review accept a comma-separated list so merged summary
         # categories (e.g. 判定正確 = confirmed + correct_clear) can be filtered.
         statuses = [value for value in str(status or "").split(",") if value]
@@ -2157,37 +2162,28 @@ class CAPIDatabase:
         if glass_id:
             conditions.append("r.glass_id LIKE ? ESCAPE '\\'")
             params.append("%" + glass_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        scope_where = " WHERE " + " AND ".join(conditions)
+        conditions.append("side_has_csjbl(r.aoi_machine_coords, r.ng_details) = 1")
         summary_where = " WHERE " + " AND ".join(conditions)
         summary_params = list(params)
-        if statuses:
-            conditions.append("COALESCE(s.status, 'NOT_RUN') IN (" + ",".join("?" * len(statuses)) + ")")
-            params.extend(statuses)
-        if reviews:
-            conditions.append("COALESCE(s.review_decision, 'unreviewed') IN (" + ",".join("?" * len(reviews)) + ")")
-            params.extend(reviews)
         join = " FROM inference_records r LEFT JOIN side_white_results s ON s.record_id = r.id"
-        where = " WHERE " + " AND ".join(conditions)
         conn = self._get_conn()
         conn.create_function("side_has_csjbl", 2, has_csjbl, deterministic=True)
         try:
             conn.execute("BEGIN")
             summary = {key: {"total": 0, "candidates": 0, "clear": 0, "unavailable": 0,
                              **{decision: 0 for decision in REVIEW_DECISIONS}}
-                       for key in ("with_csjbl", "without_csjbl")}
+                       for key in ("with_csjbl",)}
             counts = conn.execute(
                 "SELECT side_has_csjbl(r.aoi_machine_coords, r.ng_details) AS has_csjbl, "
                 "COALESCE(s.status, 'NOT_RUN') AS status, "
                 "COALESCE(s.review_decision, 'unreviewed') AS decision, COUNT(*) AS count"
                 + join + summary_where + " GROUP BY has_csjbl, COALESCE(s.status, 'NOT_RUN'), "
                 "COALESCE(s.review_decision, 'unreviewed')", summary_params).fetchall()
-            total = 0
             for row in counts:
                 row_group = "with_csjbl" if row["has_csjbl"] else "without_csjbl"
                 stats = summary[row_group]
                 count = row["count"]
-                if (row_group == group and (not statuses or row["status"] in statuses)
-                        and (not reviews or row["decision"] in reviews)):
-                    total += count
                 stats["total"] += count
                 stats["candidates" if row["status"] == "CANDIDATES" else
                       "clear" if row["status"] in {"NO_CANDIDATES", "FILTERED"} else "unavailable"] += count
@@ -2196,26 +2192,86 @@ class CAPIDatabase:
                 verified = sum(stats[k] for k in ("confirmed", "correct_clear", "false_positive", "missed"))
                 stats["verified"] = verified
                 stats["accuracy"] = round(100 * (stats["confirmed"] + stats["correct_clear"]) / verified, 1) if verified else None
-            if not include_rows:
-                return {"rows": [], "summary": summary, "total": total}
-            rows = conn.execute(
+            scope_counts = dict(conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "COALESCE(SUM(CASE WHEN r.ai_judgment IN ('OK', 'OK-i') THEN 1 ELSE 0 END),0) AS ok, "
+                "COALESCE(SUM(CASE WHEN r.ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END),0) AS ng "
+                "FROM inference_records r" + scope_where, summary_params).fetchone())
+            scope_counts["other"] = scope_counts["total"] - scope_counts["ok"] - scope_counts["ng"]
+            csjbl_counts = {key: 0 for key in ("total", "ok", "ng", "other")}
+            conversions = {"mark": {"points": 0, "records": 0}, "omit": {"points": 0, "records": 0},
+                           "both_records": 0, "any_records": 0, "eligible_records": 0,
+                           "blocked_records": 0, "already_ok_records": 0,
+                           "eligible": {"mark": 0, "omit": 0, "mixed": 0}}
+            cursor = conn.execute(
                 "SELECT s.*, r.id AS inference_record_id, r.glass_id, r.model_id, r.machine_no, r.request_time, "
                 "r.ai_judgment, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
-                + join + where + " AND side_has_csjbl(r.aoi_machine_coords, r.ng_details) = ?"
-                " ORDER BY r.id DESC LIMIT ? OFFSET ?",
-                params + [int(group == "with_csjbl"), max(1, min(int(limit), 20)), max(0, int(offset))],
-            ).fetchall()
-            decoded = []
-            for row in rows:
-                item = dict(row)
-                item["record_id"] = item.pop("inference_record_id")
-                item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
-                item["status"] = item["status"] or "NOT_RUN"
-                item["review_decision"] = item["review_decision"] or "unreviewed"
-                decoded.append(item)
-            return {"rows": decoded, "summary": summary, "total": total}
+                + join + summary_where + " ORDER BY r.id DESC", summary_params)
+            decoded, total = [], 0
+            limit, offset = max(1, min(int(limit), 20)), max(0, int(offset))
+            while batch := cursor.fetchmany(64):
+                items = []
+                for row in batch:
+                    item = dict(row)
+                    item["record_id"] = item.pop("inference_record_id")
+                    try:
+                        payload = json.loads(item["payload"]) if item["payload"] else {}
+                    except (ValueError, TypeError):
+                        payload = {}
+                    item["payload"] = payload if isinstance(payload, dict) else {}
+                    item["status"] = item["status"] or "NOT_RUN"
+                    item["review_decision"] = item["review_decision"] or "unreviewed"
+                    items.append(item)
+                self._attach_side_inference_marks(conn, items)
+                for item in items:
+                    comparison = compare_side_record(item, tolerance)
+                    converted = record_conversion(item, comparison)
+                    item.update(comparison=comparison, conversion=converted)
+                    csjbl_counts["total"] += 1
+                    judgment = str(item.get("ai_judgment") or "")
+                    csjbl_counts["ok" if judgment in {"OK", "OK-i"} else
+                                 "ng" if judgment.startswith("NG") else "other"] += 1
+                    for kind in ("mark", "omit"):
+                        count = converted[kind + "_points"]
+                        conversions[kind]["points"] += count
+                        conversions[kind]["records"] += bool(count)
+                    conversions["both_records"] += converted["category"] == "mixed"
+                    conversions["any_records"] += converted["category"] != "none"
+                    conversions["blocked_records"] += converted["state"] == "blocked"
+                    conversions["already_ok_records"] += converted["state"] == "already_ok"
+                    if converted["eligible"]:
+                        conversions["eligible_records"] += 1
+                        conversions["eligible"][converted["category"]] += 1
+                    if ((not statuses or item["status"] in statuses)
+                            and (not reviews or item["review_decision"] in reviews)
+                            and matches_conversion_filter(converted, conversion)):
+                        if include_rows and offset <= total < offset + limit:
+                            decoded.append(item)
+                        total += 1
+            conversions["scope"] = conversion_rate_projection(scope_counts, conversions["eligible"])
+            conversions["csjbl"] = conversion_rate_projection(csjbl_counts, conversions["eligible"])
+            return {"rows": decoded, "summary": summary, "conversion_summary": conversions, "total": total}
         finally:
             conn.close()
+
+    @staticmethod
+    def _attach_side_inference_marks(conn, rows):
+        """Batch-load locator bboxes for old observations without a MARK snapshot."""
+        from capi_side_report import inference_mark_evidence
+        pending = [row for row in rows if row.get("id") and
+                   "inference_marks" not in row["payload"].get("evidence_context", {})]
+        if not pending:
+            return
+        images = conn.execute(
+            "SELECT record_id, mark_bbox, mark_source_image FROM image_results WHERE record_id IN ("
+            + ",".join("?" * len(pending)) + ") AND mark_bbox != ''",
+            [row["record_id"] for row in pending],
+        ).fetchall()
+        grouped = {}
+        for image in images:
+            grouped.setdefault(image["record_id"], []).append(dict(image))
+        for row in pending:
+            row["inference_marks"] = inference_mark_evidence(grouped.get(row["record_id"], []))
 
     def get_side_statistics_record(self, result_id: int) -> Optional[Dict]:
         conn = self._get_conn()
@@ -2224,7 +2280,11 @@ class CAPIDatabase:
                 "SELECT s.*, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y, r.image_dir "
                 "FROM side_white_results s JOIN inference_records r ON r.id = s.record_id WHERE s.id = ?",
                 (result_id,)).fetchone()
-            return self._decode_side_white_row(row) if row else None
+            if not row:
+                return None
+            result = self._decode_side_white_row(row)
+            self._attach_side_inference_marks(conn, [result])
+            return result
         finally:
             conn.close()
 
@@ -3879,8 +3939,8 @@ class CAPIDatabase:
 
     def cleanup_old_records(
         self,
-        ok_retain_days: int = 14,
-        ng_retain_days: int = 90,
+        ok_retain_days: int = 180,
+        ng_retain_days: int = 180,
         tile_retain_days: int = 7,
         vacuum: bool = True,
         heatmap_retain_days: int = 0,
@@ -4163,9 +4223,18 @@ class CAPIDatabase:
                         SELECT t.id FROM tile_results t
                         JOIN image_results im ON t.image_result_id = im.id
                         JOIN inference_records ir ON im.record_id = ir.id
-                        WHERE ir.created_at < ?
+                        WHERE ir.created_at < ? OR (
+                            (
+                                (ir.ai_judgment IN ('OK', 'OK-i') AND ir.created_at < ?)
+                                OR (ir.ai_judgment NOT IN ('OK', 'OK-i') AND ir.created_at < ?)
+                            )
+                """ + (
+                    " AND ir.id NOT IN (SELECT id FROM cleanup_heatmap_retry_ids)"
+                    if heatmap_retry_record_ids else ""
+                ) + """
+                        )
                     )
-                """, (tile_cutoff,))
+                """, (tile_cutoff, ok_cutoff, ng_cutoff))
                 stats["scratch_rescue_review_deleted"] = cur.rowcount
 
                 # Step 1: 清除超過 tile_retain_days 的 tile_results
@@ -4184,7 +4253,7 @@ class CAPIDatabase:
                     DELETE FROM inference_records
                     WHERE (
                         ((ai_judgment = 'OK' OR ai_judgment = 'OK-i') AND created_at < ?)
-                        OR (ai_judgment != 'OK' AND created_at < ?)
+                        OR (ai_judgment NOT IN ('OK', 'OK-i') AND created_at < ?)
                     )
                 """ + (
                     " AND id NOT IN (SELECT id FROM cleanup_heatmap_retry_ids)"
@@ -6520,6 +6589,45 @@ class CAPIDatabase:
                     (cur.lastrowid,),
                 ).fetchone()
                 return self._format_mark_profile(row)
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def initialize_retention_policy(self, server_config: Dict) -> None:
+        """Migrate once; never overwrite a policy already saved by the user."""
+        from capi_retention import RETENTION_PARAM, RETENTION_DESCRIPTION, initial_retention_policy
+
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute(
+                    "SELECT 1 FROM config_params WHERE param_name = ?", (RETENTION_PARAM,)
+                ).fetchone():
+                    conn.commit()
+                    return
+                policy = initial_retention_policy(server_config)
+                encoded = json.dumps(policy, ensure_ascii=False)
+                conn.execute(
+                    "INSERT INTO config_params (param_name, param_value, param_type, description) "
+                    "VALUES (?, ?, 'dict', ?)",
+                    (RETENTION_PARAM, encoded, RETENTION_DESCRIPTION),
+                )
+                conn.execute(
+                    "INSERT INTO config_change_history "
+                    "(param_name, old_value, new_value, change_reason, changed_by) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        RETENTION_PARAM,
+                        json.dumps(server_config.get("cleanup", {}), ensure_ascii=False),
+                        encoded,
+                        "首次啟用資料保留設定：判定紀錄 180 天，其餘沿用原清理設定",
+                        "system",
+                    ),
+                )
+                conn.commit()
             except Exception:
                 conn.rollback()
                 raise

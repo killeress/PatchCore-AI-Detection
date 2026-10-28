@@ -16,6 +16,13 @@ import numpy as np
 import cv2
 
 
+@pytest.fixture(autouse=True)
+def mock_source_image_screening(monkeypatch):
+    """These route tests use fake paths; real image gates have their own test module."""
+    from capi_web import CAPIWebHandler
+    monkeypatch.setattr(CAPIWebHandler, "_check_train_new_panel_images", staticmethod(lambda *a, **k: None))
+
+
 def _make_handler(db_inst, path="/api/train/new/panels?days=3"):
     """建一個 minimal handler 物件，用於直接呼叫 _handle_* 方法。"""
     from capi_web import CAPIWebHandler
@@ -814,6 +821,7 @@ def test_handle_train_new_start_persists_manual_data_source(tmp_path):
         "type": "manual_folder",
         "batch_root": str(batch),
         "confirmed_normal": True,
+        "image_precheck": None,
     }
     assert kwargs["panel_paths"] == [str(panel)]
 

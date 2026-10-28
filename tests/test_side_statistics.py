@@ -108,6 +108,92 @@ def test_removed_part_of_candidate_is_not_a_retained_match():
     assert compare_side_record(row)["points"][0]["status"] == "filtered"
 
 
+def marked_row(rotated=False):
+    row = mapped_row(rotated)
+    row["payload"]["front_image"] = "W0F00000_120000.tif"
+    row["payload"]["evidence_context"] = {
+        "mark_rotation_applied": rotated,
+        "inference_marks": [{"source_image": "W0F00000_120000.tif", "name": "mark_binary",
+                             "front_bbox": [480, 280, 40, 40]}],
+    }
+    return row
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+def test_mark_point_can_clear_without_clearing_other_aoi_points(rotated):
+    row = marked_row(rotated)
+    row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(), coordinate(800, 400)]})
+    result = compare_side_record(row)
+    assert result["mark_suppressed"] == 1 and result["matched"] == 0
+    assert result["points"][0]["status"] == "mark_suppressed"
+    assert result["points"][0]["retained_candidate_ids"] == []
+    assert result["points"][1]["status"] == "unmatched"
+    # Report suggestions never modify the saved candidate or formal verdict.
+    assert row["payload"]["candidates"][0]["disposition"] == "retained"
+
+
+def test_mark_does_not_expand_with_report_tolerance_or_hide_nearby_defect():
+    row = marked_row()
+    row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(420.1, 200)]})
+    assert compare_side_record(row, 500)["mark_suppressed"] == 0
+    row = marked_row()
+    contour = np.array(row["payload"]["candidates"][0]["side_contour"]) + [25, 0]
+    row["payload"]["candidates"].append({"id": 2, "side_contour": contour.tolist(), "disposition": "retained"})
+    result = compare_side_record(row, 50)
+    assert result["mark_suppressed"] == 0
+    assert result["points"][0]["retained_candidate_ids"] == [2]
+    assert "範圍外" in result["points"][0]["reason"]
+
+
+@pytest.mark.parametrize("invalid", ["source", "rotation", "mapping", "incomplete", "failed", "bbox"])
+def test_mark_without_valid_evidence_never_recommends_ok(invalid):
+    row = marked_row()
+    if invalid == "source":
+        row["payload"]["evidence_context"]["inference_marks"][0]["source_image"] = "W0F00000_OLD.tif"
+    elif invalid == "rotation":
+        row["payload"]["evidence_context"]["mark_rotation_applied"] = True
+    elif invalid == "mapping":
+        row["payload"]["mapping"]["matrix"] = [[0] * 3] * 3
+    elif invalid == "incomplete":
+        row["payload"]["truncated"] = True
+    elif invalid == "failed":
+        row["status"] = "ERROR"
+    else:
+        row["payload"]["evidence_context"]["inference_marks"][0]["front_bbox"][0] = float("nan")
+    assert compare_side_record(row)["mark_suppressed"] == 0
+
+
+def test_mark_main_box_and_underline_are_copied_without_mutable_state():
+    from capi_side_report import inference_mark_evidence
+    image = {"mark_source_image": "W0F00000.tif", "mark_exclusion_regions": [
+        {"name": "mark_binary", "x1": 10, "y1": 20, "x2": 40, "y2": 50},
+        {"name": "mark_underline", "x1": 10, "y1": 55, "x2": 40, "y2": 60}]}
+    evidence = inference_mark_evidence([image, image])
+    assert len(evidence) == 2
+    image["mark_exclusion_regions"][0]["x1"] = 999
+    assert evidence[0]["front_bbox"] == [10, 20, 30, 30]
+    assert evidence[1]["name"] == "mark_underline"
+
+
+def test_old_report_uses_saved_inference_mark_without_mutating_observation(db):
+    row = marked_row()
+    row["payload"].pop("evidence_context")
+    row["payload"]["status"] = "CANDIDATES"
+    record_id, result_id = record(db, coords=row["aoi_machine_coords"], status="CANDIDATES", payload=row["payload"])
+    with db._get_conn() as conn:
+        conn.execute("INSERT INTO image_results(record_id, image_path, image_name, mark_bbox, mark_source_image) "
+                     "VALUES (?, ?, ?, ?, ?)", (record_id, "samples/W0F00000_120000.tif", "W0F00000_120000.tif",
+                                               "480,280,40,40", "W0F00000_120000.tif"))
+    for saved in (query(db)["rows"][0], db.get_side_statistics_record(result_id)):
+        assert compare_side_record(saved)["mark_suppressed"] == 1
+    assert db.get_side_white_result(result_id)["payload"] == row["payload"]
+    # An explicit empty current snapshot must not resurrect historical bboxes.
+    row["payload"]["evidence_context"] = {"inference_marks": []}
+    with db._get_conn() as conn:
+        conn.execute("UPDATE side_white_results SET payload=? WHERE id=?", (json.dumps(row["payload"]), result_id))
+    assert compare_side_record(db.get_side_statistics_record(result_id))["mark_suppressed"] == 0
+
+
 def test_missing_mapping_invalid_coordinates_and_failed_detection_stay_unverified():
     row = mapped_row()
     row["payload"]["mapping"] = {"status": "unavailable", "reason": "no paired front"}
@@ -189,11 +275,10 @@ def test_groups_and_summary_are_independent_of_pagination_and_include_not_run(db
         "total": 3, "candidates": 1, "clear": 1, "unavailable": 1,
         "unreviewed": 2, "confirmed": 0, "correct_clear": 0, "false_positive": 0, "missed": 1,
         "mapping_error": 0, "uncertain": 0, "verified": 1, "accuracy": 0.0}
-    assert result["summary"]["without_csjbl"]["total"] == 3
-    assert result["summary"]["without_csjbl"]["unavailable"] == 2
-    assert result["summary"]["without_csjbl"]["accuracy"] is None
+    assert set(result["summary"]) == {"with_csjbl"}
     assert query(db, machine_no="CAPI1", offset=1, limit=1)["summary"] == result["summary"]
-    assert query(db, machine_no="CAPI1", group="without_csjbl")["total"] == 3
+    with pytest.raises(ValueError, match="僅提供"):
+        query(db, machine_no="CAPI1", group="without_csjbl")
     assert query(db, glass_id="A_1")["total"] == 1
     assert query(db, glass_id="%")['total'] == 0  # literal search, not wildcard
     assert query(db, glass_id="' OR 1=1 --")["total"] == 0
@@ -201,7 +286,6 @@ def test_groups_and_summary_are_independent_of_pagination_and_include_not_run(db
     assert query(db, review="missed")["total"] == 1
     # Merged summary categories filter with comma-separated values.
     assert query(db, status="NOT_RUN,NO_IMAGE,ERROR")["total"] == 1
-    assert query(db, status="NOT_RUN,NO_IMAGE,ERROR", group="without_csjbl")["total"] == 2
     assert query(db, review="false_positive,missed")["total"] == 1
     assert query(db, review="confirmed,correct_clear")["total"] == 0
     with pytest.raises(ValueError):
@@ -213,7 +297,7 @@ def test_groups_and_summary_are_independent_of_pagination_and_include_not_run(db
 
 
 def test_review_persists_and_cannot_change_formal_verdict_or_overwrite_newer_review(db):
-    record_id, result_id = record(db, status="CANDIDATES")
+    record_id, result_id = record(db, coords=json.dumps({"W0F00000": [coordinate()]}), status="CANDIDATES")
     before = db.get_record_detail(record_id)
     saved = db.save_side_statistics_review(result_id, "confirmed", " defect verified ", " QA ", "")
     assert saved["review_note"] == "defect verified" and saved["reviewed_by"] == "QA"
@@ -224,7 +308,7 @@ def test_review_persists_and_cannot_change_formal_verdict_or_overwrite_newer_rev
     with pytest.raises(RuntimeError, match="其他人"):
         db.save_side_statistics_review(result_id, "missed", "stale", "QA2", "")
     db.save_side_statistics_review(result_id, "uncertain", "need evidence", "QA", saved["reviewed_at"])
-    summary = query(db, group="without_csjbl")["summary"]["without_csjbl"]
+    summary = query(db)["summary"]["with_csjbl"]
     assert summary["uncertain"] == 1 and summary["verified"] == 0 and summary["accuracy"] is None
     # A rerun deletes the old observation; an old form cannot annotate its replacement.
     with db._get_conn() as conn:
@@ -252,13 +336,13 @@ def test_detail_filters_keep_overview_scope_and_refresh_after_review(db):
     baseline = query(db, **scope)["summary"]
     assert baseline["with_csjbl"]["accuracy"] == 66.7
     assert baseline["with_csjbl"]["total"] == 4
-    assert baseline["without_csjbl"]["total"] == 1
+    assert "without_csjbl" not in baseline
     for filters, expected in (
         ({"review": "confirmed,correct_clear"}, 2),
         ({"review": "false_positive,missed"}, 1),
         ({"status": "CANDIDATES", "review": "confirmed,correct_clear"}, 1),
         ({"review": "mapping_error,uncertain"}, 0),
-        ({"group": "without_csjbl", "status": "NOT_RUN,NO_IMAGE,ERROR"}, 1),
+        ({"status": "NOT_RUN,NO_IMAGE,ERROR"}, 0),
     ):
         for include_rows in (True, False):
             filtered = query(db, **scope, **filters, limit=1, offset=1, include_rows=include_rows)
@@ -299,6 +383,19 @@ def test_report_row_escapes_annotations_and_shows_no_match_crops():
     assert '<img src=x onerror=bad()>' not in html
     assert '附近未找到候選' in html and '&amp;point=1' in html
     assert 'data-result-id="2"' in html and '儲存驗證結果' in html
+
+
+def test_mark_suggestion_is_shown_per_point_and_keeps_formal_ng_label():
+    from capi_side_report import REVIEW_DECISIONS
+    row = marked_row()
+    row.update(id=2, record_id=1, ai_judgment="NG", review_decision="unreviewed")
+    row["payload"]["candidates"] = []
+    row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(), coordinate(800, 400)]})
+    env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"))
+    html = env.get_template("_side_statistics_row.html").render(
+        row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
+    assert "MARK 屏蔽／可轉 OK：1 點" in html
+    assert "正式結果：NG" in html and "附近未找到候選" in html
 
 
 def test_side_report_dependencies_are_in_codeonly_release_inputs():
@@ -345,6 +442,12 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
     image_path = tmp_path / "side.jpg"
     cv2.imwrite(str(image_path), np.full((300, 500, 3), 90, np.uint8))
     payload["artifacts"]["side"] = str(image_path)
+    omit_path = tmp_path / "omit.jpg"
+    cv2.imwrite(str(omit_path), np.full((300, 500), 25, np.uint8))
+    payload["artifacts"]["omit"] = str(omit_path)
+    payload["preview_bounds"]["omit"] = payload["preview_bounds"]["side"]
+    payload["omit"] = {"image": "SPINIGBI _120000.tif", "status": "available",
+                       "coordinate_space": "side_detection_pixels", "size": [1200, 800]}
     _, result_id = record(db, coords=json.dumps({"W0F00000": [coordinate()]}), status="NO_CANDIDATES", payload=payload)
 
     class Handler(CAPIWebHandler):
@@ -377,7 +480,17 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
         query_url = "/api/ric/side-stats?start_date=2026-10-22&end_date=2026-10-22"
         data = json.loads(get(query_url))
         assert data["total"] == 1 and "附近未找到候選" in data["rows_html"]
+        assert data["conversion_summary"]["scope"]["denominator"] == 1
+        assert data["conversion_summary"]["scope"]["before_pct"] == 100
+        eligible = json.loads(get(query_url + "&conversion=eligible"))
+        assert eligible["total"] == 0 and eligible["conversion_summary"] == data["conversion_summary"]
+        with pytest.raises(HTTPError) as error:
+            get(query_url + "&conversion=unknown")
+        assert error.value.code == 400
         assert get(f"/api/ric/side-stats/image?id={result_id}&point=1").startswith(b"\x89PNG")
+        assert "OMIT 表面證據" in data["rows_html"] and "kind=omit" in data["rows_html"]
+        assert get(f"/api/side-white/image?id={result_id}&kind=omit").startswith(b"\xff\xd8")
+        assert get(f"/api/ric/side-stats/image?id={result_id}&kind=omit").startswith(b"\x89PNG")
         # With the AOI original still on disk, the point crop is cut from it untouched.
         original = np.random.default_rng(0).integers(0, 256, (800, 1200), dtype=np.uint8)
         assert cv2.imwrite(str(tmp_path / "SW0F00000.png"), original)
@@ -391,6 +504,19 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
         assert served.ndim == 2 and served.size < original.size
         top_left = np.argwhere(cv2.matchTemplate(original, served, cv2.TM_SQDIFF) == 0)
         assert len(top_left) == 1
+        yy, xx = np.mgrid[0:800, 0:1200]
+        omit_original = np.dstack([yy, xx, np.full_like(yy, 40000)]).astype(np.uint16)
+        omit_file = tmp_path / "SPINIGBI _120000.tif"
+        cv2.imwrite(str(omit_file), omit_original)
+        with opener.open(base + f"/api/ric/side-stats/image?id={result_id}&kind=omit&point=1", timeout=10) as response:
+            assert response.headers["X-Side-Image-Source"] == "original"
+            served = cv2.imdecode(np.frombuffer(response.read(), np.uint8), cv2.IMREAD_UNCHANGED)
+        top, left = map(int, served[0, 0, :2])
+        assert served.dtype == np.uint16
+        assert np.array_equal(served, omit_original[top:top + served.shape[0], left:left + served.shape[1]])
+        omit_file.unlink()
+        fallback = cv2.imdecode(np.frombuffer(get(f"/api/ric/side-stats/image?id={result_id}&kind=omit&point=1"), np.uint8), cv2.IMREAD_UNCHANGED)
+        assert np.all(fallback == 25)
         with pytest.raises(HTTPError) as error:
             get(query_url + "&tolerance=nan")
         assert error.value.code == 400

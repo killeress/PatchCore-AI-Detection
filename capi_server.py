@@ -77,6 +77,7 @@ from capi_station_adapter import (
 )
 from capi_white_frame import WhiteFrameInspection, inspect_white_frame_image
 from capi_database import CAPIDatabase, track_client_model_switch
+from capi_retention import RETENTION_PARAM, resolve_retention_policy, next_cleanup_time
 from capi_auto_model_switch import bundle_label, select_target_bundle
 from capi_heatmap import HeatmapManager
 from capi_web import (
@@ -474,14 +475,19 @@ def _split_image_dir_and_aoi_report(fields: List[str]) -> Tuple[str, str]:
     while len(image_fields) > 1 and not image_fields[0].strip():
         image_fields = image_fields[1:]
 
+    aoi_report_payload = ""
     for index in range(1, len(image_fields)):
         if _AOI_REPORT_PAYLOAD_START.match(image_fields[index].strip()):
-            return (
-                ";".join(image_fields[:index]).strip(),
-                ";".join(image_fields[index:]).strip(),
-            )
+            aoi_report_payload = ";".join(image_fields[index:]).strip()
+            image_fields = image_fields[:index]
+            break
 
-    return ";".join(image_fields).strip(), ""
+    # Empty trailing protocol fields are not part of the directory name.
+    # Keep embedded path semicolons and the AOI payload unchanged.
+    while len(image_fields) > 1 and not image_fields[-1].strip():
+        image_fields.pop()
+
+    return ";".join(image_fields).strip(), aoi_report_payload
 
 
 def parse_request(data: str) -> Dict[str, Any]:
@@ -2015,6 +2021,7 @@ class CAPIServer:
         db_cfg = self.server_config.get("database", {})
         db_path = db_cfg.get("path", "/data/capi_ai/capi_results.db")
         self.db = CAPIDatabase(db_path)
+        self.db.initialize_retention_policy(self.server_config)
         logger.info(f"Database: {db_path}")
         # 啟動回填各機台機種基線：重啟後第一片才能正確判斷是否切換
         try:
@@ -2909,20 +2916,10 @@ class CAPIServer:
         return self._cuda_memory_thread
 
     def _start_cleanup_scheduler(self):
-        cleanup_cfg = self.server_config.get("cleanup", {})
-        if not cleanup_cfg.get("enabled", False):
-            return None
-
         if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
             return self._cleanup_thread
         self._cleanup_stop_event.clear()
 
-        schedule_time  = cleanup_cfg.get("schedule_time", "02:00")
-        ok_retain      = cleanup_cfg.get("ok_retain_days", 14)
-        ng_retain      = cleanup_cfg.get("ng_retain_days", 90)
-        tile_retain    = cleanup_cfg.get("tile_retain_days", 7)
-        heatmap_retain = cleanup_cfg.get("heatmap_retain_days", 0)
-        vacuum         = cleanup_cfg.get("vacuum_after_cleanup", True)
         mark_shadow_cfg = self.server_config.get("mark_shadow", {}) or {}
         mark_shadow_db_path = (
             os.environ.get("CAPI_MARK_SHADOW_DB_PATH")
@@ -2931,30 +2928,52 @@ class CAPIServer:
         )
         mark_shadow_db_path = str(Path(mark_shadow_db_path).expanduser())
         mark_shadow_base_dir = str(Path(mark_shadow_db_path).parent)
-        hour, minute   = map(int, schedule_time.split(":"))
-
         def _scheduler_loop():
-            logger.info(
-                f"[Cleanup] Scheduler started, daily at {schedule_time} "
-                f"(OK={ok_retain}d, NG={ng_retain}d, tiles={tile_retain}d, "
-                f"heatmaps={heatmap_retain}d, MARK images={heatmap_retain}d)"
-            )
+            next_run = None
+            scheduled_time = None
+            last_run_date = None
+            previous_policy = None
             while self._running:
-                now    = datetime.now()
-                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if target <= now:
-                    target += timedelta(days=1)
-                sleep_secs = max(0, (target - now).total_seconds())
-                if self._cleanup_stop_event.wait(sleep_secs) or not self._running:
+                if self._cleanup_stop_event.is_set():
+                    return
+                # Re-read the persisted policy even while disabled. Settings
+                # changes take effect without restarting or loading ML models.
+                try:
+                    db = getattr(self, "db", None)
+                    saved = db.get_config_param(RETENTION_PARAM) if db else None
+                    policy = resolve_retention_policy(
+                        self.server_config, saved["decoded_value"] if saved else None,
+                    )
+                except Exception as exc:
+                    logger.error("[Cleanup] Invalid/unavailable policy; skipping cleanup: %s", exc)
+                    next_run = None
+                    self._cleanup_stop_event.wait(60)
+                    continue
+                if policy != previous_policy:
+                    logger.info("[Cleanup] Active policy: %s", policy)
+                    previous_policy = policy
+                if not policy["enabled"]:
+                    next_run = None
+                    self._cleanup_stop_event.wait(60)
+                    continue
+                now = datetime.now()
+                if next_run is None or scheduled_time != policy["schedule_time"]:
+                    scheduled_time = policy["schedule_time"]
+                    next_run = next_cleanup_time(now, scheduled_time, last_run_date)
+                sleep_secs = (next_run - now).total_seconds()
+                if sleep_secs > 0:
+                    self._cleanup_stop_event.wait(min(sleep_secs, 60))
+                    continue
+                if not self._running or self._cleanup_stop_event.is_set():
                     return
                 try:
                     logger.info("[Cleanup] Starting scheduled database cleanup...")
                     stats = self.db.cleanup_old_records(
-                        ok_retain,
-                        ng_retain,
-                        tile_retain,
-                        vacuum,
-                        heatmap_retain,
+                        policy["ok_retain_days"],
+                        policy["ng_retain_days"],
+                        policy["tile_retain_days"],
+                        policy["vacuum_after_cleanup"],
+                        policy["heatmap_retain_days"],
                         heatmap_base_dir=self.heatmap_manager.base_dir,
                         mark_shadow_base_dir=mark_shadow_base_dir,
                         mark_shadow_db_path=mark_shadow_db_path,
@@ -2976,6 +2995,9 @@ class CAPIServer:
                     )
                 except Exception as e:
                     logger.error(f"[Cleanup] Failed: {e}")
+                finally:
+                    last_run_date = now.date()
+                    next_run = None
 
         self._cleanup_thread = threading.Thread(
             target=_scheduler_loop,
@@ -4017,8 +4039,14 @@ class CAPIServer:
                 )
 
             if side_white_enabled:
-                self._save_side_white_result(record_id, parsed, heatmap_info, side_white_rotate_180,
-                                             side_white_params, side_white_context)
+                from capi_side_white import prepare_aoi_context
+                side_context = prepare_aoi_context(
+                    side_white_context, aoi_machine_coords_str, ng_details, image_results_data,
+                    rotate_180=side_white_rotate_180,
+                )
+                if side_context is not None:
+                    self._save_side_white_result(record_id, parsed, heatmap_info, side_white_rotate_180,
+                                                 side_white_params, side_context)
 
             dup_tag = " [DUPLICATE]" if is_duplicate else ""
             save_time = time.time() - save_start

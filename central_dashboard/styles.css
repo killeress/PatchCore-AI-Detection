@@ -1696,6 +1696,18 @@ body[data-mode="history"] .refresh-block {
     border-color: #72404a;
 }
 
+.status-pill[data-training="true"],
+:root[data-theme="dark"] .status-pill[data-training="true"] {
+    color: var(--primary-dark);
+    background: var(--surface-blue);
+    border-color: var(--primary);
+}
+
+.status-pill[data-training="true"]::before {
+    background: var(--primary);
+    box-shadow: none;
+}
+
 :root[data-theme="dark"] .alert-panel {
     background: #2b2114;
     border-color: #68512f;

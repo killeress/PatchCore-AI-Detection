@@ -1872,6 +1872,41 @@
     .btn-delete-zone:hover {
         opacity: 1;
     }
+    .retention-section { border-top: 3px solid #38bdf8; }
+    .retention-status { margin-left: auto; color: #7dd3fc; font-size: 0.8rem; }
+    .retention-intro { padding: 16px 20px; color: var(--text-muted); font-size: 0.86rem; line-height: 1.8; }
+    #retention-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+    #retention-fields:disabled { opacity: 0.65; }
+    .retention-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); border-top: 1px solid var(--border); }
+    .retention-row { display: flex; align-items: center; gap: 18px; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .retention-row > div:first-child { flex: 1; min-width: 0; }
+    .retention-row label, .retention-schedule > label, .retention-reason label { font-size: 0.88rem; font-weight: 600; }
+    .retention-row p, .retention-schedule p { font-size: 0.8rem; line-height: 1.7; color: var(--text-muted); margin: 6px 0 0; }
+    .retention-days { display: flex; align-items: center; gap: 8px; color: var(--text-muted); }
+    .retention-section input:not([type="checkbox"]) { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; font: inherit; }
+    .retention-days input { width: 94px; text-align: right; }
+    .retention-section input:focus { outline: 2px solid #38bdf8; outline-offset: 2px; }
+    .retention-schedule { padding: 20px; border-left: 1px solid var(--border); background: rgba(15,23,42,0.25); }
+    .retention-schedule > label { display: flex; margin-top: 22px; }
+    .retention-schedule > label:first-child { margin-top: 0; }
+    .retention-schedule input[type="time"] { width: 100%; margin-top: 10px; box-sizing: border-box; }
+    .retention-check { align-items: center; gap: 10px; cursor: pointer; }
+    .retention-check input { accent-color: #38bdf8; width: 17px; height: 17px; }
+    .retention-notes { padding: 18px 20px; font-size: 0.82rem; line-height: 1.8; border-top: 1px solid var(--border); }
+    .retention-notes strong { color: #7dd3fc; }
+    .retention-notes ul { margin: 8px 0 0; padding-left: 20px; color: var(--text-muted); }
+    .retention-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; padding: 18px 20px; border-top: 1px solid var(--border); }
+    .retention-reason { flex: 1; min-width: 230px; }
+    .retention-reason label { display: block; margin-bottom: 8px; }
+    .retention-reason input { width: 100%; box-sizing: border-box; }
+    .retention-error { color: #fca5a5; padding: 0 20px 16px; font-size: 0.85rem; }
+    .retention-error:empty { display: none; }
+    @media (max-width: 900px) {
+        .retention-layout { grid-template-columns: 1fr; }
+        .retention-schedule { border-left: 0; }
+        .retention-status { margin-left: 0; }
+        .retention-section .settings-section-header { flex-wrap: wrap; }
+    }
 </style>
 {% endblock %}
 
@@ -1896,7 +1931,7 @@
             <path stroke-linecap="round" stroke-linejoin="round"
                 d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
         </svg>
-        <span>修改設定後，需點擊右方按鈕重新載入才會生效（重載期間推論暫停）</span>
+        <span>模型參數可由右方按鈕重新載入（重載期間推論暫停）；資料保留設定儲存後會自動套用。</span>
     </div>
     <button class="btn-reload" id="btn-reload" onclick="reloadConfig()">
         <span class="spinner"></span>
@@ -2335,6 +2370,7 @@
     // ── Init ──
     let currentTab = 'patchcore';
     {% include "_side_white_settings.js" %}
+    {% include "_retention_settings.js" %}
     let exCurrentImagePath = '';
     let exInitialProductCode = '';
     let exInitialQueryCoords = null;
@@ -3731,6 +3767,7 @@
             'report-result',
             'within-spec',
             'auto-model-switch',
+            'data-retention',
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'mark-shadow' : null,
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'side-white' : null,
             SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? 'accounts' : null,
@@ -3751,6 +3788,7 @@
             <button class="settings-tab-btn ${currentTab === 'report-result' ? 'active' : ''}" data-target="report-result" onclick="switchTab('report-result')">📤 回報結果設定</button>
             <button class="settings-tab-btn ${currentTab === 'within-spec' ? 'active' : ''}" data-target="within-spec" onclick="switchTab('within-spec')">📏 規格內判定</button>
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
+            <button class="settings-tab-btn ${currentTab === 'data-retention' ? 'active' : ''}" data-target="data-retention" onclick="switchTab('data-retention')">🗄️ 資料保留</button>
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'mark-shadow' ? 'active' : ''}" data-target="mark-shadow" onclick="switchTab('mark-shadow')">🔬 Mark PPOCR檢查</button>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'side-white' ? 'active' : ''}" data-target="side-white" onclick="switchTab('side-white')">側拍白畫面結果</button>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<a class="settings-tab-btn" href="/white-frame" style="text-decoration:none;">🖼️ 白框總表</a>` : ''}
@@ -4163,6 +4201,7 @@
             ${renderWithinSpecPane(withinSpecParam, centralAccountLocation)}
             ${renderMarkShadowPane()}
             ${renderSideWhitePane()}
+            ${renderRetentionPane()}
         `;
 
         // 延遲初始化可視化工具

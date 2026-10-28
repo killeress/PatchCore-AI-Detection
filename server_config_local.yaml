@@ -84,8 +84,8 @@ logging:
 cleanup:
   enabled: false
   schedule_time: "03:00"
-  ok_retain_days: 7
-  ng_retain_days: 30
+  ok_retain_days: 180
+  ng_retain_days: 180
   tile_retain_days: 3
   heatmap_retain_days: 30
   vacuum_after_cleanup: true

@@ -11,12 +11,13 @@ import numpy as np
 
 from capi_config import normalize_side_white_params
 
-ALGORITHM = "side-white-cv-v3"
+ALGORITHM = "side-white-cv-v5"
 _SIDE_NAME = re.compile(r"^(.*?)SW0F00000(_?\d{6})?$", re.IGNORECASE)
 _IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 
 
-def inspect_side_white_folder(folder, output_dir, *, rotate_180=False, params=None, context=None):
+def inspect_side_white_folder(folder, output_dir, *, rotate_180=False, params=None, context=None,
+                              side_name=None, include_all_candidates=False):
     """Shared live/rerun path; missing images and inspection failures replace stale results."""
     payload = {"algorithm": ALGORITHM, "shadow_only": True, "status": "NO_IMAGE",
                "bomb_source_prefix": "W0F00000", "candidates": [], "artifacts": {},
@@ -27,7 +28,7 @@ def inspect_side_white_folder(folder, output_dir, *, rotate_180=False, params=No
         payload["parameters"] = dict(params)
         payload["evidence_context"] = {k: v for k, v in (context or {}).items() if k != "config"}
         payload["bombs"], _ = _bomb_geometry(context or {}, None, None, (1, 1), params)
-        side, front = find_side_white_pair(Path(folder))
+        side, front = find_side_white_pair(Path(folder), side_name=side_name)
         if side is not None:
             try:
                 omit, detector, omit_info = load_omit_evidence(folder, side, context or {}, rotate_180)
@@ -36,20 +37,24 @@ def inspect_side_white_folder(folder, output_dir, *, rotate_180=False, params=No
                 omit_info = {"status": "unavailable", "reason": f"OMIT 載入失敗：{exc}"}
             payload = inspect_side_white_image(side, front, Path(output_dir), rotate_180=rotate_180,
                                                params=params, context=context, omit_image=omit,
-                                               dust_detector=detector, omit_info=omit_info)
+                                               dust_detector=detector, omit_info=omit_info,
+                                               include_all_candidates=include_all_candidates)
     except Exception as exc:
         payload.update(status="ERROR", reason=str(exc))
     return payload
 
 
-def find_side_white_pair(folder: Path):
+def find_side_white_pair(folder: Path, *, side_name=None):
     """Prefer exact acquisition names, then a unique white pair for the same glass."""
     files = [p for p in Path(folder).iterdir()
              if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS]
     sides = [p for p in files if _SIDE_NAME.fullmatch(p.stem)]
     if not sides:
         return None, None
-    side = max(sides, key=lambda p: (p.stat().st_mtime_ns, p.name))
+    choices = sides if side_name is None else [p for p in sides if p.name == side_name]
+    if not choices:
+        return None, None
+    side = max(choices, key=lambda p: (p.stat().st_mtime_ns, p.name))
     match = _SIDE_NAME.fullmatch(side.stem)
     front_stem = (match[1] + "W0F00000" + (match[2] or "")).upper()
     fronts = [p for p in files if p.stem.upper() == front_stem]
@@ -223,6 +228,43 @@ def _preview(gray, quad):
                         cv2.COLOR_GRAY2BGR)
 
 
+def _candidate_preview_scope(payload):
+    """Select annotations by AOI proximity without changing any detection evidence."""
+    from capi_side_report import compare_side_record
+
+    radius = normalize_side_white_params(payload.get("parameters"))["csjbl_preview_radius_product_px"]
+    coords = {}
+    for point in payload.get("evidence_context", {}).get("aoi_csjbl_points", []):
+        coords.setdefault(point.get("image_prefix", ""), []).append(point)
+    comparison = compare_side_record(
+        {"payload": payload, "status": payload["status"], "aoi_machine_coords": coords}, tolerance=radius)
+    selected = {candidate_id for point in comparison["points"]
+                if point["status"] != "unavailable" for candidate_id in point["candidate_ids"]}
+    candidates = payload.get("candidates", [])
+    reason = ""
+    if not comparison["has_csjbl"]:
+        reason = "沒有 AOI CSJBL 座標，未顯示黃框。"
+    elif comparison["mapped"] < len(comparison["points"]):
+        reason = "有 CSJBL 座標無法映射，僅顯示可對應黃框。"
+    return {"scope": "csjbl_nearby", "tolerance_product_px": radius,
+            "candidate_ids": [c["id"] for c in candidates if c["id"] in selected],
+            "total": len(candidates), "reason": reason}
+
+
+def _draw_candidate_previews(views, candidates):
+    for item in candidates:
+        bx, by, bw, bh = item["side_bbox"]
+        for name in ("side", "residual"):
+            view = views[name]
+            cv2.rectangle(view, (bx - 5, by - 5), (bx + bw + 5, by + bh + 5), (0, 210, 255), 2)
+            cv2.putText(view, str(item["id"]), (bx, max(18, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 210, 255), 2)
+        if views["front"] is not None:
+            contour = np.rint(item["front_contour"]).astype(np.int32)
+            cv2.polylines(views["front"], [contour], True, (0, 210, 255), 3)
+            px, py = np.rint(item["front_xy"]).astype(int)
+            cv2.putText(views["front"], str(item["id"]), (px + 8, py), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 210, 255), 3)
+
+
 def _save_preview(path, image):
     scale = min(1, 1800 / max(image.shape[:2]))
     if scale < 1:
@@ -256,6 +298,17 @@ def snapshot_context(config, edge_config, parsed):
             "product_resolution": list(resolve_product_resolution(model_id, getattr(config, "model_resolution_map", None)))}
 
 
+def prepare_aoi_context(context, coords, ng_details="", images=(), *, rotate_180=False):
+    """Gate automatic inspection and bind MARK evidence to the same inference."""
+    from capi_side_report import csjbl_points, inference_mark_evidence
+    points, _ = csjbl_points(coords, ng_details)
+    if not points:
+        return None
+    return {**(context or {}), "aoi_scope": "with_csjbl",
+            "aoi_csjbl_points": copy.deepcopy(points),
+            "inference_marks": inference_mark_evidence(images), "mark_rotation_applied": bool(rotate_180)}
+
+
 def load_omit_evidence(folder, side_path, context, rotate_180):
     """Pair side-camera SPINIGBI with SW0F00000; never substitute front OMIT."""
     from capi_inference import CAPIInferencer
@@ -280,6 +333,10 @@ def load_omit_evidence(folder, side_path, context, rotate_180):
     choices = exact or matches
     if len(choices) != 1:
         return None, None, {**info, "reason": "缺少側拍 OMIT（SPINIGBI）或無法唯一配對"}
+    same_glass_sides = [p for p in files if (match := _SIDE_NAME.fullmatch(p.stem))
+                        and match[1].casefold() == prefix]
+    if not exact and len(same_glass_sides) != 1:
+        return None, None, {**info, "reason": "同片有多次側拍拍攝，OMIT 時間不符，無法確認同次影像"}
     path = choices[0]
     info.update(image=path.name, pairing="exact_acquisition" if exact else "unique_side_omit")
     raw = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
@@ -438,12 +495,65 @@ def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 22
     return canvas
 
 
-def _candidate_evidence(item, side, front, omit, detector, omit_info, transform, zone_mask, residual, params):
+def _mask_regions(mask, origin):
+    """Keep holes: an OMIT ring must not claim evidence for its empty centre."""
+    contours, hierarchy = cv2.findContours(mask.astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return []
+    return [{"contour": (contour.reshape(-1, 2) + origin).tolist(),
+             "holes": [(child.reshape(-1, 2) + origin).tolist() for j, child in enumerate(contours)
+                       if hierarchy[0, j, 3] == i]}
+            for i, contour in enumerate(contours) if hierarchy[0, i, 3] == -1]
+
+
+def _omit_halo_mask(side, residual, item, comparison, bounds, remaining, core, threshold, panel_quad):
+    """Remove only positive residual caused by an OMIT-supported dark object's blur.
+
+    Reconstruct the surface locally, then apply the *change* in residual so the
+    original illumination correction remains intact. Never clear dark support or
+    use this interior approximation near a panel edge.
+    """
+    x, y, w, h = item["side_bbox"]
+    empty = np.zeros((h, w), bool)
+    if panel_quad is None:
+        return empty
+    # Five sigma covers the background kernel; edge profiles span another 80 px.
+    padding = 128
+    if any(cv2.pointPolygonTest(np.asarray(panel_quad, np.float32), (float(px), float(py)), True) < padding + 80
+           for px, py in ((x, y), (x + w - 1, y), (x, y + h - 1), (x + w - 1, y + h - 1))):
+        return empty
+    fx1, fy1, fx2, fy2 = bounds
+    _, labels = cv2.connectedComponents((comparison > 0).astype(np.uint8))
+    cy, cx = np.nonzero(core)
+    touching = np.unique(labels[cy + y - fy1, cx + x - fx1])
+    touching = touching[touching != 0]
+    if not touching.size:
+        return empty
+    x1, y1 = max(0, fx1 - padding), max(0, fy1 - padding)
+    x2, y2 = min(side.shape[1], fx2 + padding), min(side.shape[0], fy2 + padding)
+    source = side[y1:y2, x1:x2]
+    fill = np.zeros(source.shape, np.uint8)
+    fill[fy1-y1:fy2-y1, fx1-x1:fx2-x1] = np.isin(labels, touching).astype(np.uint8) * 255
+    reconstructed = cv2.inpaint(source, fill, 3, cv2.INPAINT_TELEA)
+    delta = reconstructed.astype(np.float32) - source.astype(np.float32)
+    correction = cv2.GaussianBlur(delta, (0, 0), 2) - cv2.GaussianBlur(delta, (0, 0), 24)
+    original = residual[y:y+h, x:x+w]
+    corrected = original + correction[y-y1:y-y1+h, x-x1:x-x1+w]
+    return remaining & (original > threshold) & (np.abs(corrected) <= threshold)
+
+
+def _candidate_evidence(item, side, front, omit, detector, omit_info, transform, zone_mask, residual, params,
+                        *, mark_mask=None, detection_threshold=None, panel_quad=None):
     """Evaluate actual CV support pixels, not the candidate bounding rectangle."""
     x, y, w, h = item["side_bbox"]
     support = item.pop("_mask").astype(bool)
     remaining = support & (zone_mask[y:y + h, x:x + w] == 0)
     item["excluded_area_px"] = int(np.count_nonzero(support & ~remaining))
+    item["mark_excluded_area_px"] = 0
+    if mark_mask is not None:
+        mark_local = mark_mask[y:y + h, x:x + w] > 0
+        item["mark_excluded_area_px"] = int(np.count_nonzero(support & mark_local))
+        remaining &= ~mark_local
     item["dust"] = {"status": "unavailable", "reason": omit_info.get("reason", "缺少 OMIT"), "overlap_ratio": None}
     item["crop_bounds"] = {"side": list(_crop_bounds(item["side_contour"], side.shape, params["crop_padding_px"]))}
     mask, front_bounds = None, None
@@ -457,13 +567,14 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
         item["crop_bounds"]["omit"] = list(omit_bounds)
     if params["dust_mode"] == "off":
         item["dust"].update(status="disabled", reason="灰塵判斷未啟用")
-    elif aligned and detector is not None:
+    elif aligned and detector is not None and omit_info.get("status") != "unavailable":
         fx1, fy1, fx2, fy2 = omit_bounds
         if fx2 > fx1 and fy2 > fy1:
             try:
                 _, mask, _, detail = detector(omit[fy1:fy2, fx1:fx2])
-                if mask is None or mask.shape != (fy2 - fy1, fx2 - fx1):
+                if mask is None or mask.shape != (fy2 - fy1, fx2 - fx1) or not np.isfinite(mask).all():
                     raise ValueError("OMIT 遮罩尺寸無效")
+                mask = (mask > 0).astype(np.uint8) * 255
                 margin = params["mapping_margin_px"]
                 comparison = cv2.dilate(mask, np.ones((margin * 2 + 1, margin * 2 + 1), np.uint8)) if margin else mask
                 yy, xx = np.nonzero(support)
@@ -472,12 +583,33 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
                 if not in_crop.all():
                     raise ValueError("側拍候選超出 OMIT 有效範圍")
                 dust_local[yy, xx] = comparison[my, mx] > 0
-                ratio = float(np.count_nonzero(dust_local & remaining) / max(1, np.count_nonzero(remaining)))
-                suspected = ratio >= params["dust_overlap_ratio"]
+                compared_area = int(np.count_nonzero(remaining))
+                overlap_area = int(np.count_nonzero(dust_local & remaining))
+                base_local = np.zeros((h, w), bool)
+                base_local[yy, xx] = mask[my, mx] > 0
+                ratio = float(overlap_area / max(1, compared_area))
+                threshold = detection_threshold if detection_threshold is not None else params["min_contrast_gray"]
+                core = remaining & (residual[y:y+h, x:x+w] < -threshold)
+                core_area = int(np.count_nonzero(core))
+                core_ratio = float(np.count_nonzero(core & dust_local) / max(1, core_area))
+                core_match = core_area >= params["min_area_px"] and core_ratio >= params["dust_overlap_ratio"]
+                suspected = ratio >= params["dust_overlap_ratio"] or core_match
                 item["dust"].update(status="suspected" if suspected else "clear", reason=str(detail),
-                                    overlap_ratio=round(ratio, 4), margin_px=margin)
+                                    overlap_ratio=round(ratio, 4), margin_px=margin,
+                                    mask_overlap_ratio=round(float(np.count_nonzero(base_local & remaining) / max(1, compared_area)), 4),
+                                    compared_area_px=compared_area, overlap_area_px=overlap_area,
+                                    uncovered_area_px=compared_area - overlap_area,
+                                    core_area_px=core_area, core_overlap_ratio=round(core_ratio, 4) if core_area else None,
+                                    match_basis="support" if ratio >= params["dust_overlap_ratio"] else "dark_core" if core_match else "none",
+                                    halo_removed_area_px=0)
                 if suspected and params["dust_mode"] == "suppress":
-                    remaining &= ~dust_local
+                    halo = (_omit_halo_mask(side, residual, item, comparison, omit_bounds, remaining, core,
+                                           threshold, panel_quad) if core_match else np.zeros_like(remaining))
+                    item["dust"]["halo_removed_area_px"] = int(np.count_nonzero(halo & ~dust_local))
+                    # Only direct OMIT coverage may authorize a point-level OK;
+                    # inferred halo pixels must never become positive evidence.
+                    item["dust"]["suppressed_regions"] = _mask_regions(dust_local & remaining, [x, y])
+                    remaining &= ~(dust_local | halo)
                     item["dust"]["status"] = "suppressed"
             except Exception as exc:
                 item["dust"].update(status="unavailable", reason=f"灰塵證據無法產生：{exc}")
@@ -491,6 +623,7 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
     contours, _ = cv2.findContours(remaining.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     item["remaining_contours"] = [(c.reshape(-1, 2) + [x, y]).tolist() for c in contours]
     item["disposition"] = ("retained" if remaining.any() else
+                           "mark_suppressed" if item["mark_excluded_area_px"] == int(support.sum()) else
                            "dust_suppressed" if item["dust"]["status"] == "suppressed" else "excluded")
     # Keep the side crop unannotated so overlays cannot obscure the defect.
     panels = [_panel(side, item["crop_bounds"]["side"], f"Side #{item['id']}"),
@@ -503,7 +636,7 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
 def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output_dir: Path,
                              *, rotate_180: bool = False, params: Optional[dict] = None,
                              context: Optional[dict] = None, omit_image=None, dust_detector=None,
-                             omit_info: Optional[dict] = None) -> dict:
+                             omit_info: Optional[dict] = None, include_all_candidates: bool = False) -> dict:
     """Detect in camera pixels, then map contours; missing mapping never implies OK."""
     started = time.perf_counter()
     payload = {"algorithm": ALGORITHM, "shadow_only": True, "status": "ERROR",
@@ -514,6 +647,8 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
     context = context or {}
     omit_info = dict(omit_info or {"status": "unavailable", "reason": "缺少 OMIT"})
     omit_info["coordinate_space"] = "side_detection_pixels"
+    if omit_image is not None:
+        omit_info["size"] = [omit_image.shape[1], omit_image.shape[0]]
     payload["evidence_context"] = {k: v for k, v in context.items() if k != "config"}
     payload["omit"] = omit_info
     config = context.get("config")
@@ -552,8 +687,19 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
             side, quad, params, limit=None, force_mask=force_mask)
         _match_bombs(candidates, bombs)
         zone_mask, zones = _zone_mask(context, side.shape, transform, params)
+        from capi_side_report import mapped_inference_marks
+        marks = mapped_inference_marks(payload)
+        mark_mask = np.zeros(side.shape, np.uint8)
+        if marks:
+            front_mark_mask = np.zeros(front.shape, np.uint8)
+            for mark in marks:
+                x, y, w, h = mark["front_bbox"]
+                x1, y1, x2, y2 = np.ceil([x, y, x + w, y + h]).astype(int)
+                front_mark_mask[y1:y2, x1:x2] = 255
+            mark_mask = cv2.warpPerspective(front_mark_mask, np.linalg.inv(transform),
+                                           side.shape[::-1], flags=cv2.INTER_NEAREST)
         payload.update(candidates=candidates, exclusions=exclusions, configured_zones=zones,
-                       bombs=bombs, threshold_gray=round(threshold, 3))
+                       inference_mark_regions=marks, bombs=bombs, threshold_gray=round(threshold, 3))
         payload["exclusion_status"] = ("disabled" if not params["apply_exclusions"] else
                                        "unavailable" if transform is None else "applied")
         output_dir = Path(output_dir)
@@ -573,7 +719,8 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                 item["front_contour"] = cv2.perspectiveTransform(contour, transform).reshape(-1, 2).tolist()
             support = item["_mask"]
             composite = _candidate_evidence(item, side, front, omit_image, dust_detector, omit_info,
-                                            transform, zone_mask, residual, params)
+                                            transform, zone_mask, residual, params, mark_mask=mark_mask,
+                                            detection_threshold=threshold, panel_quad=quad)
             item["excluded_zone_names"] = []
             if item["excluded_area_px"]:
                 bx, by, bw, bh = item["side_bbox"]
@@ -603,6 +750,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                 bomb["overlaps_exclusion"] |= bool(np.any((path_mask > 0) & (zone_mask > 0)))
         summary = {"raw": len(candidates), "retained": sum(c["disposition"] == "retained" and not c["bomb_ids"] for c in candidates),
                    "excluded": sum(c["disposition"] == "excluded" for c in candidates),
+                   "mark_suppressed": sum(c["disposition"] == "mark_suppressed" for c in candidates),
                    "dust_suppressed": sum(c["disposition"] == "dust_suppressed" for c in candidates),
                    "dust_suspected": sum(c["dust"]["status"] == "suspected" for c in candidates),
                    "bomb_candidates": sum(bool(c["bomb_ids"]) for c in candidates),
@@ -619,26 +767,32 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
             cv2.putText(side_view, "MASK", (bx, max(18, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, .6, (230, 150, 60), 2)
         for zone in zones:
             cv2.polylines(side_view, [np.rint(zone["side_polygon"]).astype(np.int32)], True, (255, 150, 50), 3)
+        for mark in marks:
+            for view, key in ((side_view, "side_polygon"), (front_view, "front_polygon")):
+                if view is not None:
+                    polygon = np.rint(mark[key]).astype(np.int32)
+                    cv2.polylines(view, [polygon], True, (230, 150, 60), 2)
+                    cv2.putText(view, "MARK", tuple(polygon[0]), cv2.FONT_HERSHEY_SIMPLEX, .6, (230, 150, 60), 2)
         for bomb in bombs:
             if bomb.get("side_points"):
                 pts = np.rint(bomb["side_points"]).astype(np.int32)
                 cv2.polylines(side_view, [np.rint(bomb["side_tolerance_polygon"]).astype(np.int32)], True, (255, 0, 255), 2)
                 cv2.putText(side_view, f"B{bomb['id']}", tuple(pts[0]), cv2.FONT_HERSHEY_SIMPLEX, .8, (255, 0, 255), 2)
-        for item in candidates:
-            bx, by, bw, bh = item["side_bbox"]
-            for view in (side_view, residual_view):
-                cv2.rectangle(view, (bx - 5, by - 5), (bx + bw + 5, by + bh + 5), (0, 210, 255), 2)
-                cv2.putText(view, str(item["id"]), (bx, max(18, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 210, 255), 2)
-            if front_view is not None:
-                contour = np.rint(item["front_contour"]).astype(np.int32)
-                cv2.polylines(front_view, [contour], True, (0, 210, 255), 3)
-                px, py = np.rint(item["front_xy"]).astype(int)
-                cv2.putText(front_view, str(item["id"]), (px + 8, py), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 210, 255), 3)
+        payload["candidate_display"] = _candidate_preview_scope(payload)
+        selected = set(payload["candidate_display"]["candidate_ids"])
+        views = {"side": side_view, "residual": residual_view, "front": front_view}
+        all_views = {}
+        if include_all_candidates:
+            full = {name: view.copy() if view is not None else None for name, view in views.items()}
+            _draw_candidate_previews(full, candidates)
+            all_views = {name + "_all": view for name, view in full.items()}
+        _draw_candidate_previews(views, [c for c in candidates if c["id"] in selected])
         # Unannotated, unadjusted copies: report crops must show the defect as captured.
         side_clean = side
         front_clean = front if front_view is not None else None
-        for name, view in (("side", side_view), ("residual", residual_view), ("front", front_view),
-                           ("side_clean", side_clean), ("front_clean", front_clean)):
+        omit_view = omit_image if omit_image is not None and omit_image.shape == side.shape else None
+        for name, view in {**views, **all_views, "side_clean": side_clean, "front_clean": front_clean,
+                           "omit": omit_view}.items():
             if view is not None:
                 # Show the panel at a useful size; coordinates remain those of the full image.
                 preview_quad = front_quad if name.startswith("front") else quad

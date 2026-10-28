@@ -1,0 +1,30 @@
+<div id="tab-side-white" class="tab-content">
+    {% include "_side_white_styles.html" %}
+    <form id="sw-debug-form" class="sw-card" onsubmit="runSideWhiteDebug(event)">
+        <div class="sw-head"><h3>側拍白畫面 DEBUG 推論</h3><span class="sw-badge">DEBUG ONLY</span></div>
+        <p class="sw-note">沿用目前參數設定；調整僅供本次測試。</p>
+        <p id="sw-debug-source" class="sw-note"></p>
+        <fieldset id="sw-debug-fields" disabled style="border:0;padding:0;margin:0;min-width:0">
+            <div class="sw-param-grid">
+                <label style="grid-column:1/-1">側拍影像／資料夾
+                    <input id="sw-debug-path" required placeholder="D:\images\玻璃ID\SW0F00000_113225.tif">
+                    <span class="sw-note">自動配對正拍與 OMIT。</span>
+                </label>
+                <label>機種 ID<input id="sw-debug-model" placeholder="未填時由路徑判斷"></label>
+                <label>影像旋轉 180°<input id="sw-debug-rotate" type="checkbox"></label>
+            </div>
+            <div id="sw-debug-params" class="sw-param-grid"></div>
+        </fieldset>
+        <div class="sw-controls">
+            <label><input id="sw-debug-show-all" type="checkbox" onchange="updateSideWhiteDebugCandidateDisplay()">顯示全圖候選</label>
+            <span class="sw-note">切換立即生效。</span>
+        </div>
+        <div class="sw-controls">
+            <button id="sw-debug-run" class="sw-btn" type="submit" disabled>執行側拍測試</button>
+            <button id="sw-debug-reset" class="sw-btn" type="button" onclick="loadSideWhiteDebugDefaults()">重新載入設定參數</button>
+            <a id="sw-debug-record" hidden target="_blank" rel="noopener">返回推論紀錄 →</a>
+        </div>
+        <p id="sw-debug-message" class="sw-note" role="status" aria-live="polite"></p>
+    </form>
+    <div id="sw-debug-result" aria-live="polite"></div>
+</div>

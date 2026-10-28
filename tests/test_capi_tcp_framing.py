@@ -60,6 +60,9 @@ def test_residue_does_not_hide_a_following_request_even_when_aoi_marker_is_split
     NEXT_REQUEST,
     b"AOI@G1;MODEL;CAPI39;1920,1200;OK;;;C:\\images\\different-id",
     b"AOI@G1;MODEL;CAPI39;1920,1200;HY;;();//images/G1",
+    b"AOI@G1;MODEL;AAPI09-12;1920,1200;OK;//images/G1;",
+    b"AOI@G1;MODEL;AAPI09-12;1920,1200;OK;;;C:\\images\\G1; ;\t;",
+    b"AOI@G1;MODEL;AAPI09-12;1920,1200;NG;;();//images/G1;;W0F00000,CDK2(123,456);",
     b"AOI@G1;MODEL;AAPI09;1920,1200;NG;//images/different-id;W0F00000,CDK2(123,456)",
 ])
 def test_legacy_syntax_accepts_supported_request_shapes(request_bytes):

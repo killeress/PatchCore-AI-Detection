@@ -157,6 +157,30 @@ def _request(path):
     )
 
 
+@pytest.mark.parametrize("exists", [False, True])
+def test_aapi_no_bomb_trailing_field_uses_actual_directory(tmp_path, exists):
+    requested = "/192.168.2.190/d/image/20261026/YQ80RC007E31"
+    actual = tmp_path / "image" / "20261026" / "YQ80RC007E31"
+    if exists:
+        actual.mkdir(parents=True)
+    server, inferencer = _server({"/192.168.2.190/d": str(tmp_path)})
+    parsed = capi_server.parse_request(
+        f"AOI@YQ80RC007E31;GN140JCGE550S;AAPI09-12;1920,1200;OK;{requested};"
+    )
+
+    result = server._process_request(parsed)
+
+    assert parsed["image_dir"] == requested
+    assert parsed["bomb_info"] is None
+    if exists:
+        assert result[0] == "ERR:NO_IMAGES_FOUND"
+        assert inferencer.process_panel.call_args.args[0] == actual
+        assert inferencer.process_panel.call_args.kwargs["bomb_info"] is None
+    else:
+        assert result[0] == f"ERR:DIR_NOT_FOUND ({actual})"
+        inferencer.process_panel.assert_not_called()
+
+
 @pytest.mark.parametrize("obstruction", [
     "missing", "original_file", "next_day_file", "previous_day_file",
 ])

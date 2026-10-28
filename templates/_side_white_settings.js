@@ -1,16 +1,6 @@
     const sideWhiteLabels = {CANDIDATES:'發現候選',FILTERED:'候選已排除或屬於炸彈',NO_CANDIDATES:'未發現候選（非 OK 判定）',NO_IMAGE:'無側拍白畫面',ERROR:'檢測失敗'};
     let sideWhite = {rows:[],total:0,offset:0,limit:20,loading:false,loaded:false,error:'',status:'',machine_no:'',glass_id:new URLSearchParams(location.search).get('glass_id') || ''};
-    const sideWhiteParamFields = [
-        ['min_contrast_gray','最低局部反差',2.2,.1,255,.1,'灰階差；調低可找較淡異常，也會增加雜訊。'],
-        ['noise_sigma_factor','雜訊門檻倍率',4.5,.1,100,.1,'倍；調高可抑制雜訊，也可能漏掉弱異常。'],
-        ['min_area_px','最小候選面積',20,1,1000000,1,'側拍像素數；調高可濾掉碎點，也可能漏掉小白點。'],
-        ['edge_margin_px','邊緣排除寬度',16,0,512,1,'側拍 px；調高會縮小近邊檢測範圍，0 表示不內縮。'],
-        ['dust_overlap_ratio','灰塵重疊門檻',.8,.01,1,.01,'0～1；尚未以側拍樣本驗證，預設僅標示疑似灰塵。'],
-        ['mapping_margin_px','灰塵比對外擴',3,0,32,1,'側拍 px；側拍白畫面與 SPINIGBI 同座標，比對時外擴遮罩。'],
-        ['crop_padding_px','組合圖周邊範圍',32,0,512,1,'各原圖 px；顯示同一面板位置及周邊。'],
-        ['bomb_tolerance_product_px','炸彈容許誤差',50,0,500,1,'產品 px；只將正拍 W0F00000 炸彈座標映射至側拍。'],
-    ];
-    const sideWhiteSwitches = [['apply_exclusions','套用產品不檢測區域',true],['bomb_check_enabled','比對 W0F00000 炸彈座標',true],['bomb_force_detection_enabled','炸彈區域強制檢測',false]];
+    {% include "_side_white_params.js" %}
     let sideWhiteParamDraft = null, sideWhiteParamSaving = false, sideWhiteParamMessage = '';
 
     function savedSideWhiteParams() {
@@ -29,12 +19,12 @@
         const values = sideWhiteParamDraft || savedSideWhiteParams();
         return `<form id="sw-params-form" class="sw-card" onsubmit="saveSideWhiteParams(event)">
             <div class="sw-head"><h3>側拍檢測參數</h3><span class="sw-badge">只影響側拍候選</span></div>
-            <p class="sw-note">設定一起儲存，套用後續新排程；每筆結果保存當時的參數。總開關仍在「推論設定」，目前為 <strong>${getPlainParamValue('side_white_detection_enabled','false')==='true'?'啟用':'關閉'}</strong>。</p>
+            <p class="sw-note">儲存後套用新推論。側拍檢測：<strong>${getPlainParamValue('side_white_detection_enabled','false')==='true'?'啟用':'關閉'}</strong>（於「推論設定」切換）。</p>
             <fieldset class="sw-param-grid" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamFields.map(([key,label,,min,max,step,hint]) => `<label for="sw-param-${key}">${label}<input id="sw-param-${key}" type="number" required min="${min}" max="${max}" step="${step}" value="${escapeAttr(values[key])}" oninput="editSideWhiteParam('${key}',this.value)"><span class="sw-note">${hint}</span></label>`).join('')}
             ${sideWhiteSwitches.map(([key,label]) => `<label>${label}<input id="sw-param-${key}" type="checkbox" ${values[key]?'checked':''} onchange="editSideWhiteParam('${key}',this.checked)"></label>`).join('')}
             <label>灰塵處理模式<select id="sw-param-dust_mode" onchange="editSideWhiteParam('dust_mode',this.value)">${Object.entries({off:'關閉',observe:'標示疑似灰塵（預設）',suppress:'啟用灰塵屏蔽'}).map(([v,label]) => `<option value="${v}" ${values.dust_mode===v?'selected':''}>${label}</option>`).join('')}</select></label>
             </fieldset>
-            <p class="sw-note">實際檢測門檻取「最低局部反差」與「影像雜訊 × 倍率」較大者。原有檢測參數以側拍原圖為準；其他欄位依標示單位。區域來源沿用「CV 邊緣檢測」的產品不檢測區域；側拍灰塵圖使用 SPINIGBI（例如 SPINIGBI _155809.tif），同區域裁切與屏蔽不依賴正拍；特徵偵測沿用灰塵設定。</p>
+            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定；灰塵比對使用側拍 SPINIGBI。CSJBL 顯示範圍只影響黃框，0 表示僅顯示涵蓋該座標的候選；統計與判定不變。</p></details>
             <button class="sw-btn" type="submit" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamSaving?'儲存中…':'儲存側拍參數'}</button>
             <span id="sw-param-message" class="sw-note" role="status">${escapeHtml(sideWhiteParamMessage||(sideWhiteParamDraft?'尚未儲存':''))}</span>
         </form>`;
@@ -55,7 +45,7 @@
             const saved = {param_name:'side_white_detection_params',param_type:'dict',param_value:JSON.stringify(values),decoded_value:values};
             if (row) Object.assign(row,saved); else allParams.push(saved);
             sideWhiteParamDraft = null;
-            sideWhiteParamMessage = '已儲存，後續新排程套用；既有結果與正式判定保持不變。';
+            sideWhiteParamMessage = '已儲存，套用新推論。';
             loadHistory();
         } catch(e) { sideWhiteParamMessage = e.message; }
         finally {
@@ -100,7 +90,7 @@
             {% include "_side_white_styles.html" %}
             ${renderSideWhiteParams()}
             <div class="sw-card"><div class="sw-head"><h3>側拍白畫面結果</h3><span class="sw-badge">觀察模式 · 不影響最終判定</span></div>
-            <p class="sw-note">在「推論設定」啟用側拍白畫面檢測後，新紀錄會在背景產生候選。此頁只顯示自動處理結果，不需人工操作；正式判定維持不變。正拍位置由同次拍攝的面板邊界估算，仍待同設備多點校正。</p>
+            <p class="sw-note">自動側拍結果；正拍位置為估算。</p>
             <div class="sw-controls"><label>玻璃 ID <input id="sw-filter-glass_id" value="${escapeAttr(sideWhite.glass_id)}" size="18"></label><label>機台 <input id="sw-filter-machine_no" value="${escapeAttr(sideWhite.machine_no)}" size="12"></label>
             <label>檢測 <select id="sw-filter-status">${options({'':'全部',...sideWhiteLabels},sideWhite.status)}</select></label><button class="sw-btn" onclick="searchSideWhite()" ${sideWhite.loading?'disabled':''}>查詢／重新整理</button></div>
             <p class="sw-note" role="status">${escapeHtml(sideWhite.error||(sideWhite.loading?'載入中…':`共 ${sideWhite.total} 筆 · 本頁 ${sideWhite.rows.length} 筆`))}</p></div>

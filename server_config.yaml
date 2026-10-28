@@ -144,15 +144,17 @@ mark_shadow:
 # schedule_time       : 每日執行時間 (24h, HH:MM)
 # ok_retain_days      : OK 紀錄保留天數
 # ng_retain_days      : NG 紀錄保留天數 (通常比 OK 久，方便回追)
-# tile_retain_days    : 每張 tile heatmap 保留天數 (磁碟最大宗)
+# tile_retain_days    : Tile 切塊判定、分數與座標明細保留天數（圖片由 heatmap_retain_days 管理）
 # heatmap_retain_days : 整 panel 總覽 heatmap 保留天數
 # MARK 檢查圖片（crops / disagreements）也使用 heatmap_retain_days
 # vacuum_after_cleanup: 清除後是否做 SQLite VACUUM 釋放空間
+# 新版首次啟動：判定紀錄統一保留 180 天，其餘值沿用此區段。
+# 之後請於「參數設定 → 資料保留」修改；儲存在 DB 的設定優先，重啟不會被此範例覆蓋。
 cleanup:
   enabled: true
   schedule_time: 02:00
-  ok_retain_days: 30
-  ng_retain_days: 90
+  ok_retain_days: 180
+  ng_retain_days: 180
   tile_retain_days: 15
   heatmap_retain_days: 90
   vacuum_after_cleanup: true

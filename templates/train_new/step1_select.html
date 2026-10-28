@@ -412,6 +412,9 @@
   </details>
 
   <!-- padding-bottom 預留高度給 sticky 操作條，確保列表最後幾筆不會被遮住 -->
+  <p class="panel-precheck-note">切圖前固定依「畫異設定」檢查各畫面的產品區域平均亮度；任一圖片畫異即整片排除，需重選新的 Panel ID。</p>
+  <div id="panel-precheck-status" role="status" aria-live="polite"></div>
+  <div id="panel-precheck-errors" class="panel-precheck-errors" hidden></div>
   <div id="panel-list" style="margin-top:16px;padding-bottom:88px;"></div>
 
   <div class="step1-actionbar">
@@ -427,6 +430,11 @@
 </div>
 
 <style>
+  .panel-precheck-note, #panel-precheck-status { color:#a6adc8;font-size:.84rem;line-height:1.6; }
+  .panel-precheck-errors { border:1px solid #f38ba8;border-radius:8px;padding:12px;color:#f38ba8; }
+  .panel-precheck-errors article { display:flex;gap:14px;margin:10px 0;overflow-wrap:anywhere; }
+  .panel-precheck-errors img { width:150px;max-height:130px;object-fit:contain;background:#000; }
+  .train-panel-table tr.panel-image-rejected { background:#40232d;opacity:.75;cursor:not-allowed; }
   .panel-table-wrap { background:#313244;border-radius:10px;max-height:380px;overflow:auto; }
   .train-panel-table { table-layout:fixed;min-width:940px; }
   .train-panel-table th { position:sticky;top:0;z-index:2;padding:7px 8px;white-space:nowrap; }
@@ -676,6 +684,66 @@ let _pipelineSeq = 0;
 let _previewPathEdited = false;
 let _previewPathByPanel = new Map();
 let _panelResolutionByPath = new Map();
+let _panelPrecheckPending = false;
+let _requiredPanelCount = 0;
+const _rejectedPanelIds = new Set();
+
+function panelIdKey(path) {
+  return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop().toUpperCase();
+}
+
+function applyRejectedPanelRows() {
+  document.querySelectorAll('#panel-list tr[data-path]').forEach(tr => {
+    const rejected = _rejectedPanelIds.has(panelIdKey(tr.dataset.path));
+    tr.classList.toggle('panel-image-rejected', rejected);
+    if (rejected) {
+      tr.title = '此 Panel ID 畫異，整片不可使用；請選另一個 Panel ID。';
+      tr.querySelector('.chk').textContent = '×';
+      tr.querySelectorAll('.panel-zone-input').forEach(input => { input.disabled = true; });
+    }
+  });
+}
+
+function rejectAbnormalPanels(panels) {
+  _requiredPanelCount = Math.max(_requiredPanelCount, _selected.size);
+  const root = document.getElementById('panel-precheck-errors');
+  root.hidden = false;
+  root.replaceChildren();
+  const heading = document.createElement('strong');
+  heading.textContent = '以下 Panel ID 已整片排除，請選擇新的 Panel ID 補足後再檢查。';
+  root.appendChild(heading);
+  for (const panel of panels) {
+    _rejectedPanelIds.add(panelIdKey(panel.panel_path));
+    for (const path of _selected) {
+      if (panelIdKey(path) === panelIdKey(panel.panel_path)) _selected.delete(path);
+    }
+    const article = document.createElement('article');
+    const issue = (panel.issues || []).find(item => item.image_path);
+    if (issue) {
+      const url = '/api/debug/serve-image?raw=1&path=' + encodeURIComponent(issue.image_path);
+      const link = document.createElement('a');
+      link.href = url; link.target = '_blank'; link.rel = 'noopener';
+      const img = document.createElement('img');
+      img.src = url; img.alt = `${panel.panel_id} 異常來源圖`;
+      link.appendChild(img); article.appendChild(link);
+    }
+    const detail = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = `Panel ID：${panel.panel_id}`;
+    detail.appendChild(title);
+    for (const item of panel.issues || []) {
+      const line = document.createElement('p');
+      line.textContent = [item.screen, item.image_name, item.reason].filter(Boolean).join(' · ');
+      detail.appendChild(line);
+    }
+    article.appendChild(detail); root.appendChild(article);
+  }
+  if (!_selected.size) { _selectedMachineId = ''; _selectedMachineKey = ''; }
+  refreshSelectedVisuals();
+  syncPreviewPath(true);
+  updateNext();
+  root.scrollIntoView({behavior: 'smooth', block: 'center'});
+}
 
 const PREPROCESS_METHOD_MAP = Object.fromEntries(PREPROCESS_METHOD_SPECS.map(spec => [spec.id, spec]));
 
@@ -1071,6 +1139,7 @@ function jobMachineIdForSelection(machineId) {
 }
 
 function setDataSource(source) {
+  if (_panelPrecheckPending) return;
   _dataSource = source === 'manual_folder' ? 'manual_folder' : 'inference_records';
   document.getElementById('source-recent-btn').classList.toggle('active', _dataSource === 'inference_records');
   document.getElementById('source-manual-btn').classList.toggle('active', _dataSource === 'manual_folder');
@@ -1088,6 +1157,7 @@ function setDataSource(source) {
 }
 
 function loadPanels() {
+  if (_panelPrecheckPending) return;
   const btn = document.getElementById('refresh-btn');
   btn.disabled = true;
   btn.style.opacity = .55;
@@ -1112,6 +1182,7 @@ function loadPanels() {
 }
 
 async function loadManualPanels() {
+  if (_panelPrecheckPending) return;
   const machineInput = document.getElementById('manual-machine-id');
   const rootInput = document.getElementById('manual-batch-root');
   const status = document.getElementById('manual-scan-status');
@@ -1276,6 +1347,7 @@ function renderPanels(panels, emptyMessage) {
   table.appendChild(tbody);
   wrap.appendChild(table);
   root.replaceChildren(wrap);
+  applyRejectedPanelRows();
   syncGridCanonicalization();
   updateNext();
 }
@@ -1314,6 +1386,7 @@ function createPanelZoneCell(tr) {
 }
 
 function setPanelZone(tr, zone, checked) {
+  if (_panelPrecheckPending) return;
   const path = tr.dataset.path;
   const current = _panelZoneModes.get(path) || {inner: true, edge: true};
   const next = {...current, [zone]: checked};
@@ -1337,6 +1410,7 @@ const SELECTED_ROW_BG = '#1e3a2d';
 
 function toggleSelect(tr) {
   const path = tr.dataset.path;
+  if (_panelPrecheckPending || _rejectedPanelIds.has(panelIdKey(path))) return;
   const machineId = tr.dataset.machineId || '';
   if (!path || !machineId) return;
   const machineKey = selectionMachineKey(machineId);
@@ -1347,6 +1421,10 @@ function toggleSelect(tr) {
       _selectedMachineKey = '';
     }
   } else {
+    if (Array.from(_selected).some(selectedPath => panelIdKey(selectedPath) === panelIdKey(path))) {
+      capAlert('此 Panel ID 已選取，請選另一個 Panel ID。', {type: 'warn', title: 'Panel ID 重複'});
+      return;
+    }
     if (isPartialTraining() && machineKey !== targetMachinePrefix()) {
       capAlert(`局部重訓只能選擇料號前 ${MACHINE_PREFIX_LEN} 碼為 ${targetMachinePrefix()} 的 panel。`, {type: 'warn', title: '料號不一致'});
       return;
@@ -1390,6 +1468,7 @@ function refreshSelectedVisuals() {
     chk.style.fontWeight = '700';
     tr.querySelectorAll('.panel-zone-input').forEach(input => { input.disabled = false; });
   });
+  applyRejectedPanelRows();
 }
 
 function updateNext() {
@@ -1412,13 +1491,16 @@ function updateNext() {
   if (requiredZones.has('inner') && innerCount === 0) missingZones.push('INNER');
   if (requiredZones.has('edge') && edgeCount === 0) missingZones.push('EDGE');
   const countEl = document.getElementById('sel-count');
-  const missingText = _selected.size && missingZones.length ? `｜尚缺 ${missingZones.join('、')}` : '';
+  const replacementCount = Math.max(0, _requiredPanelCount - _selected.size);
+  const missingText = replacementCount ? `｜需重選 ${replacementCount} 個新 Panel ID` :
+    (_selected.size && missingZones.length ? `｜尚缺 ${missingZones.join('、')}` : '');
   countEl.textContent =
     `已選 ${_selected.size} 片｜INNER ${innerCount} 片｜EDGE ${edgeCount} 片${missingText} ${machineText}`;
   countEl.style.color = missingText ? '#fab387' : '#a6e3a1';
   const btn = document.getElementById('next-btn');
   const manualConfirmed = _dataSource !== 'manual_folder' || document.getElementById('manual-confirm-normal').checked;
-  btn.disabled = _selected.size === 0 || !manualConfirmed || missingZones.length > 0;
+  btn.disabled = _panelPrecheckPending || _selected.size === 0 || !manualConfirmed || missingZones.length > 0 || replacementCount > 0;
+  btn.textContent = _panelPrecheckPending ? '畫異檢查中，尚未切圖…' : '下一步：畫異檢查後切圖 →';
   btn.title = missingZones.length ? `目前訓練範圍仍需要 ${missingZones.join('、')} tile` : '';
   btn.style.opacity = btn.disabled ? .4 : 1;
   syncGridCanonicalization();
@@ -1702,7 +1784,8 @@ function syncGridCanonicalization() {
   }
 }
 
-function submitStart() {
+async function submitStart() {
+  if (_panelPrecheckPending || _selected.size < _requiredPanelCount) return;
   const mid = isPartialTraining() ? TARGET_BUNDLE.machine_id : _selectedMachineId;
   if (!mid) return;
   if (_dataSource === 'manual_folder') {
@@ -1759,18 +1842,41 @@ function submitStart() {
   if (pipelines) body.image_preprocess_pipelines = pipelines;
   body.preprocess_after_tiling = document.getElementById('pp-after-tiling').checked;
   body.grid_canonicalization = gridCanonicalization;
-  fetch('/api/train/new/start', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  }).then(r => r.json()).then(d => {
+  _panelPrecheckPending = true;
+  document.querySelector('.source-card').inert = true;
+  document.getElementById('panel-list').inert = true;
+  updateNext();
+  const checkStatus = document.getElementById('panel-precheck-status');
+  checkStatus.textContent = `正在檢查 ${panelPaths.length} 片 PANEL 的來源圖片；全部通過前不會切圖。`;
+  try {
+    const response = await fetch('/api/train/new/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await response.json();
     if (d.error) {
+      if (d.code === 'training_panel_image_abnormal') {
+        rejectAbnormalPanels(d.rejected_panels || []);
+        checkStatus.textContent = '畫異檢查未通過，尚未切圖；請重選新的 Panel ID。';
+        return;
+      }
       const msg = d.error + (d.active_job_id ? `\n\n進行中 job：${d.active_job_id}` : '');
+      checkStatus.textContent = d.error;
       capAlert(msg, {type: 'error', title: '無法建立訓練 job'});
       return;
     }
+    if (!response.ok || !d.job_id) throw new Error('伺服器未回傳有效的訓練任務');
+    checkStatus.textContent = '✓ 所選 PANEL 畫異檢查全部通過，進入切圖。';
     window.location.href = '/train/new/progress?job_id=' + encodeURIComponent(d.job_id);
-  });
+  } catch (err) {
+    checkStatus.textContent = `檢查請求未完成：${err.message}；請確認連線後重試。`;
+  } finally {
+    _panelPrecheckPending = false;
+    document.querySelector('.source-card').inert = false;
+    document.getElementById('panel-list').inert = false;
+    updateNext();
+  }
 }
 
 async function cancelReviewJob(jobId) {

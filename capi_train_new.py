@@ -479,6 +479,7 @@ def preprocess_panels_to_pool(
     allowed_prefixes: Optional[Iterable[str]] = None,
     boundary_reference_priority: Optional[Iterable[str]] = None,
     training_lighting_resolver: Optional[Callable[[str], str]] = None,
+    image_precheck: Optional[dict] = None,
 ) -> dict:
     """將 cfg.panel_paths 全部前處理 + 切 tile + 寫 DB。
 
@@ -496,6 +497,12 @@ def preprocess_panels_to_pool(
     validation = normalize_validation_config(cfg.validation_config, cfg.panel_paths, panel_modes)
     target_lighting_set = set(target_lightings) if target_lightings is not None else None
     target_unit_set = set(target_units) if target_units is not None else None
+
+    pinned_panel_files = None
+    if image_precheck is not None:
+        from capi_training_precheck import verify_training_panel_sources
+        # All selected panels must still match their checks before any output.
+        pinned_panel_files = verify_training_panel_sources(image_precheck, cfg.panel_paths)
 
     thumb_dir.mkdir(parents=True, exist_ok=True)
     (thumb_dir / "tiles").mkdir(parents=True, exist_ok=True)
@@ -541,6 +548,8 @@ def preprocess_panels_to_pool(
         log(f"[{idx}/{len(cfg.panel_paths)}] panel {panel_dir.name} ({mode_label})")
         try:
             preprocess_kwargs = {}
+            if pinned_panel_files is not None:
+                preprocess_kwargs["image_files"] = pinned_panel_files[str(panel_dir.resolve())]
             if prefix_resolver is not None:
                 preprocess_kwargs["prefix_resolver"] = prefix_resolver
             if allowed_prefixes is not None:

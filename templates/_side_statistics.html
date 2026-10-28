@@ -63,6 +63,10 @@
 #side-statistics .ss-review textarea{min-height:72px;flex-basis:100%}
 #side-statistics .ss-review input{width:140px}
 #side-statistics .ss-review-state{flex-basis:100%;margin:0}
+#side-statistics .ss-conversion{margin-top:18px;padding:18px;border:1px solid var(--border);border-radius:12px}
+#side-statistics .ss-rate{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+#side-statistics .ss-rate strong{font-size:24px}
+#side-statistics .ss-rate span{font-size:13px;color:var(--text-muted)}
 #side-statistics .sw-table{min-width:700px}
 #side-statistics .sw-table td:last-child{white-space:normal;min-width:160px}
 #side-statistics .ss-saved{color:#4ade80}
@@ -76,12 +80,15 @@
                     <summary>使用說明</summary>
                     <div class="ss-help-body">
                         <ul>
-                            <li><b>總覽</b>：依日期（整日）、機台、機種與玻璃 ID 統計現存紀錄，每筆計一次。</li>
-                            <li><b>明細</b>：點卡片切換 AOI 分組；點分類篩選明細，再點一次取消。總覽範圍不變。</li>
+                            <li><b>總覽</b>：僅統計 AOI 有 CSJBL 的現存紀錄，依日期（整日）、機台、機種與玻璃 ID 篩選，每筆計一次。</li>
+                            <li><b>明細</b>：點分類篩選明細，再點一次取消。總覽範圍不變。</li>
                             <li><b>人工確認</b>：正確包含檢出正確、無缺陷確認；錯誤包含過檢、漏檢。映射不正確或無法確認不計入正確率。</li>
                             <li><b>正確率</b>＝人工確認正確 ÷ 有效驗證，只代表已驗證樣本；處理進度包含不計入正確率的紀錄。</li>
                             <li><b>圖片</b>：青色 A# 是 AOI 估算位置，黃框是系統候選。局部圖優先裁切原圖，保留原解析度與方向；無法讀取時使用保存預覽。</li>
-                            <li><b>比對</b>：CSJBL 由正拍位置估算至側拍，容許誤差只影響此報表。無 CSJBL、無候選或位置接近，都需人工確認。</li>
+                            <li><b>比對</b>：CSJBL 由正拍位置估算至側拍，容許誤差只影響此報表。無候選或位置接近，都需人工確認。</li>
+                            <li><b>MARK</b>：沿用同次正式推論定位範圍。命中 MARK 且附近無保留候選時，該 AOI 點標示可轉 OK；其他點仍各自檢查，正式判定不變。</li>
+                            <li><b>OMIT 比對</b>：每個 AOI 點提供正拍、側拍與 SPINIGBI 對照及候選重疊比例。預設僅標示疑似表面異物；啟用側拍灰塵屏蔽後，該點候選已排除且附近無保留候選，才建議可轉 OK。</li>
+                            <li><b>殘留貼紙</b>：OMIT 比對用來確認表面特徵，不能單獨確認貼紙種類。暗色本體覆蓋達門檻時會校正周圍亮暈，未覆蓋暗點及校正後仍超標亮點保留；缺圖或配對不明不建議轉 OK。</li>
                         </ul>
                     </div>
                 </details>
@@ -123,12 +130,24 @@
                     <option value="mapping_error">　座標映射不正確</option>
                     <option value="uncertain">　無法確認</option>
                 </select></label>
+                <label>明細轉 OK 分類 <select name="conversion">
+                    <option value="">全部</option>
+                    <option value="mark">含 MARK 可轉 OK 點</option>
+                    <option value="omit">含 OMIT 可轉 OK 點</option>
+                    <option value="both">同時含兩類可轉 OK 點</option>
+                    <option value="either">含任一類可轉 OK 點</option>
+                    <option value="eligible">兩類合併可整筆轉 OK</option>
+                    <option value="eligible_mark">僅靠 MARK 可整筆轉 OK</option>
+                    <option value="eligible_omit">僅靠 OMIT 可整筆轉 OK</option>
+                    <option value="blocked">有可轉 OK 點，但整筆仍需保留</option>
+                </select></label>
                 <label>比對範圍 <input name="tolerance" type="number" min="0" max="500" step="1" value="50" required style="width:80px">產品 px</label>
             </div>
         </form>
         <p id="ss-scope" class="sw-note"></p>
         <div id="ss-overview" class="ss-overview" aria-live="polite"></div>
         <div id="ss-summary" class="ss-summary"></div>
+        <div id="ss-conversion" class="ss-conversion" aria-live="polite" hidden></div>
         <p class="sw-note">點分類篩選明細，總覽維持查詢範圍。</p>
         <p id="ss-message" class="sw-note" role="status" aria-live="polite"></p>
     </div>

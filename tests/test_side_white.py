@@ -199,7 +199,8 @@ def test_config_default_persistence_and_hot_reload(tmp_path):
     config = CAPIConfig()
     assert config.side_white_detection_enabled is False
     assert config.side_white_detection_params == normalize_side_white_params()
-    custom = normalize_side_white_params({"min_contrast_gray": 3.1, "noise_sigma_factor": 6.0, "min_area_px": 30, "edge_margin_px": 25})
+    custom = normalize_side_white_params({"min_contrast_gray": 3.1, "noise_sigma_factor": 6.0,
+        "min_area_px": 30, "edge_margin_px": 25, "csjbl_preview_radius_product_px": 75})
     config.apply_db_overrides([{"param_name":"side_white_detection_params", "decoded_value":custom}])
     assert config.side_white_detection_params == custom
     custom["min_area_px"] = 999
@@ -253,6 +254,7 @@ def test_background_branch_is_optional_and_preserves_formal_output(tmp_path, ena
         response_time="2026-09-07 12:00:01", processing_seconds=.1,
         client_response_text="formal-response", side_white_enabled=enabled,
         side_white_params={"min_contrast_gray": contrast},
+        aoi_report={"W0F00000": [SimpleNamespace(defect_code="CSJBL", product_x=960, product_y=540)]},
     )
     record = server.db.get_record_detail(1)
     assert record["ai_judgment"] == "OK"
@@ -328,7 +330,8 @@ def test_review_routes_require_same_admin_role_as_mark(tmp_path):
     other_inferencer = SimpleNamespace(config=CAPIConfig())
     Handler._capi_server_instance = SimpleNamespace(inferencers={"other":other_inferencer})
     db.init_config_from_yaml(Handler.inferencer.config)
-    params = normalize_side_white_params({"min_contrast_gray": 7.5, "min_area_px": 40})
+    params = normalize_side_white_params({"min_contrast_gray": 7.5, "min_area_px": 40,
+                                         "csjbl_preview_radius_product_px": 80})
     update_body = json.dumps({"param_name":"side_white_detection_params", "new_value":params,
                               "reason":"UI test"}).encode()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

@@ -20,13 +20,13 @@ def candidate():
             "area_px": 800, "contrast_gray": 10, "_mask": np.ones((20,40), np.uint8)}
 
 
-def evaluate(item, *, zones=None, mode="observe", detector=None, omit=None, params=None):
+def evaluate(item, *, zones=None, marks=None, mode="observe", detector=None, omit=None, params=None):
     image = np.full((100,100), 90, np.uint8)
     residual = np.full(image.shape, 10, np.float32)
     options = normalize_side_white_params({"dust_mode":mode,"mapping_margin_px":0, **(params or {})})
     return _candidate_evidence(item, image, image, omit, detector,
                                {"reason":"test"}, np.eye(3),
-                               np.zeros_like(image) if zones is None else zones, residual, options)
+                               np.zeros_like(image) if zones is None else zones, residual, options, mark_mask=marks)
 
 
 def test_partial_exclusion_keeps_outside_evidence():
@@ -41,6 +41,20 @@ def test_partial_exclusion_keeps_outside_evidence():
     assert composite.shape == (350,1600,3)
     assert min(p[0] for c in item["remaining_contours"] for p in c) == 40
     json.dumps(item)
+
+
+@pytest.mark.parametrize("right,area,disposition", [(40, 400, "retained"), (60, 0, "mark_suppressed")])
+def test_inference_mark_masks_only_support_inside_mark(right, area, disposition):
+    item = candidate()
+    marks = np.zeros((100, 100), np.uint8)
+    marks[20:40, 20:right] = 255
+    evaluate(item, marks=marks, params={"apply_exclusions": False})
+    assert item["disposition"] == disposition
+    assert item["remaining_area_px"] == area
+    assert item["mark_excluded_area_px"] == 800 - area
+    assert item["excluded_area_px"] == 0
+    if area:
+        assert min(p[0] for c in item["remaining_contours"] for p in c) == 40
 
 
 @pytest.mark.parametrize("mode,disposition,area", [("observe","retained",800),("suppress","dust_suppressed",0),("off","retained",800)])
@@ -178,6 +192,7 @@ def pair(tmp_path, defect=True):
 def test_side_only_defect_kept_with_normal_front_and_generates_composite(tmp_path):
     side,front=pair(tmp_path)
     result=inspect_side_white_image(side,front,tmp_path/'out',omit_image=np.zeros((800,1200),np.uint8),
+                                    omit_info={'status': 'available', 'reason': 'synthetic aligned OMIT'},
                                     dust_detector=lambda crop:(False,np.zeros_like(crop),0,"clean"))
     assert result['status']=='CANDIDATES'
     assert result['summary']['retained'] > 0

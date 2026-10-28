@@ -1051,6 +1051,7 @@
     <!-- Tabs Navigation -->
     <div class="tabs-nav">
         <button class="tab-btn active" onclick="switchTab('tab-single', this)">📸 單圖推論</button>
+        <button class="tab-btn" onclick="switchTab('tab-side-white', this)">📷 側拍白畫面</button>
         <button class="tab-btn" onclick="switchTab('tab-dot-detection', this)">⚫ 點圖偵測</button>
         <button class="tab-btn" onclick="switchTab('tab-preprocess-lab', this)">🧪 影像預處理實驗室</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
@@ -1061,6 +1062,8 @@
         <button class="tab-btn" onclick="switchTab('tab-bright-spot', this)">💡 黑畫面推論</button>
         <a href="/debug/scratch-batch" class="tab-btn" style="text-decoration:none; display:inline-flex; align-items:center;">🧽 批次分類器驗證</a>
     </div>
+
+    {% include "_debug_side_white.html" %}
 
     <!-- ═══ 單圖推論頁籤 ═══ -->
     <div id="tab-single" class="tab-content active">
@@ -2330,6 +2333,7 @@
     const dotCalibrationPoints = {{ dot_calibration_points|tojson }};
     const dotCalibrationSource = {{ dot_calibration_source|tojson }};
     let dotActiveDetectionConfig = {};
+    {% include "_debug_side_white.js" %}
 
     // Tab switching logic
     function switchTab(tabId, btn) {

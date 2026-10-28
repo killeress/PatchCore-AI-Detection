@@ -17,7 +17,7 @@ from capi_database import CAPIDatabase
 from capi_web import CAPIWebHandler
 
 
-@pytest.mark.parametrize('scenario', ['normal', 'rotated', 'disabled', 'missing', 'error'])
+@pytest.mark.parametrize('scenario', ['normal', 'rotated', 'disabled', 'missing', 'error', 'without_csjbl'])
 def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monkeypatch, scenario):
     import capi_server
     import capi_side_white
@@ -43,7 +43,9 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
         glass_id='TEST', model_id='GN140JCAL010S', machine_no='CAPI1', resolution=(1920, 1200),
         machine_judgment='OK', ai_judgment='OK', image_dir=str(tmp_path), total_images=1, ng_images=0,
         ng_details='[]', request_time='2026-09-29 12:00:00', response_time='2026-09-29 12:00:01',
-        processing_seconds=.1, client_response_text='unchanged')
+        processing_seconds=.1, client_response_text='unchanged',
+        aoi_machine_coords=json.dumps({'W0F00000': [{'defect_code': 'OTHER' if scenario == 'without_csjbl' else 'CSJBL',
+                                                   'product_x': 960, 'product_y': 600}]}))
     old_id = db.save_side_white_result(record, {'status': 'CANDIDATES', 'candidates': [{'id': 99}], 'algorithm': 'old'})
     db.save_side_statistics_review(old_id, 'confirmed', 'previous observation', 'QA', '')
     cls = CAPIWebHandler
@@ -74,7 +76,7 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
     updated = db.get_record_detail(record)
     assert updated['ai_judgment'] == 'OK' and updated['client_response_text'] == 'unchanged'
     assert db.get_side_white_result(old_id) is None
-    if scenario == 'disabled':
+    if scenario in {'disabled', 'without_csjbl'}:
         assert updated['side_white_result'] is None
         assert db.list_side_white_results()['total'] == 0
         return
@@ -143,6 +145,62 @@ def write_pair(tmp_path):
     side=tmp_path/'SW0F00000_153501.tif'
     cv2.imwrite(str(side),image)
     return side,front
+
+
+@pytest.mark.parametrize('code', ['CSJBL', 'OTHER'])
+def test_live_save_only_schedules_aoi_csjbl_and_copies_inference_marks(tmp_path, monkeypatch, code):
+    import capi_server
+    server = CAPIServer.__new__(CAPIServer)
+    server.db = CAPIDatabase(str(tmp_path / 'results.db'))
+    server.heatmap_manager = SimpleNamespace(save_panel_heatmaps=lambda **kw: {})
+    server.save_overview = server.save_tile_detail = False
+    server._get_or_create_inferencer = lambda _: SimpleNamespace(config=CAPIConfig())
+    server._save_side_white_result = MagicMock()
+    images = [{'mark_source_image': 'W0F00000.tif', 'mark_exclusion_regions': [
+        {'name': 'mark_binary', 'x1': 20, 'y1': 30, 'x2': 50, 'y2': 60}]}]
+    monkeypatch.setattr(capi_server, 'results_to_db_data', lambda *_: images)
+    parsed = {'glass_id': 'LIVE', 'model_id': 'MODEL', 'machine_no': 'CAPI1',
+              'resolution': (1920, 1080), 'machine_judgment': 'OK', 'image_dir': str(tmp_path)}
+    report = {'W0F00000': [SimpleNamespace(defect_code=code, product_x=100, product_y=100)]}
+    server._save_results_async(('test', 123), parsed, [SimpleNamespace()], 'OK', '[]',
+                               '2026-10-28 12:00:00', '2026-10-28 12:00:01', .1,
+                               aoi_report=report, side_white_enabled=True, side_white_rotate_180=True)
+    assert server.db.get_record_detail(1)['ai_judgment'] == 'OK'
+    if code == 'OTHER':
+        server._save_side_white_result.assert_not_called()
+    else:
+        context = server._save_side_white_result.call_args.args[-1]
+        assert context['mark_rotation_applied'] is True
+        assert context['inference_marks'][0]['front_bbox'] == [20, 30, 30, 30]
+        images[0]['mark_exclusion_regions'][0]['x1'] = 999
+        assert context['inference_marks'][0]['front_bbox'][0] == 20
+
+
+@pytest.mark.parametrize('rotated', [False, True])
+def test_real_side_candidate_uses_inference_mark_and_keeps_unmarked_black_patch(tmp_path, rotated):
+    side, front = write_pair(tmp_path)
+    # Keep the black patch below the detector's existing relative area ceiling.
+    raw = np.zeros((1000, 1400), np.uint8)
+    cv2.rectangle(raw, (50, 50), (1350, 950), 90, -1)
+    cv2.imwrite(str(front), raw)
+    cv2.circle(raw, (350, 250), 8, 120, -1)
+    cv2.rectangle(raw, (450, 260), (478, 275), 8, -1)
+    cv2.imwrite(str(side), raw)
+    # The centre candidate is inside a saved MARK; the dark patch is not.
+    context = {'inference_marks': [{'source_image': front.name, 'name': 'mark_binary',
+                                    'front_bbox': [310, 210, 80, 80]}],
+               'mark_rotation_applied': rotated}
+    if rotated:
+        context['inference_marks'][0]['front_bbox'] = [1010, 710, 80, 80]
+    payload = inspect_side_white_image(side, front, tmp_path / 'out', context=context, rotate_180=rotated)
+    assert payload['status'] == 'CANDIDATES', payload.get('reason')
+    marked = min(payload['candidates'], key=lambda c: np.linalg.norm(np.array(c['side_raw_xy']) - [350, 250]))
+    assert marked['disposition'] == 'mark_suppressed'
+    black = min(payload['candidates'], key=lambda c: np.linalg.norm(np.array(c['side_raw_xy']) - [464, 268]))
+    assert black['disposition'] == 'retained'
+    assert payload['summary']['mark_suppressed'] >= 1
+    assert payload['inference_mark_regions'][0]['source_image'] == front.name
+    json.dumps(payload)
 
 
 def test_real_omit_detector_reused_without_model_load(tmp_path):

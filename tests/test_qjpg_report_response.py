@@ -117,6 +117,49 @@ def test_parse_request_keeps_standard_no_bomb_image_dir():
     assert parsed["aoi_report_payload"] == ""
 
 
+@pytest.mark.parametrize("bomb_fields", ["", ";;", ";();", "W0F00000;();"])
+@pytest.mark.parametrize("trailing_fields", ["", ";", "; ;\t;"])
+def test_aapi_no_bomb_request_ignores_empty_trailing_fields(bomb_fields, trailing_fields):
+    image_dir = "/192.168.2.190/d/image/20261026/YQ80RC007E31"
+    parsed = parse_request(
+        "AOI@YQ80RC007E31;GN140JCGE550S;AAPI09-12;1920,1200;OK;"
+        + bomb_fields + image_dir + trailing_fields
+    )
+
+    assert parsed["image_dir"] == image_dir
+    assert parsed["bomb_info"] is None
+    assert parsed["aoi_report_payload"] == ""
+    assert parsed["machine_judgment"] == "OK"
+
+
+@pytest.mark.parametrize("coords,defect_type,points", [
+    ("(90/90;115/115)", "point", [(90, 90), (115, 115)]),
+    ("(90/90/115/115)", "line", [(90, 90), (115, 115)]),
+])
+def test_bomb_request_ignores_empty_trailing_fields(coords, defect_type, points):
+    parsed = parse_request(
+        f"AOI@G1;MODEL;CAPI39;1920,1200;OK;W0F00000;{coords};/images/G1;"
+    )
+
+    assert parsed["image_dir"] == "/images/G1"
+    assert parsed["bomb_info"] == {
+        "image_prefix": "W0F00000", "defect_type": defect_type, "coordinates": points,
+    }
+    assert parsed["aoi_report_payload"] == ""
+
+
+@pytest.mark.parametrize("payload", ["", "W0F00000,CDK2(01092,00131);G0F00000,CM00(00210,00200);"])
+def test_request_preserves_embedded_path_semicolons_and_aoi_payload(payload):
+    image_dir = r"\\images\d\line;section;;camera\G1"
+    parsed = parse_request(
+        f"AOI@G1;MODEL;AAPI09-12;1366,768;NG;{image_dir}; ;\t;{payload}"
+    )
+
+    assert parsed["image_dir"] == image_dir
+    assert parsed["aoi_report_payload"] == payload
+    assert parsed["bomb_info"] is None
+
+
 @pytest.mark.parametrize("with_regular_ng", [False, True])
 def test_server_forwards_csjbl_unchanged_without_within_spec(tmp_path, with_regular_ng):
     import json

@@ -23,6 +23,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
                 "min_area_px": 20, "edge_margin_px": 16,
                 "apply_exclusions": True, "dust_mode": "observe", "dust_overlap_ratio": .8,
                 "mapping_margin_px": 3, "crop_padding_px": 32,
+                "csjbl_preview_radius_product_px": 50,
                 "bomb_check_enabled": True, "bomb_tolerance_product_px": 50,
                 "bomb_force_detection_enabled": False}
     if value is None:
@@ -38,6 +39,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
         ("dust_overlap_ratio", "灰塵重疊門檻", .01, 1, False),
         ("mapping_margin_px", "灰塵比對外擴", 0, 32, True),
         ("crop_padding_px", "組合圖周邊範圍", 0, 512, True),
+        ("csjbl_preview_radius_product_px", "CSJBL 顯示範圍", 0, 500, True),
         ("bomb_tolerance_product_px", "炸彈容許誤差", 0, 500, True),
     ):
         number = result[key]

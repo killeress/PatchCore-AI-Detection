@@ -31,14 +31,18 @@ const document={getElementById:id=>elements[id]};
     check = r'''
 (async()=>{
  const defaults=savedSideWhiteParams();
+ assert.equal(defaults.csjbl_preview_radius_product_px,50);
  for(const [key] of sideWhiteParamFields) elements['sw-param-'+key]={valueAsNumber:Number(defaults[key])};
  for(const [key] of sideWhiteSwitches) elements['sw-param-'+key]={checked:defaults[key]};
  elements['sw-param-apply_exclusions'].checked=false;
+ elements['sw-param-csjbl_preview_radius_product_px'].valueAsNumber=75;
  elements['sw-param-bomb_force_detection_enabled'].checked=true;
  elements['sw-param-dust_mode']={value:'suppress'};
  elements['sw-params-form']={outerHTML:''};
  await saveSideWhiteParams({preventDefault(){},target:{reportValidity:()=>true}});
  assert.equal(sent.new_value.apply_exclusions,false);
+ assert.equal(sent.new_value.csjbl_preview_radius_product_px,75);
+ assert.equal(savedSideWhiteParams().csjbl_preview_radius_product_px,75);
  assert.equal(sent.new_value.bomb_force_detection_enabled,true);
  assert.equal(sent.new_value.dust_mode,'suppress');
  assert.equal(typeof sent.new_value.dust_overlap_ratio,'number');

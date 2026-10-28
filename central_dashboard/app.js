@@ -1205,6 +1205,7 @@
         const update = asObject(raw.update);
         const lineActivity = asObject(raw.line_activity);
         const modelSwitchAlert = asObject(raw.model_switch_alert);
+        const training = asObject(raw.training);
 
         return {
             running: server.running !== false,
@@ -1244,6 +1245,19 @@
                 canApply: update.can_apply === true,
                 failureReason: textValue(update.failure_reason),
                 centralApplySupported: update.central_apply_supported === true
+            },
+            training: {
+                available: typeof training.active === "boolean" && Array.isArray(training.jobs),
+                active: training.active === true,
+                jobs: (Array.isArray(training.jobs) ? training.jobs : []).map((job) => {
+                    const item = asObject(job);
+                    return {
+                        kind: textValue(item.kind),
+                        machineId: textValue(item.machine_id),
+                        phase: textValue(item.phase),
+                        unit: textValue(item.unit)
+                    };
+                })
             },
             hardware: {
                 vramUsedGb: optionalNumber(gpu.vram_used_gb),
@@ -1358,6 +1372,38 @@
         container.appendChild(badge);
     }
 
+    function hasActiveTraining(state) {
+        return Boolean(state.status !== "offline" && state.status !== "checking" &&
+            state.data?.training?.available && state.data.training.active);
+    }
+
+    function renderStatus(badge, state) {
+        if (!badge) return;
+        const training = hasActiveTraining(state);
+        badge.dataset.training = String(training);
+        setText(badge, training ? "訓練中" : statusText(state.status));
+        const details = [state.error || statusText(state.status)];
+        if (training) {
+            const kinds = {
+                patchcore: "新模型訓練", patchcore_partial: "局部重訓",
+                patchcore_submodel: "子模型重訓", scratch: "刮痕分類器重訓"
+            };
+            const phases = {
+                preprocess: "圖片前處理", ng: "準備 NG 樣本", stage: "準備資料",
+                merge: "合併資料", train: "訓練中", metrics: "計算指標",
+                swap: "更新模型", reload: "載入模型", done: "完成收尾"
+            };
+            details.push(...state.data.training.jobs.map((job) => [
+                kinds[job.kind] || "模型訓練", job.machineId, job.unit,
+                phases[job.phase] || "作業進行中"
+            ].filter(Boolean).join(" · ")));
+        } else if (state.data && state.status !== "offline" && state.status !== "checking" &&
+                   !state.data.training?.available) {
+            details.push("未提供訓練狀態，請更新線體程式並重新啟動服務");
+        }
+        badge.title = details.join("\n");
+    }
+
     function renderLineCard(state) {
         const card = state.card;
         const data = state.data;
@@ -1367,7 +1413,7 @@
             ? getLineAlerts(data)
             : [];
         card.dataset.health = healthAlerts.length ? healthAlerts[0].severity : "normal";
-        setField(card, "status", statusText(state.status));
+        renderStatus(card.querySelector('[data-field="status"]'), state);
         updateWatchBadge(card.querySelector('[data-field="watch-badge"]'), state);
         updateSwitchBadges(card.querySelector('[data-field="switch-badges"]'), state);
 
@@ -1442,9 +1488,7 @@
         row.dataset.state = state.status;
         updateWatchBadge(row.querySelector('[data-field="overview-watch"]'), state);
         updateSwitchBadges(row.querySelector('[data-field="overview-switch-badges"]'), state);
-        const status = row.querySelector('[data-field="overview-status"]');
-        setText(status, statusText(state.status));
-        status.title = state.error || statusText(state.status);
+        renderStatus(row.querySelector('[data-field="overview-status"]'), state);
 
         const data = state.data;
         const aoi = row.querySelector('[data-field="overview-aoi"]');

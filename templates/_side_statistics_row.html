@@ -1,7 +1,7 @@
 {% autoescape true %}
 {% set p = row.payload %}
 {% set states = {'CANDIDATES':'保留候選','FILTERED':'候選已排除','NO_CANDIDATES':'未發現候選','NO_IMAGE':'無側拍圖','ERROR':'檢測失敗','NOT_RUN':'尚未檢測'} %}
-{% set matches = {'matched':'附近有保留候選','filtered':'附近候選已排除','unmatched':'附近未找到候選','unavailable':'無法定位','unverified':'候選資料不完整'} %}
+{% set matches = {'matched':'附近有保留候選','mark_suppressed':'MARK 屏蔽／可轉 OK','omit_suppressed':'OMIT 屏蔽／可轉 OK','filtered':'附近候選已排除','unmatched':'附近未找到候選','unavailable':'無法定位','unverified':'候選資料不完整'} %}
 {% macro image(kind, label, point=none) %}
     {% if p.get('artifacts',{}).get(kind) %}
     {% if comparison.has_csjbl and p.get('preview_bounds',{}).get(kind) %}
@@ -22,28 +22,37 @@
     <div class="sw-head"><p class="sw-note">正式結果：{{ row.ai_judgment }}</p><a href="/record/{{ row.record_id }}#side-white-result" target="_blank" rel="noopener">推論紀錄 #{{ row.record_id }} →</a></div>
     {% if comparison.has_csjbl %}
     <p class="sw-note">AOI {{ comparison.points|length }} 點 · 已定位 {{ comparison.mapped }} 點 · 附近有候選 {{ comparison.matched }} 點</p>
+    {% if comparison.mark_suppressed %}<p class="sw-badge">MARK 屏蔽／可轉 OK：{{ comparison.mark_suppressed }} 點（僅該 AOI 點的側拍建議）</p>{% endif %}
+    {% if comparison.omit_suppressed %}<p class="sw-badge">OMIT 屏蔽／可轉 OK：{{ comparison.omit_suppressed }} 點（僅該 AOI 點的側拍建議）</p>{% endif %}
+    {% if row.get('conversion',{}).get('category','none') != 'none' %}
+    <p class="sw-note" data-conversion-state><b>{{ '納入整筆轉 OK 試算' if row.conversion.eligible else '未納入整筆轉 OK 試算' }}</b>：{{ row.conversion.reason }}</p>
+    {% endif %}
     {% if comparison.source == 'legacy' %}<p class="sw-note">AOI 座標由舊版紀錄還原。</p>{% endif %}
     {% if comparison.reason %}<p class="sw-note">{{ comparison.reason }}</p>{% endif %}
     {% if comparison.incomplete %}<p class="sw-badge sw-warn">候選資料不完整，請確認原圖。</p>{% endif %}
     <details><summary>AOI 座標與比對</summary>
     <p class="sw-note">比對範圍：{{ comparison.tolerance|round(2) }} 產品 px；座標以原圖左上角為原點。</p>
-    <div class="sw-scroll"><table class="sw-table"><thead><tr><th>AOI／正拍來源</th><th>來源座標 (X,Y)</th><th>正拍原圖 (X,Y)</th><th>側拍原圖 (X,Y)</th><th>比對結果</th></tr></thead><tbody>
+    <div class="sw-scroll"><table class="sw-table"><thead><tr><th>AOI／正拍來源</th><th>來源座標 (X,Y)</th><th>正拍原圖 (X,Y)</th><th>側拍／OMIT 原圖 (X,Y)</th><th>比對結果</th><th>OMIT 表面證據</th></tr></thead><tbody>
     {% for a in comparison.points %}
     <tr><td>A{{ a.id }} · {{ a.image_prefix }}</td><td>{{ a.source_xy }}<br>{{ '產品座標' if a.coordinate_space == 'product' else '原圖像素' }}</td>
         <td>{% if a.get('front_raw_xy') %}{{ a.front_raw_xy[0]|round(1) }}, {{ a.front_raw_xy[1]|round(1) }}{% else %}—{% endif %}</td>
         <td>{% if a.get('side_raw_xy') %}{{ a.side_raw_xy[0]|round(1) }}, {{ a.side_raw_xy[1]|round(1) }}{% else %}—{% endif %}</td>
-        <td>{{ matches.get(a.status,a.status) }}{% if a.retained_candidate_ids %} #{{ a.retained_candidate_ids|join(', #') }}{% elif a.candidate_ids %} #{{ a.candidate_ids|join(', #') }}{% endif %}{% if a.reason %}<br>{{ a.reason }}{% endif %}</td></tr>
+        <td>{{ matches.get(a.status,a.status) }}{% if a.retained_candidate_ids %} #{{ a.retained_candidate_ids|join(', #') }}{% elif a.candidate_ids %} #{{ a.candidate_ids|join(', #') }}{% endif %}{% if a.reason %}<br>{{ a.reason }}{% endif %}</td>
+        <td>{% set o = a.get('omit',{}) %}{{ o.get('label','OMIT 無法比對') }}<br>{{ o.get('reason','') }}
+            {% for c in o.get('candidates',[]) %}<div>#{{ c.id }} · 重疊 {{ (c.overlap_ratio * 100)|round(1)|string + '%' if c.overlap_ratio is not none else '無法判斷' }}{% if c.uncovered_area_px is not none %} · 未覆蓋 {{ c.uncovered_area_px }} px{% endif %}{% if c.get('core_overlap_ratio') is not none %}<br>暗色本體覆蓋 {{ (c.core_overlap_ratio * 100)|round(1) }}%{% endif %}{% if c.get('halo_removed_area_px') %} · 消除亮暈 {{ c.halo_removed_area_px }} px{% endif %}</div>{% endfor %}
+        </td></tr>
     {% endfor %}
     </tbody></table></div></details>
     {% else %}
     <p class="sw-note">AOI 未提供 CSJBL，請查看圖片並人工確認。</p>
     {% endif %}
     {% if p.get('rotation_applied') %}<p class="sw-note">保存預覽已旋轉 180°；局部原圖維持原方向。</p>{% endif %}
-    <div class="sw-images">{{ image('front','正拍定位預覽') }}{{ image('side','側拍候選與 AOI 位置' if comparison.has_csjbl else '側拍候選') }}</div>
+    <div class="sw-images">{{ image('front','正拍定位預覽') }}{{ image('side','側拍候選與 AOI 位置' if comparison.has_csjbl else '側拍候選') }}{{ image('omit','側拍 OMIT（SPINIGBI）與 AOI 位置') }}</div>
+    {% if not p.get('artifacts',{}).get('omit') %}<p class="sw-note">OMIT 對照圖不可用：{{ p.get('omit',{}).get('reason') or '舊紀錄未保存獨立 OMIT 預覽，可重新推論產生。' }}</p>{% endif %}
     {% if not p.get('artifacts',{}).get('side') %}<p class="sw-note">{{ p.get('reason') or '尚無側拍圖片。啟用側拍檢測後，可由推論紀錄重新推論。' }}</p>{% endif %}
     {% if p.get('preview_bounds',{}).get('side') %}
     {% for a in comparison.points %}{% if a.status != 'unavailable' %}
-    <details><summary>A{{ a.id }} · 局部圖片</summary><div class="sw-images">{{ image('front','A' ~ a.id ~ ' 正拍局部',a.id) }}{{ image('side','A' ~ a.id ~ ' 側拍局部',a.id) }}</div></details>
+    <details><summary>A{{ a.id }} · 正拍／側拍／OMIT 局部圖片</summary><div class="sw-images">{{ image('front','A' ~ a.id ~ ' 正拍局部',a.id) }}{{ image('side','A' ~ a.id ~ ' 側拍局部',a.id) }}{{ image('omit','A' ~ a.id ~ ' 側拍 OMIT 局部',a.id) }}</div></details>
     {% endif %}{% endfor %}{% endif %}
     {% if row.id %}
     <details><summary>候選與排除證據</summary>

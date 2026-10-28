@@ -56,6 +56,10 @@ from capi_scratch_batch import (
     STATE_RUNNING as SCRATCH_STATE_RUNNING,
 )
 from capi_version import get_version_info, read_changelog
+from capi_retention import (
+    RETENTION_PARAM, RETENTION_DESCRIPTION,
+    resolve_retention_policy, normalize_retention_policy,
+)
 from capi_image_naming import image_prefix_display_labels
 from capi_image_orientation import read_detection_image
 from capi_scratch_center import ScratchCenterMixin, SAMPLE_MANIFEST_LOCK
@@ -3931,6 +3935,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._handle_sop_file(query)
             elif path == "/debug":
                 self._handle_debug_page(path)
+            elif path == "/api/debug/side-white":
+                self._handle_debug_side_white_defaults(query)
             elif path == "/training":
                 self._handle_training_page()
             elif path == "/train/new":
@@ -4191,6 +4197,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._handle_scratch_distribute()
             elif path == "/api/debug/inference":
                 self._handle_debug_inference_run()
+            elif path == "/api/debug/side-white":
+                self._handle_debug_side_white_run()
             elif path == "/api/debug/mark-detection":
                 self._handle_debug_mark_detection()
             elif path == "/api/debug/preprocess-lab":
@@ -5451,6 +5459,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
             status.setdefault("server", {})["hostname"] = _get_host_identity()
             status["update"] = self._get_update_status_payload()
+            status["training"] = self._get_training_status_payload()
 
             # 將當班統計數據替換為 DB (支援重啟後恢復)
             if self.db:
@@ -5618,6 +5627,80 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 status=500,
                 headers=cors_headers,
             )
+
+    def _get_training_status_payload(self) -> Dict[str, Any]:
+        """Read-only activity summary; never expose training paths, logs or params."""
+        cls = type(self)
+        jobs = []
+        seen_job_ids = set()
+
+        def metadata(method, key):
+            # Optional labels must not make /api/status fail or hide a live job.
+            reader = getattr(self.db, method, None)
+            if reader is None or key is None:
+                return {}
+            try:
+                return reader(key) or {}
+            except Exception:
+                logger.debug("Cannot read training activity metadata", exc_info=True)
+                return {}
+
+        for state_name, kind in (
+            ("_submodel_retrain_state", "patchcore_submodel"),
+            ("_retrain_state", "scratch"),
+        ):
+            state = getattr(cls, state_name, None)
+            if not state:
+                continue
+            with state["lock"]:
+                job = dict(state.get("job") or {})
+            if job.get("state") != "running":
+                continue
+            machine_id = job.get("machine_id") or ""
+            if kind == "patchcore_submodel" and not machine_id:
+                machine_id = metadata("get_model_bundle", job.get("bundle_id")).get("machine_id") or ""
+            job_id = job.get("job_id") or ""
+            jobs.append({
+                "kind": kind,
+                "job_id": job_id,
+                "machine_id": machine_id,
+                "phase": job.get("step") or "train",
+                "unit": "-".join(str(job[k]) for k in ("lighting", "zone") if job.get(k)),
+            })
+            if job_id:
+                seen_job_ids.add(job_id)
+
+        with cls._train_slot["lock"]:
+            active_job_id = cls._train_slot.get("active_job_id")
+        with cls._train_new_jobs_lock:
+            runtimes = {job_id: dict(runtime) for job_id, runtime in cls._train_new_jobs.items()}
+        # Include a reserved slot before its supervisor/subprocess has started.
+        if active_job_id and active_job_id not in runtimes:
+            runtimes[active_job_id] = {"phase": "train"}
+        for job_id, runtime in runtimes.items():
+            if job_id in seen_job_ids:
+                continue
+            phase = runtime.get("phase")
+            if phase not in {"preprocess", "train"}:
+                continue
+            thread, proc = runtime.get("thread"), runtime.get("proc")
+            if not (job_id == active_job_id
+                    or (thread is not None and thread.is_alive())
+                    or (proc is not None and proc.poll() is None)):
+                continue
+            job = metadata("get_training_job", job_id)
+            if job.get("state") in {"completed", "failed"}:
+                continue
+            scope = job.get("training_scope") or {}
+            jobs.append({
+                "kind": "patchcore_partial" if scope.get("mode") == "partial" else "patchcore",
+                "job_id": job_id,
+                "machine_id": job.get("machine_id") or "",
+                "phase": phase,
+                "unit": "",
+            })
+
+        return {"active": bool(jobs), "jobs": jobs}
 
     def _handle_api_version(self):
         """API: deployed release version."""
@@ -8855,6 +8938,130 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             "product_resolution": list(resolution),
             "resolution_warning": warning,
         }
+
+    def _debug_side_white_config(self):
+        """Read current settings into a private config; DEBUG never updates live state."""
+        import copy
+        from capi_config import CAPIConfig
+
+        config = copy.deepcopy(self.inferencer.config) if self.inferencer else CAPIConfig()
+        if self.db:
+            config.apply_db_overrides([
+                row for row in self.db.get_all_config_params()
+                if row["param_name"].startswith(("side_white_", "dust_"))
+                or row["param_name"] == "inference_rotate_180_enabled"
+            ])
+        return config
+
+    def _debug_side_white_source(self, data):
+        """Bind a record to its original acquisition, even if newer files exist."""
+        from capi_side_white import find_side_white_pair
+
+        server_inst = getattr(self, "_capi_server_instance", None)
+        path_mapping = getattr(server_inst, "path_mapping", {}) or {}
+        record_id = data.get("record_id")
+        detail = None
+        if record_id not in (None, ""):
+            if isinstance(record_id, bool) or not re.fullmatch(r"[1-9][0-9]*", str(record_id)):
+                raise ValueError("推論紀錄編號無效")
+            detail = self.db.get_record_detail(int(record_id)) if self.db else None
+            if not detail:
+                raise ValueError("找不到此筆推論紀錄")
+            folder_value = detail.get("image_dir")
+            if not folder_value:
+                raise ValueError("此筆推論紀錄沒有影像資料夾")
+            folder = resolve_source_path(str(folder_value), path_mapping)
+            stored = (detail.get("side_white_result") or {}).get("payload", {})
+            side_name = stored.get("side_image") or None
+        else:
+            path_value = str(data.get("image_path") or "").strip()
+            if not path_value:
+                raise ValueError("請輸入側拍 SW0F00000 圖片或影像資料夾的絕對路徑")
+            path = resolve_source_path(path_value, path_mapping)
+            if not path.is_absolute():
+                raise ValueError("請使用影像的絕對路徑")
+            folder, side_name = (path, None) if path.is_dir() else (path.parent, path.name)
+        if not folder.is_dir():
+            raise ValueError(f"影像資料夾不存在：{folder}")
+        side, _ = find_side_white_pair(folder, side_name=side_name)
+        if side is None:
+            raise ValueError(f"找不到側拍白畫面：{side_name or 'SW0F00000'}")
+        model_id = detail.get("model_id", "") if detail else data.get("model_id")
+        resolution = self._debug_product_resolution(side, model_id)
+        return detail, side, resolution
+
+    def _handle_debug_side_white_defaults(self, query):
+        from capi_config import normalize_side_white_params
+
+        try:
+            config = self._debug_side_white_config()
+            result = {"parameters": normalize_side_white_params(config.side_white_detection_params),
+                      "rotate_180": bool(config.inference_rotate_180_enabled)}
+            if query.get("record_id"):
+                detail, side, resolution = self._debug_side_white_source({"record_id": query["record_id"][0]})
+                result["source"] = {"record_id": detail["id"], "glass_id": detail.get("glass_id", ""),
+                                    "image_path": str(side), **resolution}
+            self._send_json(result)
+        except (ValueError, TypeError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
+    def _handle_debug_side_white_run(self):
+        from capi_config import normalize_side_white_params
+        from capi_side_white import inspect_side_white_folder, snapshot_context
+        import tempfile
+
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("請提供 JSON 物件")
+            config = self._debug_side_white_config()
+            overrides = data.get("parameters", {})
+            if not isinstance(overrides, dict):
+                raise ValueError("側拍參數必須是物件")
+            params = normalize_side_white_params({**config.side_white_detection_params, **overrides})
+            rotated = data.get("rotate_180", config.inference_rotate_180_enabled)
+            if not isinstance(rotated, bool):
+                raise ValueError("旋轉設定必須是布林值")
+            detail, side, resolution = self._debug_side_white_source(data)
+            bomb_info = None
+            if detail and detail.get("client_bomb_info"):
+                bomb_info = json.loads(detail["client_bomb_info"])
+            context = snapshot_context(
+                config, getattr(getattr(self.inferencer, "edge_inspector", None), "config", None),
+                {"model_id": resolution["model_id"], "bomb_info": bomb_info},
+            )
+            if detail:
+                from capi_side_report import csjbl_points, inference_mark_evidence
+                context["aoi_csjbl_points"] = csjbl_points(
+                    detail.get("aoi_machine_coords"), detail.get("ng_details"))[0]
+                stored = (detail.get("side_white_result") or {}).get("payload", {})
+                # A DEBUG rotation override must not reuse boxes in the old orientation.
+                if "rotation_applied" in stored:
+                    context["inference_marks"] = stored.get("evidence_context", {}).get(
+                        "inference_marks", inference_mark_evidence(detail.get("images", [])))
+                    context["mark_rotation_applied"] = stored["rotation_applied"]
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            root = Path(CAPIWebHandler._debug_heatmap_dir)
+            root.mkdir(parents=True, exist_ok=True)
+            output_dir = Path(tempfile.mkdtemp(prefix="side_white_", dir=root))
+            payload = inspect_side_white_folder(
+                side.parent, output_dir, side_name=side.name, rotate_180=rotated,
+                params=params, context=context, include_all_candidates=True,
+            )
+            artifact_urls = {
+                key: "/debug/heatmaps/" + urllib.parse.quote(Path(value).relative_to(root).as_posix())
+                for key, value in payload.get("artifacts", {}).items()
+            }
+            self.init_jinja()
+            html = self.jinja_env.get_template("_side_white_result.html").render(
+                detail={"side_white_result": {"id": "debug", "status": payload["status"],
+                        "candidate_count": len(payload.get("candidates", [])), "payload": payload}},
+                embedded=True, debug_result=True, artifact_urls=artifact_urls,
+            )
+            self._send_json({"result_html": html, "payload": payload, **resolution})
+        except (ValueError, TypeError, OSError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
 
     def _handle_debug_inference_run(self):
         """API: 執行 Debug 單圖推論"""
@@ -12419,19 +12626,19 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             today = datetime.now().strftime("%Y-%m-%d")
             filters = {key: query.get(key, [default])[0] for key, default in (
                 ("start_date", today), ("end_date", today), ("group", "with_csjbl"),
-                ("machine_no", ""), ("model_id", ""), ("glass_id", ""), ("status", ""), ("review", ""))}
+                ("machine_no", ""), ("model_id", ""), ("glass_id", ""), ("status", ""), ("review", ""), ("conversion", ""))}
             limit = max(1, min(int(query.get("limit", [10])[0]), 20))
             offset = max(0, int(query.get("offset", [0])[0]))
             tolerance = float(query.get("tolerance", [50])[0])
             # Validate even an empty result page.
             compare_side_record({}, tolerance)
-            data = self.db.get_side_statistics(**filters, limit=limit, offset=offset,
+            data = self.db.get_side_statistics(**filters, limit=limit, offset=offset, tolerance=tolerance,
                                                include_rows=query.get("summary_only", [""])[0] != "1")
             self.init_jinja()
             template = self.jinja_env.get_template("_side_statistics_row.html")
             rows_html = []
             for row in data.pop("rows"):
-                comparison = compare_side_record(row, tolerance)
+                comparison = row["comparison"]
                 rows_html.append(template.render(row=row, comparison=comparison, review_decisions=REVIEW_DECISIONS))
             self._send_json({**data, "rows_html": "".join(rows_html), "limit": limit,
                              "offset": offset, "group": filters["group"]})
@@ -12539,7 +12746,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         try:
             kind = query.get("kind", ["side"])[0]
             row = self.db.get_side_white_result(int(query.get("id", [0])[0]))
-            if not row or (kind not in {"side", "front", "residual"} and not re.fullmatch(r"candidate_[1-9][0-9]*", kind)):
+            if not row or (kind not in {"side", "front", "omit", "residual"} and not re.fullmatch(r"candidate_[1-9][0-9]*", kind)):
                 self._send_404()
                 return
             stored = row["payload"].get("artifacts", {}).get(kind)
@@ -13475,6 +13682,22 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             server_config = (
                 getattr(self._capi_server_instance, "server_config", {}) or {}
             )
+            retention_param = next((p for p in params if p.get("param_name") == RETENTION_PARAM), None)
+            retention_policy = resolve_retention_policy(
+                server_config,
+                retention_param["decoded_value"] if retention_param else None,
+            )
+            retention_metadata = {
+                "param_name": RETENTION_PARAM,
+                "param_value": json.dumps(retention_policy, ensure_ascii=False),
+                "param_type": "dict",
+                "description": RETENTION_DESCRIPTION,
+                "decoded_value": retention_policy,
+            }
+            if retention_param is not None:
+                retention_param.update(retention_metadata)
+            else:
+                params.append({**retention_metadata, "updated_at": None})
             default_location = _default_central_account_location(server_config)
             location_param = next(
                 (
@@ -13581,6 +13804,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._send_json({"error": "請填寫修改原因"})
                 return
             user = self._current_settings_user() or {}
+            if param_name == RETENTION_PARAM:
+                try:
+                    new_value = normalize_retention_policy(new_value)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                    return
             if param_name == "side_white_detection_params":
                 if not user.get("can_manage_accounts"):
                     self._send_json({"error": "只有 admin 可以修改側拍檢測參數"}, status=403)
@@ -13641,6 +13870,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 changed_by=user.get("username", ""),
             )
             if success:
+                if param_name == RETENTION_PARAM:
+                    self._send_json({
+                        "success": True,
+                        "message": "資料保留設定已儲存；排程於一分鐘內更新，依每日清理時間執行",
+                        "policy": new_value,
+                    })
+                    return
                 if param_name == MARK_FORCED_CHAR_CONVERSIONS_PARAM:
                     set_forced_char_conversions(new_value)
                     logger.info(
@@ -14323,6 +14559,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 )
 
             completion_message = "完成"
+            if side_white_context is not None:
+                from capi_side_white import prepare_aoi_context
+                side_white_context = prepare_aoi_context(
+                    side_white_context,
+                    aoi_machine_coords if aoi_report else detail.get("aoi_machine_coords"),
+                    ng_details, image_results_data,
+                    rotate_180=bool(getattr(side_white_context["config"], "inference_rotate_180_enabled", False)),
+                )
             if side_white_context is not None:
                 from capi_side_white import inspect_side_white_folder
                 _update_status("正在重新檢測側拍與產生 OMIT 組合圖...")
@@ -15197,6 +15441,46 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if getattr(adapter, "profile", None) not in ("capi", "aapi"):
             adapter = create_station_adapter("capi")
         return adapter
+
+    @staticmethod
+    def _check_train_new_panel_images(panel_paths, machine_id, server_inst,
+                                     product_resolution=None, log=lambda _: None):
+        """Always screen training sources with the latest saved image-abnormal limits."""
+        import copy
+        from capi_config import CAPIConfig
+        from capi_training_precheck import check_training_panels
+
+        configs = getattr(server_inst, "configs_by_machine", {})
+        base = configs.get(machine_id) if isinstance(configs, dict) else None
+        if not isinstance(base, CAPIConfig):
+            base = getattr(server_inst, "fallback_config", None)
+        config = copy.deepcopy(base) if isinstance(base, CAPIConfig) else CAPIConfig()
+        # Read saved settings even when inference has not loaded this new machine.
+        config.apply_db_overrides(server_inst.database.get_all_config_params())
+        return check_training_panels(
+            panel_paths, config, CAPIWebHandler._train_new_station_adapter(server_inst),
+            product_resolution=(product_resolution or
+                CAPIWebHandler._product_resolution_for_machine(machine_id, server_inst)),
+            rotate_180=config.inference_rotate_180_enabled,
+            log=log,
+        )
+
+    def _screen_train_new_panel_selection(self, panel_paths, machine_id, product_resolution=None):
+        from capi_training_precheck import TrainingPanelPrecheckError
+
+        try:
+            return self._check_train_new_panel_images(
+                panel_paths, machine_id, self._capi_server_instance, product_resolution,
+            )
+        except TrainingPanelPrecheckError as exc:
+            self._send_json({
+                "error": str(exc), "code": "training_panel_image_abnormal",
+                "rejected_panels": exc.rejected_panels,
+            }, status=422)
+        except Exception as exc:
+            logger.exception("Training panel image precheck failed")
+            self._send_json({"error": f"畫異檢查無法完成，尚未切圖：{exc}"}, status=503)
+        return False
 
     @classmethod
     def _all_train_unit_labels(cls, server_inst=None) -> list:
@@ -16729,6 +17013,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     selected_resolution
                 )
 
+        image_precheck = self._screen_train_new_panel_selection(
+            clean_panel_paths, machine_id, grid_canonicalization.get("product_resolution"),
+        )
+        if image_precheck is False:
+            return
+        training_data_source["image_precheck"] = image_precheck
         job_id = generate_job_id(machine_id)
 
         # 註冊 runtime + 寫 DB（沒有 wizard singleton 檢查；多 job 可共存）。
@@ -16863,6 +17153,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 training_units=selected_units,
             )
             apply_user_training_params(cfg, training_params, log_fn=log)
+            image_precheck = cfg.training_data_source.get("image_precheck")
+            if image_precheck is None:
+                image_precheck = CAPIWebHandler._check_train_new_panel_images(
+                    panel_paths, machine_id, server_inst, cfg.product_resolution, log=log,
+                )
+            log("✓ 所選 PANEL 畫異檢查完成；切圖前確認來源圖片未變更")
             pre_cfg = PreprocessConfig(
                 **panel_boundary_config_for_station(station_adapter.profile, for_training=True),
                 tile_stride=cfg.tile_stride,
@@ -16908,6 +17204,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 allowed_prefixes=station_adapter.inference_prefixes,
                 boundary_reference_priority=station_adapter.boundary_reference_priority,
                 training_lighting_resolver=station_adapter.model_prefix,
+                image_precheck=image_precheck,
             )
             if stats["panel_success"] <= 0:
                 raise RuntimeError("沒有任何 panel 前處理成功")
@@ -19775,6 +20072,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             self._send_json({"error": "bundle missing machine_id"}, status=400)
             return
 
+        image_precheck = self._screen_train_new_panel_selection(
+            clean_panel_paths, machine_id, grid_canonicalization.get("product_resolution"),
+        )
+        if image_precheck is False:
+            return
         job_id = generate_job_id(machine_id).replace("train_", "subtrain_", 1)
         panel_modes = derive_panel_modes(len(clean_panel_paths))
 
@@ -19825,6 +20127,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         thread = threading.Thread(
             target=self._submodel_retrain_with_panels_worker,
             args=(bundle_id, lighting, zone, job_id, clean_panel_paths, training_params, panel_modes),
+            kwargs={"image_precheck": image_precheck},
             daemon=True,
             name=f"submodel-retrain-panels-{bundle_id}-{lighting}-{zone}",
         )
@@ -19847,6 +20150,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         panel_paths: list,
         training_params=None,
         panel_modes=None,
+        image_precheck=None,
     ):
         """背景 thread：重新選 panel 後，只訓練單一子模型並覆蓋原 .pt。"""
         import traceback
@@ -19955,6 +20259,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 inherited_training_params.pop(key, None)
             apply_user_training_params(cfg, inherited_training_params, log_fn=_log)
 
+            if image_precheck is None:
+                image_precheck = self._check_train_new_panel_images(
+                    panel_paths, machine_id, server_inst, cfg.product_resolution, log=_log,
+                )
             _set_step("preprocess")
             thumb_root = Path(".tmp/train_new_thumbs") / job_id
             _log(f"前處理 selected panels（只保留 lighting={lighting}）")
@@ -19984,6 +20292,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 log=_log,
                 panel_modes=panel_modes,
                 target_lightings=(lighting,),
+                image_precheck=image_precheck,
             )
             if stats["panel_success_full"] <= 0:
                 raise RuntimeError("沒有任何 full panel 前處理成功")
