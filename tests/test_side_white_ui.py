@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from jinja2 import Environment, FileSystemLoader
+from capi_side_report import side_white_view
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +65,9 @@ def test_readonly_result_escapes_evidence_and_hides_legacy_review():
     payload={'algorithm':'test','candidates':[],'reason':'<img src=x onerror=alert(1)>',
              'omit':{'image':'<script>bad</script>','reason':'unavailable'}}
     row={'id':1,'status':'ERROR','candidate_count':0,'payload':payload,'review_note':'old review','review_decision':'unreviewed'}
-    html=Environment(loader=FileSystemLoader(ROOT/'templates')).get_template('_side_white_result.html').render(detail={'glass_id':'test','side_white_result':row})
+    env = Environment(loader=FileSystemLoader(ROOT/'templates'))
+    env.globals['side_white_view'] = side_white_view
+    html=env.get_template('_side_white_result.html').render(detail={'glass_id':'test','side_white_result':row})
     assert '<script>bad</script>' not in html and '&lt;script&gt;bad&lt;/script&gt;' in html
     assert '<img src=x onerror=alert(1)>' not in html
     assert 'old review' not in html and 'Review' not in html

@@ -73,7 +73,7 @@ def test_rates_cover_whole_scope_and_mixed_records_are_counted_once(db):
     assert s["mark"] == {"points": 7, "records": 6}
     assert s["omit"] == {"points": 2, "records": 2}
     assert s["both_records"] == 1 and s["any_records"] == 7
-    assert s["eligible"] == {"mark": 1, "omit": 1, "mixed": 1}
+    assert s["eligible"] == {"mark": 1, "omit": 1, "tape": 0, "mixed": 1}
     assert s["eligible_records"] == 3 and s["blocked_records"] == 3 and s["already_ok_records"] == 1
     assert s["scope"]["denominator"] == 11 and s["scope"]["total"] == 13 and s["scope"]["other"] == 2
     assert s["scope"]["before_pct"] == pytest.approx(800 / 11)

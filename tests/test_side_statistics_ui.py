@@ -44,12 +44,13 @@ const projection = {
     scenarios: {
         mark:{converted:4, remaining_ng:36, after_pct:36, drop_pp:4, relative_drop_pct:10},
         omit:{converted:3, remaining_ng:37, after_pct:37, drop_pp:3, relative_drop_pct:7.5},
+        tape:{converted:0, remaining_ng:40, after_pct:40, drop_pp:0, relative_drop_pct:0},
         combined:{converted:8, remaining_ng:32, after_pct:32, drop_pp:8, relative_drop_pct:20},
     },
 };
 let conversionSummary = {
-    mark:{points:7, records:5}, omit:{points:5, records:4}, both_records:1, any_records:8,
-    eligible:{mark:4,omit:3,mixed:1}, eligible_records:8, blocked_records:0, already_ok_records:0,
+    mark:{points:7, records:5}, omit:{points:5, records:4}, tape:{points:2,records:1}, both_records:1, mixed_records:1, any_records:8,
+    eligible:{mark:4,omit:3,tape:0,mixed:1}, eligible_records:8, blocked_records:0, already_ok_records:0,
     scope:projection, csjbl:projection,
 };
 global.document = {getElementById:id => nodes[id]};
@@ -157,7 +158,15 @@ function clearFilters() { nodes['ss-clear'].listeners.click(); }
     assert.match(table, /8\.00 個百分點/);
     assert.match(table, /20\.00%/);
     assert.match(table, /40 − 8＝32/);
-    assert.match(table, /混合兩類 1 筆/);
+    assert.match(table, /混合類型 1 筆/);
+    assert.match(table, /只轉易撕貼/);
+    assert.match(table, /三類全部轉 OK/);
+    clickFilter('conversion','tape'); await flush();
+    assert.equal(requests.at(-1).get('conversion'),'tape');
+    assert.match(nodes['ss-current-filter'].textContent,/含易撕貼/);
+    clickFilter('conversion','eligible_tape'); await flush();
+    assert.equal(requests.at(-1).get('conversion'),'eligible_tape');
+    assert.match(nodes['ss-current-filter'].textContent,/僅靠易撕貼/);
     clickFilter('conversion','mark'); await flush();
     assert.equal(requests.at(-1).get('conversion'),'mark');
     assert.equal(form.elements.conversion.value,'mark');

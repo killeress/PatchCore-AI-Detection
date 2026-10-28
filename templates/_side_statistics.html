@@ -58,7 +58,7 @@
 #side-statistics .ss-record[open] .ss-expand,#side-statistics .ss-record:not([open]) .ss-collapse{display:none}
 #side-statistics .ss-record-body{border-top:1px solid var(--border);padding:4px 20px 18px}
 #side-statistics [data-review-dirty]{color:#fbbf24;font-size:12px}
-@media(max-width:700px){ #side-statistics .ss-record>summary{flex-wrap:wrap;gap:12px;padding:14px}#side-statistics .ss-record-title{flex-basis:calc(100% - 35px)}#side-statistics .ss-record-status{flex:1}#side-statistics .ss-record-body{padding:4px 14px 14px}}
+@media(max-width:1100px){ #side-statistics .ss-record>summary{flex-wrap:wrap;gap:12px;padding:14px}#side-statistics .ss-record-title{flex-basis:calc(100% - 35px)}#side-statistics .ss-record-status{flex:1}#side-statistics .ss-record-body{padding:4px 14px 14px}}
 #side-statistics .ss-review{padding-top:16px;border-top:1px solid var(--border)}
 #side-statistics .ss-review textarea{min-height:72px;flex-basis:100%}
 #side-statistics .ss-review input{width:140px}
@@ -88,7 +88,8 @@
                             <li><b>比對</b>：CSJBL 由正拍位置估算至側拍，容許誤差只影響此報表。無候選或位置接近，都需人工確認。</li>
                             <li><b>MARK</b>：沿用同次正式推論定位範圍。命中 MARK 且附近無保留候選時，該 AOI 點標示可轉 OK；其他點仍各自檢查，正式判定不變。</li>
                             <li><b>OMIT 比對</b>：每個 AOI 點提供正拍、側拍與 SPINIGBI 對照及候選重疊比例。預設僅標示疑似表面異物；啟用側拍灰塵屏蔽後，該點候選已排除且附近無保留候選，才建議可轉 OK。</li>
-                            <li><b>殘留貼紙</b>：OMIT 比對用來確認表面特徵，不能單獨確認貼紙種類。暗色本體覆蓋達門檻時會校正周圍亮暈，未覆蓋暗點及校正後仍超標亮點保留；缺圖或配對不明不建議轉 OK。</li>
+                            <li><b>貼紙</b>：OMIT 完整覆蓋暗色本體、已啟用屏蔽且 AOI 命中貼紙候選時，該點可轉 OK；其他候選、遮罩空洞、缺圖及未完成檢測仍保留檢查。</li>
+                            <li><b>易撕貼</b>：獨立使用側拍已辨識的右下角易撕貼範圍（含 180 度旋轉對應位置）。AOI 點須命中實際範圍，附近無其他保留候選與炸彈驗證範圍，才列為可轉 OK；不以整個角落或比對容許距離放行。</li>
                         </ul>
                     </div>
                 </details>
@@ -133,12 +134,15 @@
                 <label>明細轉 OK 分類 <select name="conversion">
                     <option value="">全部</option>
                     <option value="mark">含 MARK 可轉 OK 點</option>
-                    <option value="omit">含 OMIT 可轉 OK 點</option>
-                    <option value="both">同時含兩類可轉 OK 點</option>
+                    <option value="omit">含貼紙／表面異物可轉 OK 點</option>
+                    <option value="tape">含易撕貼可轉 OK 點</option>
+                    <option value="both">同時含 MARK 與貼紙可轉 OK 點</option>
+                    <option value="mixed">含多類可轉 OK 點</option>
                     <option value="either">含任一類可轉 OK 點</option>
-                    <option value="eligible">兩類合併可整筆轉 OK</option>
+                    <option value="eligible">三類合併可整筆轉 OK</option>
                     <option value="eligible_mark">僅靠 MARK 可整筆轉 OK</option>
                     <option value="eligible_omit">僅靠 OMIT 可整筆轉 OK</option>
+                    <option value="eligible_tape">僅靠易撕貼可整筆轉 OK</option>
                     <option value="blocked">有可轉 OK 點，但整筆仍需保留</option>
                 </select></label>
                 <label>比對範圍 <input name="tolerance" type="number" min="0" max="500" step="1" value="50" required style="width:80px">產品 px</label>

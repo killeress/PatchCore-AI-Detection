@@ -1,73 +1,29 @@
 {% autoescape true %}
-{% set p = row.payload %}
-{% set states = {'CANDIDATES':'保留候選','FILTERED':'候選已排除','NO_CANDIDATES':'未發現候選','NO_IMAGE':'無側拍圖','ERROR':'檢測失敗','NOT_RUN':'尚未檢測'} %}
-{% set matches = {'matched':'附近有保留候選','mark_suppressed':'MARK 屏蔽／可轉 OK','omit_suppressed':'OMIT 屏蔽／可轉 OK','filtered':'附近候選已排除','unmatched':'附近未找到候選','unavailable':'無法定位','unverified':'候選資料不完整'} %}
-{% macro image(kind, label, point=none) %}
-    {% if p.get('artifacts',{}).get(kind) %}
-    {% if comparison.has_csjbl and p.get('preview_bounds',{}).get(kind) %}
-    {% set url = '/api/ric/side-stats/image?id=' ~ row.id ~ '&kind=' ~ kind ~ '&tolerance=' ~ comparison.tolerance ~ ('&point=' ~ point if point else '') %}
-    {% else %}{% set url = '/api/side-white/image?id=' ~ row.id ~ '&kind=' ~ kind %}{% endif %}
-    <figure><a href="{{ url }}" target="_blank" rel="noopener"><img loading="lazy" src="{{ url }}" alt="{{ label }}" onerror="this.replaceWith(document.createTextNode('圖片無法顯示'))"></a><figcaption>{{ label }}</figcaption></figure>
-    {% endif %}
-{% endmacro %}
+{% set view = side_white_view(dict(row, comparison=comparison)) %}
 <article class="sw-card ss-row" data-record-id="{{ row.record_id }}">
     <details class="ss-record">
     <summary>
         <span class="ss-record-title"><strong>{{ row.glass_id }}</strong><small>{{ row.machine_no }} · {{ row.model_id }} · {{ row.request_time }}</small></span>
-        <span class="ss-record-status"><small>側拍狀態</small><span>{{ states.get(row.status,row.status) }}</span></span>
+        <span class="ss-record-status"><small>貼紙／表面異物</small><span class="sw-tone-{{ view.sticker.tone }}">{{ view.sticker.text }}</span></span>
+        <span class="ss-record-status"><small>MARK</small><span class="sw-tone-{{ view.mark.tone }}">{{ view.mark.text }}</span></span>
+        <span class="ss-record-status"><small>易撕貼</small><span class="sw-tone-{{ view.tape.tone }}">{{ view.tape.text }}</span></span>
         <span class="ss-record-status"><small>人工驗證</small><span data-review-label>{{ review_decisions.get(row.review_decision,'待驗證') }}</span><span data-review-dirty hidden>尚未儲存</span></span>
-        <span class="ss-record-action"><span class="ss-expand">{{ '查看／驗證' if row.id else '查看' }}</span><span class="ss-collapse">收合</span></span>
+        <span class="ss-record-action"><span class="ss-expand">查看／驗證</span><span class="ss-collapse">收合</span></span>
     </summary>
     <div class="ss-record-body">
-    <div class="sw-head"><p class="sw-note">正式結果：{{ row.ai_judgment }}</p><a href="/record/{{ row.record_id }}#side-white-result" target="_blank" rel="noopener">推論紀錄 #{{ row.record_id }} →</a></div>
-    {% if comparison.has_csjbl %}
-    <p class="sw-note">AOI {{ comparison.points|length }} 點 · 已定位 {{ comparison.mapped }} 點 · 附近有候選 {{ comparison.matched }} 點</p>
-    {% if comparison.mark_suppressed %}<p class="sw-badge">MARK 屏蔽／可轉 OK：{{ comparison.mark_suppressed }} 點（僅該 AOI 點的側拍建議）</p>{% endif %}
-    {% if comparison.omit_suppressed %}<p class="sw-badge">OMIT 屏蔽／可轉 OK：{{ comparison.omit_suppressed }} 點（僅該 AOI 點的側拍建議）</p>{% endif %}
-    {% if row.get('conversion',{}).get('category','none') != 'none' %}
-    <p class="sw-note" data-conversion-state><b>{{ '納入整筆轉 OK 試算' if row.conversion.eligible else '未納入整筆轉 OK 試算' }}</b>：{{ row.conversion.reason }}</p>
-    {% endif %}
-    {% if comparison.source == 'legacy' %}<p class="sw-note">AOI 座標由舊版紀錄還原。</p>{% endif %}
-    {% if comparison.reason %}<p class="sw-note">{{ comparison.reason }}</p>{% endif %}
-    {% if comparison.incomplete %}<p class="sw-badge sw-warn">候選資料不完整，請確認原圖。</p>{% endif %}
-    <details><summary>AOI 座標與比對</summary>
-    <p class="sw-note">比對範圍：{{ comparison.tolerance|round(2) }} 產品 px；座標以原圖左上角為原點。</p>
-    <div class="sw-scroll"><table class="sw-table"><thead><tr><th>AOI／正拍來源</th><th>來源座標 (X,Y)</th><th>正拍原圖 (X,Y)</th><th>側拍／OMIT 原圖 (X,Y)</th><th>比對結果</th><th>OMIT 表面證據</th></tr></thead><tbody>
-    {% for a in comparison.points %}
-    <tr><td>A{{ a.id }} · {{ a.image_prefix }}</td><td>{{ a.source_xy }}<br>{{ '產品座標' if a.coordinate_space == 'product' else '原圖像素' }}</td>
-        <td>{% if a.get('front_raw_xy') %}{{ a.front_raw_xy[0]|round(1) }}, {{ a.front_raw_xy[1]|round(1) }}{% else %}—{% endif %}</td>
-        <td>{% if a.get('side_raw_xy') %}{{ a.side_raw_xy[0]|round(1) }}, {{ a.side_raw_xy[1]|round(1) }}{% else %}—{% endif %}</td>
-        <td>{{ matches.get(a.status,a.status) }}{% if a.retained_candidate_ids %} #{{ a.retained_candidate_ids|join(', #') }}{% elif a.candidate_ids %} #{{ a.candidate_ids|join(', #') }}{% endif %}{% if a.reason %}<br>{{ a.reason }}{% endif %}</td>
-        <td>{% set o = a.get('omit',{}) %}{{ o.get('label','OMIT 無法比對') }}<br>{{ o.get('reason','') }}
-            {% for c in o.get('candidates',[]) %}<div>#{{ c.id }} · 重疊 {{ (c.overlap_ratio * 100)|round(1)|string + '%' if c.overlap_ratio is not none else '無法判斷' }}{% if c.uncovered_area_px is not none %} · 未覆蓋 {{ c.uncovered_area_px }} px{% endif %}{% if c.get('core_overlap_ratio') is not none %}<br>暗色本體覆蓋 {{ (c.core_overlap_ratio * 100)|round(1) }}%{% endif %}{% if c.get('halo_removed_area_px') %} · 消除亮暈 {{ c.halo_removed_area_px }} px{% endif %}</div>{% endfor %}
-        </td></tr>
-    {% endfor %}
-    </tbody></table></div></details>
-    {% else %}
-    <p class="sw-note">AOI 未提供 CSJBL，請查看圖片並人工確認。</p>
-    {% endif %}
-    {% if p.get('rotation_applied') %}<p class="sw-note">保存預覽已旋轉 180°；局部原圖維持原方向。</p>{% endif %}
-    <div class="sw-images">{{ image('front','正拍定位預覽') }}{{ image('side','側拍候選與 AOI 位置' if comparison.has_csjbl else '側拍候選') }}{{ image('omit','側拍 OMIT（SPINIGBI）與 AOI 位置') }}</div>
-    {% if not p.get('artifacts',{}).get('omit') %}<p class="sw-note">OMIT 對照圖不可用：{{ p.get('omit',{}).get('reason') or '舊紀錄未保存獨立 OMIT 預覽，可重新推論產生。' }}</p>{% endif %}
-    {% if not p.get('artifacts',{}).get('side') %}<p class="sw-note">{{ p.get('reason') or '尚無側拍圖片。啟用側拍檢測後，可由推論紀錄重新推論。' }}</p>{% endif %}
-    {% if p.get('preview_bounds',{}).get('side') %}
-    {% for a in comparison.points %}{% if a.status != 'unavailable' %}
-    <details><summary>A{{ a.id }} · 正拍／側拍／OMIT 局部圖片</summary><div class="sw-images">{{ image('front','A' ~ a.id ~ ' 正拍局部',a.id) }}{{ image('side','A' ~ a.id ~ ' 側拍局部',a.id) }}{{ image('omit','A' ~ a.id ~ ' 側拍 OMIT 局部',a.id) }}</div></details>
-    {% endif %}{% endfor %}{% endif %}
-    {% if row.id %}
-    <details><summary>候選與排除證據</summary>
-        {% set detail = {'glass_id':row.glass_id, 'side_white_result':row} %}{% set embedded = true %}{% include '_side_white_result.html' %}
-    </details>
-    <form class="sw-controls ss-review" data-result-id="{{ row.id }}">
-        <input type="hidden" name="expected_reviewed_at" value="{{ row.reviewed_at or '' }}">
-        <label>人工驗證 <select name="decision">{% for value,label in review_decisions.items() %}<option value="{{ value }}" {{ 'selected' if row.review_decision == value else '' }}>{{ label }}</option>{% endfor %}</select></label>
-        <label>驗證人 <input name="reviewer" value="{{ row.reviewed_by or '' }}" maxlength="80" required></label>
-        <label for="ss-note-{{ row.id }}">備註</label>
-        <textarea id="ss-note-{{ row.id }}" name="note" maxlength="2000" placeholder="缺陷、定位或判斷依據">{{ row.review_note or '' }}</textarea>
-        <button class="sw-btn" type="submit">儲存驗證結果</button>
-        <p class="sw-note ss-review-state" role="status" data-review-state>{% if row.reviewed_at %}{{ row.reviewed_by }} · {{ row.reviewed_at }}{% else %}尚未驗證{% endif %}</p>
-    </form>
-    {% endif %}
+        <div class="sw-head"><span class="sw-note">{{ row.glass_id }}</span><a href="/record/{{ row.record_id }}#side-white-result" target="_blank" rel="noopener">推論紀錄 #{{ row.record_id }} →</a></div>
+        {% set detail = dict(row, side_white_result=dict(row, comparison=comparison)) %}{% set embedded = true %}{% set statistics_result = true %}{% include '_side_white_result.html' %}
+        {% if row.id %}
+        <form class="sw-controls ss-review" data-result-id="{{ row.id }}">
+            <input type="hidden" name="expected_reviewed_at" value="{{ row.reviewed_at or '' }}">
+            <label>人工驗證 <select name="decision">{% for value,label in review_decisions.items() %}<option value="{{ value }}" {{ 'selected' if row.review_decision == value else '' }}>{{ label }}</option>{% endfor %}</select></label>
+            <label>驗證人 <input name="reviewer" value="{{ row.reviewed_by or '' }}" maxlength="80" required></label>
+            <label for="ss-note-{{ row.id }}">備註</label>
+            <textarea id="ss-note-{{ row.id }}" name="note" maxlength="2000" placeholder="缺陷、定位或判斷依據">{{ row.review_note or '' }}</textarea>
+            <button class="sw-btn" type="submit">儲存驗證結果</button>
+            <p class="sw-note ss-review-state" role="status" data-review-state>{% if row.reviewed_at %}{{ row.reviewed_by }} · {{ row.reviewed_at }}{% else %}尚未驗證{% endif %}</p>
+        </form>
+        {% endif %}
     </div>
     </details>
 </article>

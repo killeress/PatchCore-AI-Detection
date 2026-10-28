@@ -12,7 +12,8 @@ import pytest
 from jinja2 import Environment, FileSystemLoader
 
 from capi_database import CAPIDatabase
-from capi_side_report import compare_side_record, csjbl_points, has_csjbl, render_comparison_image
+from capi_side_report import (annotation_color, compare_side_record, csjbl_points, has_csjbl,
+                              render_comparison_image)
 
 
 def coordinate(x=400, y=200, **extra):
@@ -235,7 +236,8 @@ def test_previews_apply_saved_crop_and_resize_and_reject_external_paths(tmp_path
     comparison = compare_side_record(row)
     image = render_comparison_image(row, comparison, root)
     xy = np.rint((np.array(comparison["points"][0]["side_xy"]) - [100, 150]) * .5).astype(int)
-    assert np.array_equal(image[xy[1], xy[0]], [255, 255, 0])
+    assert np.array_equal(image[xy[1], xy[0]], [90, 90, 90])
+    assert np.array_equal(image[xy[1], xy[0] + 3], annotation_color("aoi"))
     crop = render_comparison_image(row, comparison, root, point_id=1)
     assert 90 <= crop.shape[0] < 300 and 90 <= crop.shape[1] < 500
     assert np.all(crop == 90)  # local evidence is not covered by the AOI marker
@@ -245,7 +247,9 @@ def test_previews_apply_saved_crop_and_resize_and_reject_external_paths(tmp_path
     row["payload"]["artifacts"]["side_clean"] = str(clean_path)
     row["payload"]["preview_bounds"]["side_clean"] = row["payload"]["preview_bounds"]["side"]
     assert np.all(render_comparison_image(row, comparison, root, point_id=1) == 40)
-    assert np.array_equal(render_comparison_image(row, comparison, root)[xy[1], xy[0]], [255, 255, 0])
+    overview = render_comparison_image(row, comparison, root)
+    assert np.array_equal(overview[xy[1], xy[0]], [225, 225, 225])
+    assert np.array_equal(overview[xy[1], xy[0] + 3], annotation_color("aoi"))
     del row["payload"]["artifacts"]["side_clean"]
     with pytest.raises(FileNotFoundError):
         render_comparison_image(row, comparison, root / "different")
@@ -376,8 +380,9 @@ def test_report_row_escapes_annotations_and_shows_no_match_crops():
                reviewed_at="", reviewed_by='" onfocus="bad()')
     row["payload"]["candidates"] = []
     row["payload"]["artifacts"] = {"side": "side.jpg"}
-    from capi_side_report import REVIEW_DECISIONS
+    from capi_side_report import REVIEW_DECISIONS, side_white_view
     env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"))
+    env.globals['side_white_view'] = side_white_view
     html = env.get_template("_side_statistics_row.html").render(row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
     assert '<script>bad()</script>' not in html and '&lt;script&gt;bad()&lt;/script&gt;' in html
     assert '<img src=x onerror=bad()>' not in html
@@ -386,15 +391,16 @@ def test_report_row_escapes_annotations_and_shows_no_match_crops():
 
 
 def test_mark_suggestion_is_shown_per_point_and_keeps_formal_ng_label():
-    from capi_side_report import REVIEW_DECISIONS
+    from capi_side_report import REVIEW_DECISIONS, side_white_view
     row = marked_row()
     row.update(id=2, record_id=1, ai_judgment="NG", review_decision="unreviewed")
     row["payload"]["candidates"] = []
     row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(), coordinate(800, 400)]})
     env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"))
+    env.globals['side_white_view'] = side_white_view
     html = env.get_template("_side_statistics_row.html").render(
         row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
-    assert "MARK 屏蔽／可轉 OK：1 點" in html
+    assert "已屏蔽 · 1 點可轉 OK" in html
     assert "正式結果：NG" in html and "附近未找到候選" in html
 
 
@@ -442,6 +448,8 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
     image_path = tmp_path / "side.jpg"
     cv2.imwrite(str(image_path), np.full((300, 500, 3), 90, np.uint8))
     payload["artifacts"]["side"] = str(image_path)
+    payload["artifacts"]["side_clean"] = str(image_path)
+    payload["preview_bounds"]["side_clean"] = payload["preview_bounds"]["side"]
     omit_path = tmp_path / "omit.jpg"
     cv2.imwrite(str(omit_path), np.full((300, 500), 25, np.uint8))
     payload["artifacts"]["omit"] = str(omit_path)
@@ -488,7 +496,14 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
             get(query_url + "&conversion=unknown")
         assert error.value.code == 400
         assert get(f"/api/ric/side-stats/image?id={result_id}&point=1").startswith(b"\x89PNG")
-        assert "OMIT 表面證據" in data["rows_html"] and "kind=omit" in data["rows_html"]
+        overview = cv2.imdecode(np.frombuffer(get(f"/api/side-white/image?id={result_id}&kind=side"), np.uint8), cv2.IMREAD_COLOR)
+        comparison = compare_side_record(db.get_side_statistics_record(result_id))
+        x, y = np.rint((np.array(comparison["points"][0]["side_xy"]) - [100, 150]) * .5).astype(int)
+        assert np.array_equal(overview[y, x], [225, 225, 225])
+        assert np.array_equal(overview[y, x + 3], annotation_color("aoi"))
+        clean_preview = cv2.imdecode(np.frombuffer(get(f"/api/side-white/image?id={result_id}&kind=side_clean"), np.uint8), cv2.IMREAD_COLOR)
+        assert np.all(clean_preview == 90)
+        assert "貼紙／表面異物" in data["rows_html"] and "kind=omit" in data["rows_html"]
         assert get(f"/api/side-white/image?id={result_id}&kind=omit").startswith(b"\xff\xd8")
         assert get(f"/api/ric/side-stats/image?id={result_id}&kind=omit").startswith(b"\x89PNG")
         # With the AOI original still on disk, the point crop is cut from it untouched.

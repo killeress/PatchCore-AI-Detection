@@ -2116,7 +2116,8 @@ class CAPIDatabase:
         try:
             total = conn.execute("SELECT COUNT(*)" + join + where, params).fetchone()[0]
             rows = conn.execute(
-                "SELECT s.*, r.glass_id, r.model_id, r.machine_no, r.ai_judgment, r.request_time"
+                "SELECT s.*, r.glass_id, r.model_id, r.machine_no, r.ai_judgment, r.request_time, "
+                "r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
                 + join + where + " ORDER BY s.id DESC LIMIT ? OFFSET ?",
                 params + [max(1, min(int(limit), 100)), max(0, int(offset))],
             ).fetchall()
@@ -2200,9 +2201,10 @@ class CAPIDatabase:
             scope_counts["other"] = scope_counts["total"] - scope_counts["ok"] - scope_counts["ng"]
             csjbl_counts = {key: 0 for key in ("total", "ok", "ng", "other")}
             conversions = {"mark": {"points": 0, "records": 0}, "omit": {"points": 0, "records": 0},
-                           "both_records": 0, "any_records": 0, "eligible_records": 0,
+                           "tape": {"points": 0, "records": 0},
+                           "both_records": 0, "mixed_records": 0, "any_records": 0, "eligible_records": 0,
                            "blocked_records": 0, "already_ok_records": 0,
-                           "eligible": {"mark": 0, "omit": 0, "mixed": 0}}
+                           "eligible": {"mark": 0, "omit": 0, "tape": 0, "mixed": 0}}
             cursor = conn.execute(
                 "SELECT s.*, r.id AS inference_record_id, r.glass_id, r.model_id, r.machine_no, r.request_time, "
                 "r.ai_judgment, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
@@ -2231,11 +2233,12 @@ class CAPIDatabase:
                     judgment = str(item.get("ai_judgment") or "")
                     csjbl_counts["ok" if judgment in {"OK", "OK-i"} else
                                  "ng" if judgment.startswith("NG") else "other"] += 1
-                    for kind in ("mark", "omit"):
+                    for kind in ("mark", "omit", "tape"):
                         count = converted[kind + "_points"]
                         conversions[kind]["points"] += count
                         conversions[kind]["records"] += bool(count)
-                    conversions["both_records"] += converted["category"] == "mixed"
+                    conversions["both_records"] += bool(converted["mark_points"] and converted["omit_points"])
+                    conversions["mixed_records"] += converted["category"] == "mixed"
                     conversions["any_records"] += converted["category"] != "none"
                     conversions["blocked_records"] += converted["state"] == "blocked"
                     conversions["already_ok_records"] += converted["state"] == "already_ok"

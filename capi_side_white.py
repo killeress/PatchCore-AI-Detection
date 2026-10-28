@@ -251,20 +251,6 @@ def _candidate_preview_scope(payload):
             "total": len(candidates), "reason": reason}
 
 
-def _draw_candidate_previews(views, candidates):
-    for item in candidates:
-        bx, by, bw, bh = item["side_bbox"]
-        for name in ("side", "residual"):
-            view = views[name]
-            cv2.rectangle(view, (bx - 5, by - 5), (bx + bw + 5, by + bh + 5), (0, 210, 255), 2)
-            cv2.putText(view, str(item["id"]), (bx, max(18, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, .7, (0, 210, 255), 2)
-        if views["front"] is not None:
-            contour = np.rint(item["front_contour"]).astype(np.int32)
-            cv2.polylines(views["front"], [contour], True, (0, 210, 255), 3)
-            px, py = np.rint(item["front_xy"]).astype(int)
-            cv2.putText(views["front"], str(item["id"]), (px + 8, py), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 210, 255), 3)
-
-
 def _save_preview(path, image):
     scale = min(1, 1800 / max(image.shape[:2]))
     if scale < 1:
@@ -761,32 +747,14 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
         side_view = _preview(side, quad)
         front_view = _preview(front, front_quad) if transform is not None else None
         residual_view = cv2.cvtColor(np.clip(128 + residual * 10, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-        for exclusion in exclusions:
-            bx, by, bw, bh = exclusion["bbox"]
-            cv2.rectangle(side_view, (bx, by), (bx + bw, by + bh), (230, 150, 60), 2)
-            cv2.putText(side_view, "MASK", (bx, max(18, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, .6, (230, 150, 60), 2)
-        for zone in zones:
-            cv2.polylines(side_view, [np.rint(zone["side_polygon"]).astype(np.int32)], True, (255, 150, 50), 3)
-        for mark in marks:
-            for view, key in ((side_view, "side_polygon"), (front_view, "front_polygon")):
-                if view is not None:
-                    polygon = np.rint(mark[key]).astype(np.int32)
-                    cv2.polylines(view, [polygon], True, (230, 150, 60), 2)
-                    cv2.putText(view, "MARK", tuple(polygon[0]), cv2.FONT_HERSHEY_SIMPLEX, .6, (230, 150, 60), 2)
-        for bomb in bombs:
-            if bomb.get("side_points"):
-                pts = np.rint(bomb["side_points"]).astype(np.int32)
-                cv2.polylines(side_view, [np.rint(bomb["side_tolerance_polygon"]).astype(np.int32)], True, (255, 0, 255), 2)
-                cv2.putText(side_view, f"B{bomb['id']}", tuple(pts[0]), cv2.FONT_HERSHEY_SIMPLEX, .8, (255, 0, 255), 2)
         payload["candidate_display"] = _candidate_preview_scope(payload)
-        selected = set(payload["candidate_display"]["candidate_ids"])
+        from capi_side_report import compare_side_record, draw_side_annotations
+        comparison = compare_side_record({"payload": payload, "status": payload["status"]},
+                                         params["csjbl_preview_radius_product_px"])
         views = {"side": side_view, "residual": residual_view, "front": front_view}
         all_views = {}
         if include_all_candidates:
-            full = {name: view.copy() if view is not None else None for name, view in views.items()}
-            _draw_candidate_previews(full, candidates)
-            all_views = {name + "_all": view for name, view in full.items()}
-        _draw_candidate_previews(views, [c for c in candidates if c["id"] in selected])
+            all_views = {name + "_all": view for name, view in views.items()}
         # Unannotated, unadjusted copies: report crops must show the defect as captured.
         side_clean = side
         front_clean = front if front_view is not None else None
@@ -800,7 +768,15 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                 left, top = max(0, bx - 20), max(0, by - 20)
                 crop = view[top:min(view.shape[0], by + bh + 20), left:min(view.shape[1], bx + bw + 20)]
                 payload.setdefault("preview_bounds", {})[name] = [left, top, crop.shape[1], crop.shape[0]]
+                if name in {"side", "front", "residual", "side_all", "front_all", "residual_all"}:
+                    # Annotate after thumbnail resizing, so labels stay readable on large captures.
+                    resize = min(1, 1800 / max(crop.shape[:2]))
+                    crop = (cv2.resize(crop, None, fx=resize, fy=resize, interpolation=cv2.INTER_AREA)
+                            if resize < 1 else crop.copy())
+                    draw_side_annotations(crop, payload, comparison, "front" if name.startswith("front") else "side",
+                                          payload["preview_bounds"][name], all_candidates=name.endswith("_all"))
                 payload["artifacts"][name] = _save_preview(output_dir / (name + ".jpg"), crop)
+        payload["preview_annotation_version"] = 2
     except (ValueError, OSError, cv2.error) as exc:
         payload["status"] = "ERROR"
         payload["reason"] = str(exc)

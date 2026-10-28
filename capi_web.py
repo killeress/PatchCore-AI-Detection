@@ -3605,6 +3605,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             cls.jinja_env.filters['fromjson'] = lambda s: json.loads(s) if s else {}
             cls.jinja_env.globals['hm_relative'] = hm_relative
             cls.jinja_env.globals['app_version'] = _AppVersionProxy()
+            from capi_side_report import side_white_view
+            cls.jinja_env.globals['side_white_view'] = side_white_view
             host_identity = _get_host_identity()
             station_profile = resolve_station_profile_from_hostname(
                 host_identity,
@@ -12745,9 +12747,18 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         # Same visibility as record detail; only serve artifacts recorded by this inspector.
         try:
             kind = query.get("kind", ["side"])[0]
-            row = self.db.get_side_white_result(int(query.get("id", [0])[0]))
-            if not row or (kind not in {"side", "front", "omit", "residual"} and not re.fullmatch(r"candidate_[1-9][0-9]*", kind)):
+            result_id = int(query.get("id", [0])[0])
+            row = (self.db.get_side_statistics_record(result_id) if kind in {"side", "front"}
+                   else self.db.get_side_white_result(result_id))
+            if not row or (kind not in {"side", "front", "side_clean", "front_clean", "omit", "residual"} and not re.fullmatch(r"candidate_[1-9][0-9]*", kind)):
                 self._send_404()
+                return
+            if kind in {"side", "front"} and row["payload"].get("preview_bounds", {}).get(kind):
+                from capi_side_report import compare_side_record, render_comparison_image
+                tolerance = row["payload"].get("parameters", {}).get("csjbl_preview_radius_product_px", 50)
+                comparison = compare_side_record(row, tolerance)
+                image = render_comparison_image(row, comparison, self.heatmap_base_dir, kind)
+                self._send_image_array_png(image)
                 return
             stored = row["payload"].get("artifacts", {}).get(kind)
             if not stored:

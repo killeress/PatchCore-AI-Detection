@@ -106,15 +106,16 @@ window.sideStatistics = (() => {
         const scope = s.scope, combined = scope.scenarios.combined;
         const subset = s.csjbl;
         const scenarios = [
-            ['mark', '只轉 MARK', 'eligible_mark'], ['omit', '只轉 OMIT', 'eligible_omit'],
-            ['combined', '兩類全部轉 OK（含混合）', 'eligible'],
+            ['mark', '只轉 MARK', 'eligible_mark'], ['omit', '只轉貼紙／表面異物', 'eligible_omit'],
+            ['tape', '只轉易撕貼', 'eligible_tape'], ['combined', '三類全部轉 OK（含混合）', 'eligible'],
         ];
-        target.innerHTML = `<div class="ss-card-head"><strong>MARK／OMIT 轉 OK 試算</strong><span>側拍建議 · 正式判定不變</span></div>
+        target.innerHTML = `<div class="ss-card-head"><strong>MARK／貼紙／易撕貼轉 OK 試算</strong><span>側拍建議 · 正式判定不變</span></div>
             <div class="ss-lines">
                 <div class="ss-line">${filterChip('MARK 可轉 OK', 'mark', s.mark.records)}<span>筆 · ${number(s.mark.points)} 點</span>
-                    ${filterChip('OMIT 可轉 OK', 'omit', s.omit.records)}<span>筆 · ${number(s.omit.points)} 點（表面異物，含貼紙）</span>
-                    ${filterChip('同時含兩類', 'both', s.both_records)} 筆</div>
-                <div class="ss-line">${filterChip('兩類合併可整筆轉 OK', 'eligible', s.eligible_records)}
+                    ${filterChip('貼紙／表面異物可轉 OK', 'omit', s.omit.records)}<span>筆 · ${number(s.omit.points)} 點</span>
+                    ${filterChip('易撕貼可轉 OK', 'tape', s.tape.records)}<span>筆 · ${number(s.tape.points)} 點</span>
+                    ${filterChip('含多類', 'mixed', s.mixed_records)} 筆</div>
+                <div class="ss-line">${filterChip('三類合併可整筆轉 OK', 'eligible', s.eligible_records)}
                     筆 ${filterChip('仍需保留', 'blocked', s.blocked_records)}<span>筆 · 原本已 OK ${number(s.already_ok_records)} 筆</span></div>
             </div>
             <p class="ss-rate">整體排片率 <strong>${pct(scope.before_pct)}</strong> → <strong class="c-ok">${pct(combined.after_pct)}</strong>
@@ -125,10 +126,10 @@ window.sideStatistics = (() => {
                     <td>${pp(r.drop_pp)}</td><td>${pct(r.relative_drop_pct)}</td></tr>`; }).join('')}
             </tbody></table></div>
             <p class="sw-note">分母：同日期／機台／機種／玻璃 ID 範圍的有效正式判定 ${number(scope.denominator)} 筆（OK ${number(scope.ok)}、NG ${number(scope.ng)}）；異常或未完成 ${number(scope.other)} 筆不列入。
-                排片率＝NG ÷ 有效判定；兩類全轉後 NG＝${number(scope.ng)} − ${number(combined.converted)}＝${number(combined.remaining_ng)}。</p>
+                排片率＝NG ÷ 有效判定；三類全轉後 NG＝${number(scope.ng)} − ${number(combined.converted)}＝${number(combined.remaining_ng)}。</p>
             <p class="sw-note">僅 CSJBL 範圍：${pct(subset.before_pct)} → ${pct(subset.scenarios.combined.after_pct)}，下降 ${pp(subset.scenarios.combined.drop_pp)}（分母 ${number(subset.denominator)} 筆）。</p>
-            <details><summary>試算與計數方式</summary><p class="sw-note">兩類筆數可能重疊，合併依檢測紀錄去重；同玻璃重送視為另次檢測。
-                只有整筆正式 NG 的全部 CSJBL 點及 NG 原因均已涵蓋，才計入排片減少。混合兩類 ${number(s.eligible.mixed)} 筆需同時轉 OK，僅列入合併情境。
+            <details><summary>試算與計數方式</summary><p class="sw-note">三類筆數可能重疊，合併依檢測紀錄去重；同玻璃重送視為另次檢測。
+                只有整筆正式 NG 的全部 CSJBL 點及 NG 原因均已涵蓋，才計入排片減少。混合類型 ${number(s.eligible.mixed)} 筆需同時轉 OK，僅列入合併情境。
                 已是 OK、仍有其他 NG、明細不足或人工驗證仍有疑慮的紀錄不計入減少；OMIT 僅標示模式不算已可轉 OK。
                 分母使用現存推論紀錄，包含其他 AOI 種類；明細維持僅顯示 CSJBL。明細篩選與換頁不改變試算範圍。</p></details>`;
     }
