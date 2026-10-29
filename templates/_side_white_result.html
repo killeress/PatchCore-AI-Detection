@@ -35,7 +35,7 @@
     </div>
     <div class="sw-head sw-result-links">
         <span class="sw-note">黃色僅標示 AOI 報點命中且仍需保留檢查的候選；灰色候選僅供參考，不影響該點判斷。# 編號沿用原始明細。</span>
-        <div class="sw-controls">{% set record_id = sw.get('record_id') or detail.get('id') %}{% if record_id and not debug_result %}<a href="/debug?tab=side-white&amp;record_id={{ record_id|string|urlencode }}" target="_blank" rel="noopener">DEBUG 側拍推論 →</a>{% endif %}{% if not embedded %}<a href="/settings?tab=side-white&amp;glass_id={{ detail.get('glass_id','')|urlencode }}">側拍結果總表 →</a>{% endif %}</div>
+        <div class="sw-controls">{% set record_id = sw.get('record_id') or detail.get('id') %}{% if record_id and not debug_result %}<a href="/debug?tab=side-white&amp;record_id={{ record_id|string|urlencode }}" target="_blank" rel="noopener">DEBUG 側拍推論 →</a>{% endif %}{% if not embedded %}<a href="/search?glass_id={{ detail.get('glass_id','')|urlencode }}">查詢同片推論紀錄 →</a>{% endif %}</div>
     </div>
     {% if view.comparison.points %}
     <div class="sw-aoi-points">

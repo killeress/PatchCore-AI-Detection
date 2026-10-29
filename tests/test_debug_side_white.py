@@ -93,6 +93,42 @@ def test_defaults_use_current_settings_and_record_source(debug_side):
     assert env.responses[-1][1]['parameters']['csjbl_preview_radius_product_px'] == 75
 
 
+def test_debug_reuses_exact_saved_front_geometry_and_rejects_rotation_mismatch(debug_side, monkeypatch):
+    import capi_side_white as sw
+    env = debug_side
+    front = env.side.with_name('W0F00000_153501.tif')
+    quad = sw.detect_panel_quad(cv2.imread(str(front), cv2.IMREAD_GRAYSCALE))
+    geometries = sw.snapshot_front_geometries([
+        SimpleNamespace(image_path=front, image_size=(700, 500), panel_polygon=quad)])
+    stored = {
+        'status': 'NO_CANDIDATES', 'candidates': [], 'side_image': env.side.name,
+        'rotation_applied': False, 'evidence_context': {'front_geometries': geometries},
+    }
+    conn = env.db._get_conn()
+    try:
+        conn.execute('UPDATE side_white_results SET payload=? WHERE record_id=?',
+                     (json.dumps(stored), env.record_id))
+        conn.commit()
+    finally:
+        conn.close()
+    before = env.db.get_record_detail(env.record_id)
+    original = sw.detect_panel_quad
+
+    def localize(gray, **kwargs):
+        assert kwargs.get('view') != 'front', 'saved front must not be localized again'
+        return original(gray, **kwargs)
+
+    monkeypatch.setattr(sw, 'detect_panel_quad', localize)
+    status, result = post(env, {'record_id': env.record_id, 'rotate_180': False})
+    assert status == 200
+    assert result['payload']['mapping']['front_geometry_source'] == 'formal_inference'
+    status, result = post(env, {'record_id': env.record_id, 'rotate_180': True})
+    assert status == 200
+    assert result['payload']['mapping']['status'] == 'unavailable'
+    assert '旋轉方向不一致' in result['payload']['mapping']['reason']
+    assert env.db.get_record_detail(env.record_id) == before
+
+
 def test_debug_radius_reads_settings_and_override_only_changes_preview(debug_side):
     env = debug_side
     image = cv2.imread(str(env.side), cv2.IMREAD_UNCHANGED)

@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import time
 import copy
+import logging
 from typing import Optional
 
 import cv2
@@ -12,7 +13,9 @@ import numpy as np
 from capi_config import normalize_side_white_params
 
 ALGORITHM = "side-white-cv-v5"
+logger = logging.getLogger("capi.side_white")
 _SIDE_NAME = re.compile(r"^(.*?)SW0F00000(_?\d{6})?$", re.IGNORECASE)
+_FRONT_NAME = re.compile(r"^(.*?)W0F00000(_?\d{6})?$", re.IGNORECASE)
 _IMAGE_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
 
 
@@ -58,7 +61,12 @@ def find_side_white_pair(folder: Path, *, side_name=None):
     match = _SIDE_NAME.fullmatch(side.stem)
     front_stem = (match[1] + "W0F00000" + (match[2] or "")).upper()
     fronts = [p for p in files if p.stem.upper() == front_stem]
-    front = max(fronts, key=lambda p: (p.stat().st_mtime_ns, p.name)) if fronts else None
+    if len(fronts) > 1:
+        logger.warning("[SIDE_WHITE_PAIR] side=%s status=unavailable reason=ambiguous_exact_front fronts=%s",
+                       side, [p.name for p in fronts])
+        return side, None
+    front = fronts[0] if fronts else None
+    pairing = "exact_acquisition"
     if front is None:
         # Front and side exposures are sequential, so their HHMMSS can differ.
         # Only fall back when this glass has one shot per camera; a lone old
@@ -69,20 +77,41 @@ def find_side_white_pair(folder: Path, *, side_name=None):
         fronts = [p for p in files if front_pattern.fullmatch(p.stem)]
         if len(same_glass_sides) == 1 and len(fronts) == 1:
             front = fronts[0]
+            pairing = "unique_sequential_pair"
+    logger.log(logging.INFO if front else logging.WARNING,
+               "[SIDE_WHITE_PAIR] side=%s front=%s status=%s method=%s",
+               side, front, "paired" if front else "unavailable",
+               pairing if front else "missing_or_ambiguous_front")
     return side, front
 
 
-def detect_panel_quad(gray: np.ndarray) -> np.ndarray:
+class PanelLocalizationError(ValueError):
+    def __init__(self, reason, diagnostics):
+        super().__init__(reason)
+        self.diagnostics = diagnostics
+
+
+def detect_panel_quad(gray: np.ndarray, *, source_name="", view="unknown", rotate_180=False) -> np.ndarray:
     """Fit the four bright-panel boundaries, returning TL/TR/BR/BL pixels."""
+    def fail(reason, stage, **metrics):
+        diagnostics = {"source_image": source_name, "view": view, "stage": stage,
+                       "image_size": [gray.shape[1], gray.shape[0]],
+                       "rotation_applied": bool(rotate_180), **metrics}
+        logger.warning("[SIDE_WHITE_LOCALIZATION] status=failed reason=%s details=%s", reason, diagnostics)
+        if "edge" in metrics:
+            reason += (f"（{metrics['edge']} 邊，p95={metrics['residual_p95_px']:.2f}px，"
+                       f"門檻={metrics['limit_px']:.2f}px）")
+        raise PanelLocalizationError(reason, diagnostics)
+
     blurred = cv2.GaussianBlur(gray, (9, 9), 1.5)
     _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contour = max(contours, key=cv2.contourArea) if contours else None
     if contour is None or cv2.contourArea(contour) < gray.size * .05:
-        raise ValueError("找不到完整白畫面面板")
+        fail("找不到完整白畫面面板", "foreground")
     coarse = cv2.approxPolyDP(contour, .015 * cv2.arcLength(contour, True), True).reshape(-1, 2)
     if len(coarse) != 4 or not cv2.isContourConvex(coarse):
-        raise ValueError("面板邊界不是完整四邊形")
+        fail("面板邊界不是完整四邊形", "coarse_quad", vertices=len(coarse))
     top, bottom = np.array_split(coarse[np.argsort(coarse[:, 1])], 2)
     quad = np.array([top[np.argmin(top[:, 0])], top[np.argmax(top[:, 0])],
                      bottom[np.argmax(bottom[:, 0])], bottom[np.argmin(bottom[:, 0])]], np.float32)
@@ -104,18 +133,96 @@ def detect_panel_quad(gray: np.ndarray) -> np.ndarray:
         edge = samples[np.arange(len(samples)), peaks].astype(np.float32)
         vx, vy, x, y = cv2.fitLine(edge, cv2.DIST_HUBER, 0, .01, .01).ravel()
         line = np.array([-vy, vx, vy * x - vx * y])
-        if np.percentile(np.abs(edge @ line[:2] + line[2]), 95) > max(3, radius * .1):
-            raise ValueError("面板邊線不穩定，無法可靠定位")
+        residual_p95 = float(np.percentile(np.abs(edge @ line[:2] + line[2]), 95))
+        limit = max(3, radius * .1)
+        if residual_p95 > limit:
+            fail("面板邊線不穩定，無法可靠定位", "edge_fit",
+                 edge=("top", "right", "bottom", "left")[index],
+                 residual_p95_px=residual_p95, limit_px=limit, samples=len(edge), radius_px=radius)
         lines.append(line)
     intersections = [np.cross(lines[(i - 1) % 4], lines[i]) for i in range(4)]
     if any(abs(point[2]) < 1e-6 for point in intersections):
-        raise ValueError("面板邊線無法相交")
+        fail("面板邊線無法相交", "intersection")
     quad = np.array([point[:2] / point[2] for point in intersections], np.float32)
     if (not np.isfinite(quad).all() or not cv2.isContourConvex(quad)
             or np.any(quad < -2) or np.any(quad[:, 0] > gray.shape[1] + 1)
             or np.any(quad[:, 1] > gray.shape[0] + 1)):
-        raise ValueError("面板邊界超出影像或形狀無效")
+        fail("面板邊界超出影像或形狀無效", "quad_validation", polygon=quad.tolist())
     return quad
+
+
+def _validated_front_quad(polygon, image_size):
+    quad = np.asarray(polygon, np.float32)
+    size = np.asarray(image_size, np.float64)
+    if (size.shape != (2,) or not np.isfinite(size).all() or np.any(size <= 0)
+            or quad.shape != (4, 2) or not np.isfinite(quad).all()
+            or not cv2.isContourConvex(quad) or cv2.contourArea(quad) < 1
+            or np.any(quad < -2) or np.any(quad > size + 1)):
+        raise ValueError("正拍四角或原圖尺寸無效")
+    # Preserve the formal TL/TR/BR/BL order; never silently reorder arbitrary geometry.
+    if (quad[:2, 1].mean() >= quad[2:, 1].mean()
+            or quad[[0, 3], 0].mean() >= quad[[1, 2], 0].mean()
+            or cv2.contourArea(quad, oriented=True) <= 0):
+        raise ValueError("正拍四角順序不是 TL/TR/BR/BL")
+    return quad
+
+
+def _file_signature(path):
+    stat = Path(path).stat()
+    return {"size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def snapshot_front_geometries(results, *, rotate_180=False):
+    """Copy verified geometry from this inference before queued I/O can outlive it."""
+    snapshots = []
+    for result in results or []:
+        source_path = getattr(result, "image_path", None)
+        if not source_path:
+            continue
+        path = Path(source_path)
+        if not _FRONT_NAME.fullmatch(path.stem) or _SIDE_NAME.fullmatch(path.stem):
+            continue
+        polygon = getattr(result, "panel_polygon", None)
+        if polygon is None:
+            continue
+        try:
+            quad = _validated_front_quad(polygon, result.image_size)
+            snapshots.append({"source_image": path.name, "source_path": str(path.resolve()),
+                              "image_size": list(result.image_size), "polygon": quad.tolist(),
+                              "rotation_applied": bool(rotate_180),
+                              "coordinate_space": "front_detection_pixels",
+                              "file_signature": _file_signature(path)})
+        except (ValueError, TypeError, OSError, cv2.error) as exc:
+            logger.warning("[SIDE_WHITE_GEOMETRY] source=%s status=rejected reason=%s", path, exc)
+    return snapshots
+
+
+def _front_quad_for_mapping(side_path, front_path, front, context, rotate_180):
+    """Reuse only the exact paired image's validated same-inference geometry."""
+    _, paired_front = find_side_white_pair(side_path.parent, side_name=side_path.name)
+    if paired_front is None or paired_front.resolve() != front_path.resolve():
+        raise ValueError("正側拍無法確認同次配對，拒絕套用正拍四角")
+    snapshots = context.get("front_geometries") or []
+    if not snapshots:
+        return detect_panel_quad(front, source_name=front_path.name, view="front",
+                                 rotate_180=rotate_180), "independent_detection"
+    matches = [item for item in snapshots if item.get("source_image") == front_path.name
+               and Path(item.get("source_path", "")).resolve() == front_path.resolve()]
+    if len(matches) != 1:
+        raise ValueError("配對正拍與本次正式推論的來源圖不一致或四角來源不唯一")
+    saved = matches[0]
+    if saved.get("coordinate_space") != "front_detection_pixels":
+        raise ValueError("正式正拍四角的座標系無效")
+    if not isinstance(saved.get("rotation_applied"), bool) or saved["rotation_applied"] != bool(rotate_180):
+        raise ValueError(f"正拍四角旋轉方向不一致：正式={saved.get('rotation_applied')}，側拍={rotate_180}")
+    if saved.get("image_size") != [front.shape[1], front.shape[0]]:
+        raise ValueError(f"正拍尺寸與正式定位不一致：正式={saved.get('image_size')}，目前={list(front.shape[::-1])}")
+    if saved.get("file_signature") != _file_signature(front_path):
+        raise ValueError("正拍來源檔已變更，拒絕沿用先前四角")
+    quad = _validated_front_quad(saved.get("polygon"), saved["image_size"])
+    logger.info("[SIDE_WHITE_GEOMETRY] source=%s status=reused method=formal_inference rotation=%s size=%s polygon=%s",
+                front_path, rotate_180, saved["image_size"], quad.tolist())
+    return quad, "formal_inference"
 
 
 def _candidates(gray, quad, params, *, limit=100, force_mask=None):
@@ -285,13 +392,16 @@ def snapshot_context(config, edge_config, parsed):
             "product_resolution": list(resolve_product_resolution(model_id, getattr(config, "model_resolution_map", None)))}
 
 
-def prepare_aoi_context(context, coords, ng_details="", images=(), *, rotate_180=False):
+def prepare_aoi_context(context, coords, ng_details="", images=(), *, rotate_180=False, formal_results=()):
     """Gate automatic inspection and bind MARK evidence to the same inference."""
     from capi_side_report import csjbl_points, inference_mark_evidence
     points, _ = csjbl_points(coords, ng_details)
     if not points:
         return None
-    return {**(context or {}), "aoi_scope": "with_csjbl",
+    context = dict(context or {})
+    if "front_geometries" not in context:
+        context["front_geometries"] = snapshot_front_geometries(formal_results, rotate_180=rotate_180)
+    return {**context, "aoi_scope": "with_csjbl",
             "aoi_csjbl_points": copy.deepcopy(points),
             "inference_marks": inference_mark_evidence(images), "mark_rotation_applied": bool(rotate_180)}
 
@@ -338,7 +448,8 @@ def load_omit_evidence(folder, side_path, context, rotate_180):
     if rotate_180:
         side = cv2.rotate(side, cv2.ROTATE_180)
     try:
-        quad = detect_panel_quad(side)
+        quad = detect_panel_quad(side, source_name=side_path.name, view="side_omit",
+                                 rotate_180=rotate_180)
     except (ValueError, cv2.error) as exc:
         return raw, None, {**info, "reason": f"側拍面板範圍無法辨識：{exc}"}
     overexposed, _, _, reason = detector.check_omit_overexposure(raw, panel_polygon=quad)
@@ -624,6 +735,8 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                              omit_info: Optional[dict] = None, include_all_candidates: bool = False) -> dict:
     """Detect in camera pixels, then map contours; missing mapping never implies OK."""
     started = time.perf_counter()
+    side_path = Path(side_path)
+    front_path = Path(front_path) if front_path else None
     payload = {"algorithm": ALGORITHM, "shadow_only": True, "status": "ERROR",
                "bomb_source_prefix": "W0F00000",
                "side_image": Path(side_path).name, "front_image": Path(front_path).name if front_path else "",
@@ -647,7 +760,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
             raise ValueError("側拍圖片無法讀取")
         if rotate_180:
             side = cv2.rotate(side, cv2.ROTATE_180)
-        quad = detect_panel_quad(side)
+        quad = detect_panel_quad(side, source_name=side_path.name, view="side", rotate_180=rotate_180)
         payload.update(side_size=[side.shape[1], side.shape[0]], side_polygon=quad.tolist())
         front, front_quad, transform = None, None, None
         if front_path:
@@ -657,16 +770,27 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                     raise ValueError("正拍圖片無法讀取")
                 if rotate_180:
                     front = cv2.rotate(front, cv2.ROTATE_180)
-                front_quad = detect_panel_quad(front)
+                front_quad, geometry_source = _front_quad_for_mapping(
+                    side_path, front_path, front, context, rotate_180)
                 transform = cv2.getPerspectiveTransform(quad, front_quad)
                 payload["front_size"] = [front.shape[1], front.shape[0]]
                 payload["mapping"] = {"status": "estimated", "method": "panel_border_homography",
+                                      "front_geometry_source": geometry_source,
+                                      "front_image": front_path.name, "rotation_applied": bool(rotate_180),
                                       "matrix": transform.tolist(), "front_polygon": front_quad.tolist(),
                                       "reason": "面板邊界估算；尚未做同設備多點校正，無全域精度保證"}
             except (ValueError, OSError, cv2.error) as exc:
-                payload["mapping"]["reason"] = str(exc)
+                front_quad, transform = None, None
+                payload["mapping"]["reason"] = f"正拍 {front_path.name} 定位／映射失敗：{exc}"
+                payload["mapping"]["diagnostics"] = getattr(exc, "diagnostics", {
+                    "source_image": front_path.name, "view": "front", "stage": "geometry_validation",
+                    "rotation_applied": bool(rotate_180)})
+                logger.warning("[SIDE_WHITE_MAPPING] side=%s front=%s rotation=%s status=unavailable reason=%s details=%s",
+                               side_path, front_path, rotate_180, exc, payload["mapping"]["diagnostics"])
         else:
             payload["mapping"]["reason"] = "缺少同次拍攝的正拍白畫面，僅保留側拍座標"
+            logger.warning("[SIDE_WHITE_MAPPING] side=%s front=none rotation=%s status=unavailable reason=%s",
+                           side_path, rotate_180, payload["mapping"]["reason"])
         bombs, force_mask = _bomb_geometry(context, front_quad, transform, side.shape, params)
         candidates, residual, exclusions, threshold, _ = _candidates(
             side, quad, params, limit=None, force_mask=force_mask)
@@ -779,6 +903,9 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
     except (ValueError, OSError, cv2.error) as exc:
         payload["status"] = "ERROR"
         payload["reason"] = str(exc)
+        payload["diagnostics"] = getattr(exc, "diagnostics", {})
+        logger.warning("[SIDE_WHITE_INSPECTION] side=%s front=%s rotation=%s status=ERROR reason=%s details=%s",
+                       side_path, front_path, rotate_180, exc, payload["diagnostics"])
     for item in payload["candidates"]:
         item.pop("_mask", None)
         if "side_raw_xy" not in item:

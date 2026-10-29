@@ -2416,7 +2416,6 @@
 
     window.switchTab = function (tabId) {
         currentTab = tabId;
-        if (tabId === 'side-white' && !sideWhite.loaded) loadSideWhite();
         document.querySelectorAll('.settings-tab-btn').forEach(btn => {
             if (btn.dataset.target === tabId) btn.classList.add('active');
             else btn.classList.remove('active');
@@ -2442,7 +2441,6 @@
         if (SETTINGS_USER && SETTINGS_USER.can_manage_accounts) {
             loadSettingsUsers();
             loadMarkShadow();
-            if (currentTab === 'side-white') loadSideWhite();
         }
     });
 
@@ -3790,7 +3788,7 @@
             <button class="settings-tab-btn ${currentTab === 'auto-model-switch' ? 'active' : ''}" data-target="auto-model-switch" onclick="switchTab('auto-model-switch')">↔ 自動切換模型</button>
             <button class="settings-tab-btn ${currentTab === 'data-retention' ? 'active' : ''}" data-target="data-retention" onclick="switchTab('data-retention')">🗄️ 資料保留</button>
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'mark-shadow' ? 'active' : ''}" data-target="mark-shadow" onclick="switchTab('mark-shadow')">🔬 Mark PPOCR檢查</button>` : ''}
-            ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'side-white' ? 'active' : ''}" data-target="side-white" onclick="switchTab('side-white')">側拍白畫面結果</button>` : ''}
+            ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'side-white' ? 'active' : ''}" data-target="side-white" onclick="switchTab('side-white')">側拍檢測設定</button>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<a class="settings-tab-btn" href="/white-frame" style="text-decoration:none;">🖼️ 白框總表</a>` : ''}
             ${SETTINGS_USER && SETTINGS_USER.can_manage_accounts ? `<button class="settings-tab-btn ${currentTab === 'accounts' ? 'active' : ''}" data-target="accounts" onclick="switchTab('accounts')">👤 帳號管理</button>` : ''}
             <button class="settings-tab-btn ${currentTab === 'history' ? 'active' : ''}" data-target="history" onclick="switchTab('history')">📋 修改紀錄</button>

@@ -9037,6 +9037,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 context["aoi_csjbl_points"] = csjbl_points(
                     detail.get("aoi_machine_coords"), detail.get("ng_details"))[0]
                 stored = (detail.get("side_white_result") or {}).get("payload", {})
+                # Keep exact-image provenance for replay; validation rejects stale files or rotation overrides.
+                if "front_geometries" in stored.get("evidence_context", {}):
+                    context["front_geometries"] = stored["evidence_context"]["front_geometries"]
                 # A DEBUG rotation override must not reuse boxes in the old orientation.
                 if "rotation_applied" in stored:
                     context["inference_marks"] = stored.get("evidence_context", {}).get(
@@ -14336,6 +14339,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             processing_seconds = _time.time() - start_time
 
             results = panel_result[0]
+            if side_white_context is not None:
+                from capi_side_white import snapshot_front_geometries
+                side_white_context["front_geometries"] = snapshot_front_geometries(
+                    results, rotate_180=bool(side_white_context["config"].inference_rotate_180_enabled),
+                )
             omit_overexposed = panel_result[2] if len(panel_result) > 2 else False
             omit_overexposure_info = panel_result[3] if len(panel_result) > 3 else ""
             is_duplicate = panel_result[4] if len(panel_result) > 4 else False

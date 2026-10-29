@@ -32,11 +32,17 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
     config.inference_rotate_180_enabled = scenario == 'rotated'
     config.side_white_detection_params = normalize_side_white_params()
     config.within_spec_judgment_enabled = False
+    formal_front = cv2.imread(str(front), cv2.IMREAD_GRAYSCALE)
+    if config.inference_rotate_180_enabled:
+        formal_front = cv2.rotate(formal_front, cv2.ROTATE_180)
+    formal_quad = capi_side_white.detect_panel_quad(formal_front)
     inferencer = SimpleNamespace(
         config=config, station_adapter=create_station_adapter('capi'),
         edge_inspector=SimpleNamespace(config=SimpleNamespace(
             all_exclude_zones_by_product={'J': [{'enabled': True, 'x': 0, 'y': 0, 'w': 10, 'h': 10}]})),
-        process_panel=MagicMock(return_value=([SimpleNamespace(image_path=front, edge_defects=[], preprocess_steps=[])], None, False, '', False, None, {})),
+        process_panel=MagicMock(return_value=([SimpleNamespace(
+            image_path=front, image_size=(700, 500), panel_polygon=formal_quad,
+            edge_defects=[], preprocess_steps=[])], None, False, '', False, None, {})),
     )
     db = CAPIDatabase(str(tmp_path / 'results.db'))
     record = db.save_inference_record(
@@ -90,6 +96,7 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
         assert '側拍' in cls._rerun_tasks[record]['message']
         return
     assert payload['rotation_applied'] == (scenario == 'rotated')
+    assert payload['mapping']['front_geometry_source'] == 'formal_inference'
     assert payload['omit']['image'] == 'SPINIGBI _153501.tif'
     assert payload['candidates'][0]['dust']['overlap_ratio'] > .8
     assert payload['bombs'][0]['status'] == 'matched'
@@ -214,7 +221,8 @@ def test_real_omit_detector_reused_without_model_load(tmp_path):
     assert raw is not None and callable(detector),info
     assert info['image']=='SPINIGBI _153501.tif'
     payload=inspect_side_white_image(side,front,tmp_path/'out',context=context,omit_image=raw,dust_detector=detector,omit_info=info)
-    assert payload['status']=='CANDIDATES',payload.get('reason')
+    assert payload['status']=='FILTERED',payload.get('reason')
+    assert payload['summary']['dust_suppressed'] > 0
     assert all(c['dust']['status']!='unavailable' for c in payload['candidates'])
     json.dumps(payload)
 

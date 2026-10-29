@@ -3085,6 +3085,11 @@ class CAPIServer:
             kwargs["side_white_params"] = dict(kwargs["side_white_params"])
         if kwargs.get("side_white_context") is not None:
             kwargs["side_white_context"] = copy.deepcopy(kwargs["side_white_context"])
+            from capi_side_white import snapshot_front_geometries
+            kwargs["side_white_context"]["front_geometries"] = snapshot_front_geometries(
+                kwargs.get("results", args[2] if len(args) > 2 else ()),
+                rotate_180=kwargs.get("side_white_rotate_180", False),
+            )
         with self._async_executor_lock:
             if self._async_executor_shutdown:
                 should_save_sync = True
@@ -4042,7 +4047,7 @@ class CAPIServer:
                 from capi_side_white import prepare_aoi_context
                 side_context = prepare_aoi_context(
                     side_white_context, aoi_machine_coords_str, ng_details, image_results_data,
-                    rotate_180=side_white_rotate_180,
+                    rotate_180=side_white_rotate_180, formal_results=results,
                 )
                 if side_context is not None:
                     self._save_side_white_result(record_id, parsed, heatmap_info, side_white_rotate_180,
@@ -4086,8 +4091,13 @@ class CAPIServer:
                                             params=params, context=context)
         try:
             self.db.save_side_white_result(record_id, payload, heatmap_dir=str(output_dir.resolve()) if payload.get("artifacts") else "")
-            logger.info("[SIDE_WHITE] record=%s status=%s candidates=%s TT=%sms formal_judgment=unchanged",
-                        record_id, payload["status"], len(payload["candidates"]), payload.get("processing_ms", 0))
+            mapping = payload.get("mapping", {})
+            logger.info("[SIDE_WHITE] record=%s status=%s candidates=%s TT=%sms mapping=%s geometry=%s "
+                        "side=%s front=%s rotation=%s reason=%s formal_judgment=unchanged",
+                        record_id, payload["status"], len(payload["candidates"]), payload.get("processing_ms", 0),
+                        mapping.get("status"), mapping.get("front_geometry_source"),
+                        payload.get("side_image"), payload.get("front_image"), rotate_180,
+                        payload.get("reason") or mapping.get("reason", ""))
         except Exception as exc:
             logger.warning("[SIDE_WHITE] Result save failed for record=%s: %s", record_id, exc, exc_info=True)
 

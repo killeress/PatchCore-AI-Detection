@@ -1,5 +1,3 @@
-    const sideWhiteLabels = {CANDIDATES:'發現候選',FILTERED:'候選已排除或屬於炸彈',NO_CANDIDATES:'未發現候選（非 OK 判定）',NO_IMAGE:'無側拍白畫面',ERROR:'檢測失敗'};
-    let sideWhite = {rows:[],total:0,offset:0,limit:20,loading:false,loaded:false,error:'',status:'',machine_no:'',glass_id:new URLSearchParams(location.search).get('glass_id') || ''};
     {% include "_side_white_params.js" %}
     let sideWhiteParamDraft = null, sideWhiteParamSaving = false, sideWhiteParamMessage = '';
 
@@ -54,47 +52,24 @@
             if (form) form.outerHTML = renderSideWhiteParams();
         }
     }
-    function updateSideWhitePane() {
-        const pane = document.getElementById('pane-side-white');
-        if (pane) pane.outerHTML = renderSideWhitePane();
-    }
-    async function loadSideWhite() {
-        if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts || sideWhite.loading) return;
-        sideWhite.loading = true; sideWhite.error = ''; updateSideWhitePane();
-        try {
-            const query = new URLSearchParams();
-            ['status','glass_id','machine_no','offset','limit'].forEach(k => query.set(k,String(sideWhite[k])));
-            const res = await fetch(`/api/settings/side-white?${query}`);
-            const data = await res.json();
-            if (!res.ok || data.error) throw new Error(data.error || '側拍資料載入失敗');
-            Object.assign(sideWhite,data,{loaded:true});
-        } catch(e) { sideWhite.error = e.message; }
-        finally { sideWhite.loading = false; updateSideWhitePane(); }
-    }
-    function searchSideWhite() {
-        ['status','glass_id','machine_no'].forEach(k => sideWhite[k] = document.getElementById('sw-filter-'+k).value.trim());
-        sideWhite.offset = 0; loadSideWhite();
-    }
-    function pageSideWhite(delta) {
-        sideWhite.offset = Math.max(0,sideWhite.offset + delta * sideWhite.limit); loadSideWhite();
-    }
     function renderSideWhitePane() {
         if (!SETTINGS_USER || !SETTINGS_USER.can_manage_accounts) return '';
-        const options = (labels,selected) => Object.entries(labels).map(([v,t]) => `<option value="${escapeAttr(v)}" ${v===selected?'selected':''}>${escapeHtml(t)}</option>`).join('');
-        const rows = sideWhite.rows.map(row => `<article>
-            <div class="sw-head"><strong>${escapeHtml(row.glass_id)} · ${escapeHtml(row.machine_no)} · ${escapeHtml(row.model_id)}</strong><a href="/record/${Number(row.record_id)}#side-white-result" target="_blank" rel="noopener">記錄 #${Number(row.record_id)} →</a></div>
-            <p class="sw-note">${escapeHtml(row.request_time)} · 正式結果：${escapeHtml(row.ai_judgment)}</p>
-            ${row.result_html || '<p>結果內容無法顯示，請開啟記錄。</p>'}
-        </article>`).join('');
+        const params = new URLSearchParams(location.search);
+        const recordQuery = new URLSearchParams();
+        ['glass_id','machine_no'].forEach(key => {
+            const value = params.get(key);
+            if (value) recordQuery.set(key,value);
+        });
+        const recordUrl = '/search' + (recordQuery.size ? `?${recordQuery}` : '');
         return `<div id="pane-side-white" class="settings-tab-pane-block ${currentTab==='side-white'?'active':''}" style="grid-column:1/-1;">
             {% include "_side_white_styles.html" %}
             ${renderSideWhiteParams()}
-            <div class="sw-card"><div class="sw-head"><h3>側拍白畫面結果</h3><span class="sw-badge">觀察模式 · 不影響最終判定</span></div>
-            <p class="sw-note">自動側拍結果；正拍位置為估算。</p>
-            <div class="sw-controls"><label>玻璃 ID <input id="sw-filter-glass_id" value="${escapeAttr(sideWhite.glass_id)}" size="18"></label><label>機台 <input id="sw-filter-machine_no" value="${escapeAttr(sideWhite.machine_no)}" size="12"></label>
-            <label>檢測 <select id="sw-filter-status">${options({'':'全部',...sideWhiteLabels},sideWhite.status)}</select></label><button class="sw-btn" onclick="searchSideWhite()" ${sideWhite.loading?'disabled':''}>查詢／重新整理</button></div>
-            <p class="sw-note" role="status">${escapeHtml(sideWhite.error||(sideWhite.loading?'載入中…':`共 ${sideWhite.total} 筆 · 本頁 ${sideWhite.rows.length} 筆`))}</p></div>
-            ${rows||'<div class="sw-empty">目前沒有符合條件的側拍結果。</div>'}
-            <div class="sw-controls"><button class="sw-btn" onclick="pageSideWhite(-1)" ${sideWhite.offset===0||sideWhite.loading?'disabled':''}>上一頁</button><span>第 ${Math.floor(sideWhite.offset/sideWhite.limit)+1} 頁</span><button class="sw-btn" onclick="pageSideWhite(1)" ${sideWhite.offset+sideWhite.limit>=sideWhite.total||sideWhite.loading?'disabled':''}>下一頁</button></div>
+            <div class="sw-card">
+                <div class="sw-head"><h3>側拍結果查閱</h3><span class="sw-badge">側拍分析 · 不影響正式判定</span></div>
+                <p class="sw-note">側拍統計提供 AOI 有 CSJBL 的結果查詢、分類統計與轉 OK 試算。</p>
+                <div class="sw-controls"><a class="sw-btn" href="/ric?tab=side-statistics" target="_blank" rel="noopener">前往側拍統計 →</a></div>
+                <p class="sw-note">沒有 CSJBL 的已保存結果也可由推論紀錄查閱。依玻璃 ID、機台或日期搜尋後，開啟單筆紀錄查看「側拍處理結果」。</p>
+                <div class="sw-controls"><a class="sw-btn" href="${escapeAttr(recordUrl)}" target="_blank" rel="noopener">查詢推論紀錄（含無 CSJBL） →</a></div>
+            </div>
         </div>`;
     }
