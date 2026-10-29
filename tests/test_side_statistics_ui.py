@@ -18,25 +18,23 @@ for (const id of ['side-statistics', 'ss-filters', 'ss-message', 'ss-rows', 'ss-
         addEventListener(type, fn){this.listeners[type] = fn;}, setAttribute(){}};
 }
 const form = nodes['ss-filters'];
-const fields = ['start_date', 'end_date', 'machine_no', 'model_id', 'glass_id', 'status', 'review', 'conversion', 'tolerance'];
+const fields = ['start_date', 'end_date', 'machine_no', 'model_id', 'glass_id', 'status', 'conversion', 'tolerance'];
 const template = fs.readFileSync('templates/_side_statistics.html', 'utf8');
 form.elements = Object.fromEntries(fields.map(key => [key, {
     value:key === 'tolerance' ? '50' : '', defaultValue:key === 'tolerance' ? '50' : '',
-    tagName:['status','review','conversion'].includes(key) ? 'SELECT' : 'INPUT',
+    tagName:['status','conversion'].includes(key) ? 'SELECT' : 'INPUT',
 }]));
-for (const key of ['status', 'review', 'conversion']) {
+for (const key of ['status', 'conversion']) {
     const select = template.match(new RegExp('<select name="' + key + '">([\\s\\S]*?)</select>'))[1];
     form.elements[key].options = [...select.matchAll(/<option value="([^"]*)">([^<]*)<\/option>/g)]
         .map(match => ({value:match[1], textContent:match[2]}));
 }
 form.reportValidity = () => true;
 form.querySelector = () => ({disabled:false});
-let dirty = false, saving = false, failNext = false, allowDiscard = false, confirmations = 0;
+let failNext = false;
 const requests = [];
-nodes['ss-rows'].querySelector = selector =>
-    ((selector.includes('data-dirty') && dirty) || (selector.includes('data-saving') && saving)) ? {} : null;
 const summary = {
-    with_csjbl: {total:12, candidates:10, clear:2, unreviewed:2, verified:10, confirmed:9, missed:1, accuracy:90},
+    with_csjbl: {total:12, candidates:8, clear:2, unavailable:2, unreviewed:2, verified:10, confirmed:9, missed:1, accuracy:90},
     without_csjbl: {total:3, clear:3, unreviewed:1, verified:2, correct_clear:2, accuracy:100},
 };
 const projection = {
@@ -54,12 +52,13 @@ let conversionSummary = {
     scope:projection, csjbl:projection,
 };
 global.document = {getElementById:id => nodes[id]};
-global.window = {confirm(){confirmations++; return allowDiscard;}, addEventListener(){}};
+global.window = {};
 global.fetch = async url => {
     const query = new URLSearchParams(url.split('?')[1]);
     requests.push(query);
+    assert.equal(query.has('review'), false);
     if (failNext) { failNext = false; throw new Error('offline'); }
-    return {ok:true, json:async () => ({total:query.get('review') ? 2 : 12, summary,
+    return {ok:true, json:async () => ({total:query.get('status') ? 2 : 12, summary,
         conversion_summary:conversionSummary, rows_html:'loaded rows'})};
 };
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -73,49 +72,38 @@ function clearFilters() { nodes['ss-clear'].listeners.click(); }
 
 @pytest.mark.parametrize("scenario", [
     r'''
-    // Cancelling a quick filter must not alter fields or turn the retry into a toggle-off.
-    dirty = true;
-    clickFilter('review', 'unreviewed'); await flush();
-    assert.equal(requests.length, 1);
-    assert.equal(confirmations, 1);
-    assert.equal(form.elements.review.value, '');
-    assert.equal(nodes['ss-clear'].hidden, true);
-    dirty = false;
-    clickFilter('review', 'unreviewed'); await flush();
-    assert.equal(requests.at(-1).get('review'), 'unreviewed');
-    assert.equal(form.elements.review.value, 'unreviewed');
-    const appliedLabel = nodes['ss-current-filter'].textContent;
-    dirty = true;
-    clearFilters(); await flush();
+    // System-status filters toggle and clear without a review workflow.
+    clickFilter('status', 'CANDIDATES'); await flush();
     assert.equal(requests.length, 2);
-    assert.equal(form.elements.review.value, 'unreviewed');
+    assert.equal(form.elements.status.value, 'CANDIDATES');
     assert.equal(nodes['ss-clear'].hidden, false);
-    assert.equal(nodes['ss-current-filter'].textContent, appliedLabel);
-    allowDiscard = true;
+    assert.match(nodes['ss-current-filter'].textContent, /保留候選/);
+    clickFilter('status', 'CANDIDATES'); await flush();
+    assert.equal(form.elements.status.value, '');
+    assert.equal(nodes['ss-clear'].hidden, true);
+    clickFilter('status', 'NOT_RUN,NO_IMAGE,ERROR'); await flush();
+    assert.equal(form.elements.status.value, 'NOT_RUN,NO_IMAGE,ERROR');
     clearFilters(); await flush();
-    assert.equal(form.elements.review.value, '');
-    assert.equal(requests.at(-1).get('review'), '');
-    assert.equal(confirmations, 3); // One confirmation per attempted query.
+    assert.equal(form.elements.status.value, '');
+    assert.equal(requests.at(-1).get('status'), '');
+    const visible = template + nodes['ss-overview'].innerHTML + nodes['ss-summary'].innerHTML
+        + nodes['ss-conversion'].innerHTML;
+    for (const label of ['人工驗證', '人工確認', '待驗證', '有效驗證', '正確率', '已處理', 'name="review"']) {
+        assert.ok(!visible.includes(label), label);
+    }
     ''',
     r'''
-    // Saving blocks navigation, and a failed request leaves the applied controls intact.
-    saving = true;
-    clickFilter('status', 'CANDIDATES'); await flush();
-    assert.equal(requests.length, 1);
-    assert.equal(form.elements.status.value, '');
-    saving = false;
+    // A failed request leaves the applied controls and loaded rows intact.
     clickFilter('status', 'CANDIDATES'); await flush();
     assert.equal(form.elements.status.value, 'CANDIDATES');
-    saving = true;
-    clearFilters(); await flush();
-    assert.equal(requests.length, 2);
-    assert.equal(form.elements.status.value, 'CANDIDATES');
-    saving = false;
+    const appliedLabel = nodes['ss-current-filter'].textContent;
     failNext = true;
     clearFilters(); await flush();
     assert.equal(form.elements.status.value, 'CANDIDATES');
     assert.equal(nodes['ss-clear'].hidden, false);
     assert.match(nodes['ss-message'].textContent, /offline/);
+    assert.equal(nodes['ss-current-filter'].textContent, appliedLabel);
+    assert.equal(nodes['ss-rows'].innerHTML, 'loaded rows');
     clearFilters(); await flush();
     assert.equal(form.elements.status.value, '');
     assert.equal(nodes['ss-clear'].hidden, true);
@@ -124,23 +112,24 @@ function clearFilters() { nodes['ss-clear'].listeners.click(); }
     // Only CSJBL contributes to the overview, even with an older API response.
     const overview = nodes['ss-overview'].innerHTML;
     assert.match(overview, /總筆數<b>12<\/b>/);
-    assert.match(overview, /90\.0%/);
+    assert.match(overview, /已完成檢測<b>10<\/b>/);
+    assert.match(overview, /未完成檢測<b class="c-pending">2<\/b>/);
     assert.ok(!nodes['ss-summary'].innerHTML.includes('AOI 無 CSJBL'));
     const scope = nodes['ss-scope'].textContent;
     form.elements.machine_no.value = 'DRAFT_MACHINE';
     form.elements.start_date.value = '2020-01-01';
-    clickFilter('review', 'confirmed,correct_clear'); await flush();
+    clickFilter('status', 'CANDIDATES'); await flush();
     assert.equal(requests.at(-1).get('machine_no'), '');
     assert.notEqual(requests.at(-1).get('start_date'), '2020-01-01');
     assert.equal(nodes['ss-overview'].innerHTML, overview);
     assert.equal(nodes['ss-scope'].textContent, scope);
-    assert.match(nodes['ss-current-filter'].textContent, /人工確認正確/);
+    assert.match(nodes['ss-current-filter'].textContent, /保留候選/);
     assert.match(nodes['ss-page'].textContent, /共 2 筆/);
     const requestCount = requests.length;
-    clickFilter('review', 'confirmed,correct_clear', 'without_csjbl'); await flush();
+    clickFilter('status', 'CANDIDATES', 'without_csjbl'); await flush();
     assert.equal(requests.length, requestCount);
     assert.equal(requests.at(-1).get('group'), 'with_csjbl');
-    assert.equal(requests.at(-1).get('review'), 'confirmed,correct_clear');
+    assert.equal(requests.at(-1).get('status'), 'CANDIDATES');
     assert.equal(nodes['ss-overview'].innerHTML, overview);
     clearFilters(); await flush();
     assert.equal(requests.at(-1).get('machine_no'), '');
@@ -173,10 +162,8 @@ function clearFilters() { nodes['ss-clear'].listeners.click(); }
     assert.match(nodes['ss-current-filter'].textContent,/含 MARK/);
     assert.equal(nodes['ss-clear'].hidden,false);
     assert.match(nodes['ss-conversion'].innerHTML,/40 − 8＝32/);
-    dirty = true;
     clickFilter('conversion','omit'); await flush();
-    assert.equal(form.elements.conversion.value,'mark');
-    dirty = false;
+    assert.equal(form.elements.conversion.value,'omit');
     clearFilters(); await flush();
     assert.equal(requests.at(-1).get('conversion'),'');
     assert.equal(form.elements.conversion.value,'');
@@ -190,7 +177,7 @@ function clearFilters() { nodes['ss-clear'].listeners.click(); }
     assert.ok(!nodes['ss-conversion'].innerHTML.includes('Infinity'));
     assert.match(nodes['ss-conversion'].innerHTML, /<strong>—<\/strong>/);
     ''',
-], ids=["cancelled_filters", "saving_and_failed_requests", "applied_scope", "conversion_projection"])
+], ids=["system_status_filters", "failed_requests", "applied_scope", "conversion_projection"])
 def test_report_filter_interactions(scenario):
     node = shutil.which("node")
     if not node:

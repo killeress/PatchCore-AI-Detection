@@ -23,8 +23,8 @@ OMIT_COMPARISON_STATES = {
 SIDE_ANNOTATION_LEGEND = [
     {"key": "aoi", "color": "#F43F5E", "tag": "+ A1", "label": "AOI 報點",
      "hint": "中空十字標示 AOI TXT 映射位置，中心保留原始像素；A1 對應下方完整座標。"},
-    {"key": "candidate", "color": "#FACC15", "tag": "#1", "label": "檢測候選",
-     "hint": "側拍檢出的原始候選；是否已排除請看處理結論。"},
+    {"key": "candidate", "color": "#FACC15", "tag": "#1", "label": "保留檢查候選",
+     "hint": "黃色輪廓與 # 編號僅顯示仍需保留檢查的候選，編號沿用原始候選明細。"},
     {"key": "mark", "color": "#22D3EE", "tag": "MARK / PRINT", "label": "MARK／印字屏蔽",
      "hint": "MARK 為定位標記，PRINT 為角落印字；框線表示屏蔽範圍。"},
     {"key": "zone", "color": "#A78BFA", "tag": "ZONE", "label": "設定不檢測區",
@@ -92,7 +92,7 @@ def record_conversion(row, comparison):
     elif mark + omit + tape != len(points):
         result["reason"] = "仍有 CSJBL 點未符合 MARK／貼紙／易撕貼轉 OK 條件"
     elif row.get("review_decision") in {"confirmed", "missed", "mapping_error", "uncertain"}:
-        result["reason"] = "人工驗證仍有缺陷、定位疑慮或尚無法確認，暫不計入整筆轉 OK"
+        result["reason"] = "既有紀錄仍有缺陷、定位疑慮或尚無法確認，暫不計入整筆轉 OK"
     else:
         from capi_image_naming import canonical_image_prefix
         details = _json(row.get("ng_details"), None)
@@ -313,6 +313,32 @@ def _transform(points, matrix):
     return result
 
 
+def _report_mark_regions(payload, fallback=()):
+    """Keep exact formal and saved side-detection masks, without ROI padding."""
+    marks = mapped_inference_marks(payload, fallback)
+    try:
+        width, height = map(float, payload["side_size"])
+        if not np.isfinite([width, height]).all() or min(width, height) <= 0:
+            return marks
+    except (KeyError, TypeError, ValueError):
+        return marks
+    for exclusion in payload.get("exclusions", []):
+        if exclusion.get("type") not in {"mark", "corner_print"}:
+            continue
+        try:
+            x, y, w, h = map(float, exclusion["bbox"])
+            if (not np.isfinite([x, y, w, h]).all() or min(x, y) < 0 or min(w, h) <= 0
+                    or x + w > width or y + h > height):
+                continue
+            polygon = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+            if not any(np.allclose(polygon, m["side_polygon"], atol=.001, rtol=0) for m in marks):
+                marks.append({"name": exclusion["type"], "side_bbox": [x, y, w, h],
+                              "side_polygon": polygon})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return marks
+
+
 def peel_tape_regions(payload):
     """Reuse bounded corner-tape detections, including saved v5 observations.
 
@@ -361,6 +387,7 @@ def compare_side_record(row, tolerance=50):
 
     Matching is proximity to candidate contours in product pixels, not a statement
     that AOI or the detector is correct. Filtered and bomb candidates stay distinct.
+    A MARK inside the point's ROI removes only candidates covered by its exact mask.
     """
     row = _side_record_source(row)
     tolerance = float(tolerance)
@@ -374,7 +401,7 @@ def compare_side_record(row, tolerance=50):
               "incomplete": bool(payload.get("truncated")), "reason": ""}
     if not points:
         return result
-    marks = mapped_inference_marks(payload, row.get("inference_marks", []))
+    marks = _report_mark_regions(payload, row.get("inference_marks", []))
     tapes = peel_tape_regions(payload)
     to_front = to_side = to_product = None
     resolution = payload.get("evidence_context", {}).get("product_resolution") or [
@@ -408,7 +435,7 @@ def compare_side_record(row, tolerance=50):
                 "coordinate_space": point.get("coordinate_space", "product"),
                 "status": "unavailable", "reason": result["reason"],
                 "candidate_ids": [], "retained_candidate_ids": [], "sticker_candidate_ids": [],
-                "tape_candidate_ids": [],
+                "tape_candidate_ids": [], "mark_candidate_ids": [],
                 "omit": {"status": "unavailable", "label": OMIT_COMPARISON_STATES["unavailable"],
                          "reason": "尚無有效 AOI 映射", "candidates": []}}
         result["points"].append(item)
@@ -443,9 +470,13 @@ def compare_side_record(row, tolerance=50):
             # Pixel bounds are half-open, matching the formal inference mask.
             point_marks = []
             for mark in marks:
-                x, y, w, h = mark["front_bbox"]
-                if x <= front_xy[0] < x + w and y <= front_xy[1] < y + h:
+                x, y, w, h = mark.get("front_bbox", mark.get("side_bbox"))
+                mark_xy = front_xy if "front_bbox" in mark else side_xy
+                if x <= mark_xy[0] < x + w and y <= mark_xy[1] < y + h:
                     point_marks.append(mark)
+            roi_marks = [mark for mark in marks if mark in point_marks or (tolerance > 0 and
+                cv2.intersectConvexConvex(np.asarray(mark["side_polygon"], np.float32),
+                                         np.asarray(item["side_roi"], np.float32))[0] > 0)]
             point_tapes = [t for t in tapes if t["bbox"][0] <= side_xy[0] < t["bbox"][0] + t["bbox"][2]
                            and t["bbox"][1] <= side_xy[1] < t["bbox"][1] + t["bbox"][3]]
             nearby, omit_covers_point = [], False
@@ -478,10 +509,13 @@ def compare_side_record(row, tolerance=50):
                     remaining = candidate.get("remaining_contours", [contour])
                     # Old results may still contain a MARK candidate. Only remove
                     # whole contours contained in a confirmed MARK, never neighbours.
-                    remaining = [c for c in remaining if not (point_marks and any(
+                    outside_mark = [c for c in remaining if not (roi_marks and len(c) >= 3 and any(
                         all(cv2.pointPolygonTest(np.asarray(m["side_polygon"], np.float32),
                                                 tuple(map(float, xy)), False) >= 0 for xy in c)
-                        for m in point_marks))]
+                        for m in roi_marks))]
+                    if remaining and not outside_mark:
+                        item["mark_candidate_ids"].append(candidate["id"])
+                    remaining = outside_mark
                     if point_tapes:
                         outside_tape = [c for c in remaining if not any(
                             len(c) >= 3 and all(cv2.pointPolygonTest(np.asarray(t["side_polygon"], np.float32),
@@ -495,7 +529,7 @@ def compare_side_record(row, tolerance=50):
             item["status"] = ("matched" if item["retained_candidate_ids"] else
                               "filtered" if item["candidate_ids"] else "unmatched")
             item["reason"] = ""
-            item["omit"] = _point_omit_evidence(payload, nearby)
+            item["omit"] = _point_omit_evidence(payload, [c for c in nearby if c["id"] not in item["mark_candidate_ids"]])
             item["omit"]["label"] = OMIT_COMPARISON_STATES[item["omit"]["status"]]
             if (omit_covers_point and not item["retained_candidate_ids"]
                     and item["omit"]["status"] == "suppressed"):
@@ -517,13 +551,25 @@ def compare_side_record(row, tolerance=50):
                         item["status"] = "unverified"
                     item["reason"] = ("AOI 點位於易撕貼，但涉及炸彈驗證範圍，保留檢查" if bomb_overlap else
                                       "AOI 點位於易撕貼，但附近仍有範圍外候選，需人工確認")
-            if point_marks:
-                item["mark_regions"] = [m["name"] for m in point_marks]
-                if not item["retained_candidate_ids"]:
+            if roi_marks and (point_marks or item["status"] not in {"omit_suppressed", "tape_suppressed"}):
+                item["mark_regions"] = [m["name"] for m in roi_marks]
+                item["mark_match_basis"] = "point" if point_marks else "roi"
+                bomb_overlap = any(c.get("bomb_ids") for c in nearby) or any(
+                    len(b.get("side_tolerance_polygon", [])) >= 3 and (
+                        cv2.pointPolygonTest(np.asarray(b["side_tolerance_polygon"], np.float32),
+                                             tuple(map(float, side_xy)), False) >= 0 or (tolerance > 0 and
+                        cv2.intersectConvexConvex(np.asarray(b["side_tolerance_polygon"], np.float32),
+                                                 np.asarray(item["side_roi"], np.float32))[0] > 0))
+                    for b in payload.get("bombs", []))
+                if not item["retained_candidate_ids"] and not bomb_overlap:
                     item["status"] = "mark_suppressed"
-                    item["reason"] = "AOI 點位於正式推論 MARK 範圍，該點可轉 OK（側拍建議）"
+                    item["reason"] = ("AOI 點位於已確認的 MARK 範圍，該點可轉 OK（側拍建議）" if point_marks else
+                                      "AOI ROI 內的 MARK 已屏蔽，且無其他保留候選，該點可轉 OK（側拍建議）")
                 else:
-                    item["reason"] = "AOI 點位於 MARK，但附近仍有範圍外候選，需人工確認"
+                    if bomb_overlap:
+                        item["status"] = "unverified"
+                    item["reason"] = ("AOI ROI 內有 MARK，但涉及炸彈驗證範圍，保留檢查" if bomb_overlap else
+                                      "AOI ROI 內的 MARK 已屏蔽，但仍有範圍外候選，保留檢查")
             if row.get("status") not in {"CANDIDATES", "NO_CANDIDATES", "FILTERED"} or payload.get("truncated"):
                 item["status"] = "unverified"
                 item["reason"] = "檢測未完成或候選資料曾截斷，僅供位置對照"
@@ -537,6 +583,24 @@ def compare_side_record(row, tolerance=50):
     return result
 
 
+def retained_candidate_contours(payload, inference_marks=()):
+    """Return only unsuppressed side-pixel contours for yellow annotations."""
+    masks = [m["side_polygon"] for m in _report_mark_regions(payload, inference_marks)]
+    masks.extend(t["side_polygon"] for t in peel_tape_regions(payload))
+    retained = {}
+    for candidate in payload.get("candidates", []):
+        if (candidate.get("disposition", "retained") != "retained" or candidate.get("bomb_ids")
+                or omit_sticker_candidate(payload, candidate)):
+            continue
+        contours = candidate.get("remaining_contours", [candidate.get("side_contour", [])])
+        contours = [c for c in contours if len(c) >= 3 and not any(
+            all(cv2.pointPolygonTest(np.asarray(mask, np.float32), tuple(map(float, xy)), False) >= 0
+                for xy in c) for mask in masks)]
+        if contours:
+            retained[candidate["id"]] = contours
+    return retained
+
+
 def side_white_view(row, detail=None):
     """One presentation for record details, DEBUG, and the statistics list."""
     source = _side_record_source(row, detail)
@@ -546,8 +610,11 @@ def side_white_view(row, detail=None):
     points = comparison["points"]
     candidates = payload.get("candidates", [])
     nearby_ids = {i for point in points for i in point["candidate_ids"]}
+    yellow_nearby_ids = {i for point in points for i in point["retained_candidate_ids"]}
+    yellow_ids = set(retained_candidate_contours(payload, source.get("inference_marks", [])))
+    mark_ids = {i for point in points for i in point.get("mark_candidate_ids", [])}
     nearby = [c for c in candidates if c["id"] in nearby_ids] if points else candidates
-    omit = _point_omit_evidence(payload, nearby)
+    omit = _point_omit_evidence(payload, [c for c in nearby if c["id"] not in mark_ids])
     closed = comparison["mark_suppressed"] + comparison["omit_suppressed"] + comparison["tape_suppressed"]
     statuses = {"CANDIDATES": "保留可疑區域", "FILTERED": "候選已排除", "NO_CANDIDATES": "未發現候選",
                 "NO_IMAGE": "無側拍白畫面", "ERROR": "檢測失敗", "NOT_RUN": "尚未檢測"}
@@ -577,16 +644,25 @@ def side_white_view(row, detail=None):
     if comparison["incomplete"] or source.get("status") in {"ERROR", "NO_IMAGE", "NOT_RUN"}:
         sticker.update(tone="warn", text="檢測未完成", reason="需完成檢測後確認處理結果。")
 
-    marks = mapped_inference_marks(payload, source.get("inference_marks", []))
-    local_marks = [e for e in payload.get("exclusions", []) if e.get("type") in {"mark", "corner_print"}]
-    mark = {"title": "MARK", "tone": "neutral", "text": "未取得可用範圍", "reason": "本次沒有可套用的 MARK 屏蔽證據。"}
+    marks = _report_mark_regions(payload, source.get("inference_marks", []))
+    mark = {"title": "MARK", "tone": "muted", "text": "未取得可用範圍", "reason": "本次沒有可套用的 MARK 屏蔽證據。"}
     if comparison["mark_suppressed"]:
-        mark.update(tone="ok", text=f"已屏蔽 · {comparison['mark_suppressed']} 點可轉 OK", reason="已套用正式推論定位範圍。")
-    elif marks or local_marks:
-        mark.update(tone="ok", text=f"已套用屏蔽 · {len(marks) if marks else len(local_marks)} 區",
-                    reason="沿用正式推論定位範圍。" if marks else "已排除側拍辨識的 MARK／角落印字。")
-        if any(p.get("mark_regions") and p["retained_candidate_ids"] for p in points):
-            mark.update(tone="warn", reason="MARK 範圍已屏蔽，附近仍有範圍外候選。")
+        mark.update(tone="ok", text=f"已屏蔽 · {comparison['mark_suppressed']} 點可轉 OK",
+                    reason="AOI 點或 ROI 內已確認的 MARK 已屏蔽，且無其他保留候選。")
+    elif marks:
+        label = f"MARK 屏蔽範圍 {len(marks)} 區"
+        mark.update(text=f"{label}，AOI 未命中",
+                    reason="AOI 點及 ROI 未涵蓋已確認的 MARK 範圍。")
+        hit_points = [p for p in points if p.get("mark_regions")]
+        if hit_points:
+            mark.update(tone="warn", text=f"{label}，AOI 命中但未排除" if any(
+                        p.get("mark_match_basis") == "point" for p in hit_points) else f"{label}，ROI 有 MARK 但仍需保留",
+                        reason=next((p["reason"] for p in hit_points if p.get("reason")), "尚無可轉 OK 結論。"))
+        elif not points:
+            mark.update(text=f"{label}，無 AOI 報點")
+        elif any(p["status"] == "unavailable" for p in points):
+            mark.update(tone="warn", text=f"{label}，AOI 命中狀態未確認",
+                        reason="AOI 位置無法映射，無法確認是否命中 MARK。")
 
     tapes = peel_tape_regions(payload)
     tape = {"title": "易撕貼", "tone": "neutral", "text": "未辨識到易撕貼",
@@ -608,7 +684,8 @@ def side_white_view(row, detail=None):
     for candidate in candidates:
         dust = candidate.get("dust", {})
         sticker_match = omit_sticker_candidate(payload, candidate)
-        candidate_rows.append({"id": candidate["id"], "label": "易撕貼已排除" if candidate["id"] in tape_ids else
+        candidate_rows.append({"id": candidate["id"], "label": "MARK 已屏蔽" if candidate["id"] in mark_ids else
+            "易撕貼已排除" if candidate["id"] in tape_ids else
             "貼紙已排除" if sticker_match else
             labels.get(candidate.get("disposition"), "舊版未記錄"),
             "core_overlap_ratio": dust.get("core_overlap_ratio"), "overlap_ratio": dust.get("overlap_ratio"),
@@ -623,6 +700,7 @@ def side_white_view(row, detail=None):
             "legend": SIDE_ANNOTATION_LEGEND, "legacy_preview": legacy_preview,
             "missing_preview_bounds": missing_bounds,
             "comparison": comparison, "candidates": candidate_rows,
+            "yellow_candidates": {"nearby": len(yellow_ids & yellow_nearby_ids), "total": len(yellow_ids)},
             "conversion": source.get("conversion") or record_conversion(source, comparison)}
 
 
@@ -633,9 +711,9 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
     height, width = image.shape[:2]
     scale = np.array([width / bounds[2], height / bounds[3]])
     origin = np.array(bounds[:2])
-    unit = max(.75, width / 900)
+    unit = min(1., max(.75, width / 1800))
     thickness = max(1, round(unit))
-    font_scale = max(.35, width / 1200)
+    font_scale = min(.6, max(.35, width / 2400))
     labels, markers = [], []
 
     def preview_points(points):
@@ -651,7 +729,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         if np.any(points.max(axis=0) < 0) or np.any(points.min(axis=0) >= [width, height]):
             return
         color = annotation_color(key)
-        cv2.polylines(image, [points], True, color, max(2, thickness), cv2.LINE_AA)
+        cv2.polylines(image, [points], True, color, max(2, thickness) if key == "candidate" else thickness, cv2.LINE_AA)
         if label:
             anchor = np.clip(points.min(axis=0), [0, 0], [width - 1, height - 1])
             labels.append((anchor, label, color))
@@ -678,13 +756,24 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
             if coordinate_kind == "front":
                 points = _transform(points, np.asarray(payload["mapping"]["matrix"], np.float64))
             polygon(points, "bomb", f"B{bomb['id']}")
-        selected = {i for point in comparison["points"] for i in point["candidate_ids"]}
+        selected = {i for point in comparison["points"] for i in point["retained_candidate_ids"]}
+        retained = retained_candidate_contours(payload, inference_marks)
         for candidate in payload.get("candidates", []):
-            if not all_candidates and candidate["id"] not in selected:
+            if candidate["id"] not in retained or (not all_candidates and candidate["id"] not in selected):
                 continue
-            points = candidate.get(coordinate_kind + "_contour")
-            if points:
-                polygon(points, "candidate", f"#{candidate['id']}")
+            for index, points in enumerate(retained[candidate["id"]]):
+                if coordinate_kind == "front":
+                    try:
+                        matrix = np.asarray(payload.get("mapping", {}).get("matrix"), np.float64)
+                        if matrix.shape != (3, 3) or not np.isfinite(matrix).all() or abs(np.linalg.det(matrix)) < 1e-12:
+                            raise ValueError("沒有可用的正側拍映射")
+                        points = _transform(points, matrix)
+                    except (ValueError, TypeError, cv2.error):
+                        if len(retained[candidate["id"]]) != 1 or not np.array_equal(points, candidate.get("side_contour")):
+                            continue
+                        points = candidate.get("front_contour")
+                if points is not None:
+                    polygon(points, "candidate", f"#{candidate['id']}" if index == 0 else None)
 
     for point in comparison["points"]:
         if point["status"] == "unavailable" or coordinate_kind + "_xy" not in point:
@@ -707,7 +796,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
                    for r in others)
 
     for anchor, text, color in labels:
-        (text_w, text_h), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness + 2)
+        (text_w, text_h), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness + 1)
         box_w, box_h = text_w + 2, text_h + baseline + 2
         gap = radius + 3
         x, y = map(int, anchor)
@@ -724,12 +813,12 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         occupied.append(rect)
         # A thin glyph outline keeps short IDs readable on white without a filled label box.
         cv2.putText(image, text, (rect[0] + 1, rect[1] + 1 + text_h),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (24, 24, 24), thickness + 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (24, 24, 24), thickness + 1, cv2.LINE_AA)
         cv2.putText(image, text, (rect[0] + 1, rect[1] + 1 + text_h),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
     for xy in markers:
         color = annotation_color("aoi")
-        gap = max(1, round(1.5 * unit))
+        gap = max(2, round(1.5 * unit))
         for axis in (np.array([1, 0]), np.array([0, 1])):
             for sign in (-1, 1):
                 cv2.line(image, tuple(xy + axis * sign * gap), tuple(xy + axis * sign * radius),

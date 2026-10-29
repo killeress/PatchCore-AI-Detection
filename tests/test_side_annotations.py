@@ -10,6 +10,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from capi_side_report import (SIDE_ANNOTATION_LEGEND, annotation_color, compare_side_record,
                               draw_side_annotations, render_comparison_image, side_white_view)
+from test_side_mark_roi import roi_row
 
 
 def side_row(rotated=False):
@@ -88,6 +89,49 @@ def test_region_sources_use_distinct_colors_with_names_outside_the_picture(monke
     for item in SIDE_ANNOTATION_LEGEND:
         difference = np.abs(image.astype(np.int16) - annotation_color(item["key"]))
         assert np.any(difference.max(axis=2) < 25), item["key"]
+
+
+@pytest.mark.parametrize("kind", ["side", "front"])
+@pytest.mark.parametrize("all_candidates", [False, True])
+def test_yellow_only_marks_retained_candidates_in_nearby_and_all_views(kind, all_candidates, monkeypatch):
+    row = roi_row()
+    payload = row["payload"]
+    for candidate_id, x, disposition, bombs in [
+            (2, 145, "retained", []), (3, 300, "retained", []),
+            (4, 160, "excluded", []), (5, 165, "dust_suppressed", []),
+            (6, 170, "mark_suppressed", []), (7, 175, "retained", [1])]:
+        contour = [[x, 95], [x + 5, 95], [x + 5, 105], [x, 105]]
+        payload["candidates"].append({"id": candidate_id, "side_contour": contour,
+                                      "disposition": disposition, "bomb_ids": bombs})
+    before = copy.deepcopy(row)
+    comparison = compare_side_record(row)
+    labels = []
+    put_text = cv2.putText
+    monkeypatch.setattr(cv2, "putText", lambda image, text, *args: (labels.append(text), put_text(image, text, *args))[1])
+    image = np.full((300, 500, 3), 160, np.uint8)
+    draw_side_annotations(image, payload, comparison, kind, [0, 0, 500, 300], all_candidates=all_candidates)
+    assert {label for label in labels if label.startswith('#')} == ({"#2", "#3"} if all_candidates else {"#2"})
+    roi = image[90:121, 90:121]
+    assert not np.any((roi[:, :, 0] < 100) & (roi[:, :, 1] > 130) & (roi[:, :, 2] > 170))
+    assert side_white_view(dict(row, comparison=comparison))["yellow_candidates"] == {"nearby": 1, "total": 2}
+    assert row == before
+
+
+@pytest.mark.parametrize("kind", ["side", "front"])
+@pytest.mark.parametrize("remaining_x", [170, 300])
+def test_yellow_draws_only_nearby_remaining_contours_of_a_partly_masked_candidate(kind, remaining_x):
+    row = roi_row()
+    candidate = row["payload"]["candidates"][0]
+    candidate["id"] = 8
+    outside = [[remaining_x, 95], [remaining_x + 10, 95], [remaining_x + 10, 105], [remaining_x, 105]]
+    candidate["remaining_contours"].append(outside)
+    before = copy.deepcopy(row)
+    image = np.full((300, 500, 3), 160, np.uint8)
+    draw_side_annotations(image, row["payload"], compare_side_record(row), kind, [0, 0, 500, 300])
+    yellow = (image[:, :, 0] < 100) & (image[:, :, 1] > 130) & (image[:, :, 2] > 170)
+    assert not yellow[90:121, 90:121].any()
+    assert yellow[94:107, remaining_x - 1:remaining_x + 12].any() == (remaining_x == 170)
+    assert row == before
 
 
 def test_aoi_annotation_keeps_defect_pixels_and_covers_under_three_percent_of_its_neighbourhood():

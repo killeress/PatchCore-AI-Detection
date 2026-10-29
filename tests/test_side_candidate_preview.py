@@ -37,6 +37,18 @@ def test_preview_uses_contour_distance_and_multiple_csjbl_points_only():
     assert _candidate_preview_scope(payload)['candidate_ids'] == [1, 2]
 
 
+@pytest.mark.parametrize('disposition', ['mark_suppressed', 'dust_suppressed', 'excluded'])
+def test_preview_counts_only_retained_yellow_candidates_and_keeps_original_ids(disposition):
+    payload = mapped_payload([point()])
+    payload['candidates'][0]['disposition'] = disposition
+    before = copy.deepcopy(payload)
+    scope = _candidate_preview_scope(payload)
+    assert scope['candidate_ids'] == [] and scope['total'] == 1
+    assert payload == before
+    payload['evidence_context']['aoi_csjbl_points'] = [point(800, 400)]
+    assert _candidate_preview_scope(payload)['candidate_ids'] == [2]
+
+
 @pytest.mark.parametrize('radius,x,expected', [(0, 400, [1]), (0, 411, []),
     (20, 430, [1]), (20, 431, []), (100, 500, [1]), (500, 400, [1, 2])])
 def test_preview_uses_configured_product_radius(radius, x, expected):

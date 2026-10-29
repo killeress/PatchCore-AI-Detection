@@ -12623,7 +12623,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         self._send_image_array_png(image)
 
     def _handle_side_statistics_api(self, query):
-        from capi_side_report import REVIEW_DECISIONS, compare_side_record
+        from capi_side_report import compare_side_record
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             filters = {key: query.get(key, [default])[0] for key, default in (
@@ -12641,7 +12641,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             rows_html = []
             for row in data.pop("rows"):
                 comparison = row["comparison"]
-                rows_html.append(template.render(row=row, comparison=comparison, review_decisions=REVIEW_DECISIONS))
+                rows_html.append(template.render(row=row, comparison=comparison))
             self._send_json({**data, "rows_html": "".join(rows_html), "limit": limit,
                              "offset": offset, "group": filters["group"]})
         except (ValueError, TypeError) as exc:

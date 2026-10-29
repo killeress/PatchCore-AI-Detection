@@ -13,7 +13,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from capi_database import CAPIDatabase
 from capi_side_report import (annotation_color, compare_side_record, csjbl_points, has_csjbl,
-                              render_comparison_image)
+                              render_comparison_image, side_white_view)
 
 
 def coordinate(x=400, y=200, **extra):
@@ -129,14 +129,27 @@ def test_mark_point_can_clear_without_clearing_other_aoi_points(rotated):
     assert result["points"][0]["status"] == "mark_suppressed"
     assert result["points"][0]["retained_candidate_ids"] == []
     assert result["points"][1]["status"] == "unmatched"
+    view = side_white_view(dict(row, comparison=result))
+    assert view["mark"]["tone"] == "ok"
+    assert view["mark"]["text"] == "已屏蔽 · 1 點可轉 OK"
     # Report suggestions never modify the saved candidate or formal verdict.
     assert row["payload"]["candidates"][0]["disposition"] == "retained"
 
 
-def test_mark_does_not_expand_with_report_tolerance_or_hide_nearby_defect():
+def test_mark_roi_excludes_mark_without_hiding_nearby_defect():
     row = marked_row()
     row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(420.1, 200)]})
-    assert compare_side_record(row, 500)["mark_suppressed"] == 0
+    result = compare_side_record(row, 500)
+    assert result["mark_suppressed"] == 1
+    assert result["points"][0]["mark_match_basis"] == "roi"
+    assert row["payload"]["evidence_context"]["inference_marks"][0]["front_bbox"] == [480, 280, 40, 40]
+    view = side_white_view(dict(row, comparison=result))
+    assert view["mark"]["tone"] == "ok"
+    row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(800, 400)]})
+    result = compare_side_record(row, 50)
+    view = side_white_view(dict(row, comparison=result))
+    assert view["mark"]["tone"] == "muted"
+    assert view["mark"]["text"] == "MARK 屏蔽範圍 1 區，AOI 未命中"
     row = marked_row()
     contour = np.array(row["payload"]["candidates"][0]["side_contour"]) + [25, 0]
     row["payload"]["candidates"].append({"id": 2, "side_contour": contour.tolist(), "disposition": "retained"})
@@ -144,6 +157,9 @@ def test_mark_does_not_expand_with_report_tolerance_or_hide_nearby_defect():
     assert result["mark_suppressed"] == 0
     assert result["points"][0]["retained_candidate_ids"] == [2]
     assert "範圍外" in result["points"][0]["reason"]
+    view = side_white_view(dict(row, comparison=result))
+    assert view["mark"]["tone"] == "warn"
+    assert view["mark"]["text"] == "MARK 屏蔽範圍 1 區，AOI 命中但未排除"
 
 
 @pytest.mark.parametrize("invalid", ["source", "rotation", "mapping", "incomplete", "failed", "bbox"])
@@ -162,6 +178,11 @@ def test_mark_without_valid_evidence_never_recommends_ok(invalid):
     else:
         row["payload"]["evidence_context"]["inference_marks"][0]["front_bbox"][0] = float("nan")
     assert compare_side_record(row)["mark_suppressed"] == 0
+    view = side_white_view(row)
+    assert view["mark"]["tone"] != "ok"
+    if invalid in {"incomplete", "failed"}:
+        assert view["mark"]["tone"] == "warn"
+        assert "AOI 命中但未排除" in view["mark"]["text"]
 
 
 def test_mark_main_box_and_underline_are_copied_without_mutable_state():
@@ -373,21 +394,23 @@ def test_review_rejects_bad_input_without_writing(db, field, value):
     assert db.get_side_white_result(result_id)["reviewed_at"] == ""
 
 
-def test_report_row_escapes_annotations_and_shows_no_match_crops():
+def test_report_row_escapes_identity_and_shows_no_match_crops_without_review_controls():
     row = mapped_row()
     row.update(id=2, record_id=1, candidate_count=0, glass_id='<script>bad()</script>',
                review_decision="unreviewed", review_note='<img src=x onerror=bad()>',
                reviewed_at="", reviewed_by='" onfocus="bad()')
     row["payload"]["candidates"] = []
     row["payload"]["artifacts"] = {"side": "side.jpg"}
-    from capi_side_report import REVIEW_DECISIONS, side_white_view
+    from capi_side_report import side_white_view
     env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"))
     env.globals['side_white_view'] = side_white_view
-    html = env.get_template("_side_statistics_row.html").render(row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
+    html = env.get_template("_side_statistics_row.html").render(row=row, comparison=compare_side_record(row))
     assert '<script>bad()</script>' not in html and '&lt;script&gt;bad()&lt;/script&gt;' in html
     assert '<img src=x onerror=bad()>' not in html
     assert '附近未找到候選' in html and '&amp;point=1' in html
-    assert 'data-result-id="2"' in html and '儲存驗證結果' in html
+    assert '查看明細' in html and '<form' not in html
+    for label in ('人工驗證', '待驗證', '驗證人', '儲存驗證結果', 'data-review-'):
+        assert label not in html
 
 
 def test_mark_suggestion_is_shown_per_point_and_keeps_formal_ng_label():
@@ -544,7 +567,9 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
         assert data["rows_html"] == "" and data["summary"]["with_csjbl"]["missed"] == 1
         filtered = json.loads(get(query_url + "&review=confirmed,correct_clear&summary_only=1"))
         assert filtered["total"] == 0 and filtered["summary"] == data["summary"]
-        assert "AOI confirmed" in json.loads(get(query_url))["rows_html"]
+        rows_html = json.loads(get(query_url))["rows_html"]
+        assert "AOI confirmed" not in rows_html and 'class="sw-controls ss-review"' not in rows_html
+        assert db.get_side_white_result(result_id)["review_note"] == "AOI confirmed"
         with pytest.raises(HTTPError) as error:
             post({"id": result_id, "decision": "confirmed", "reviewer": "QA", "expected_reviewed_at": ""})
         assert error.value.code == 409

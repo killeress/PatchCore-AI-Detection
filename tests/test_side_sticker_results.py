@@ -9,7 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from capi_config import normalize_side_white_params
 from capi_database import CAPIDatabase
-from capi_side_report import REVIEW_DECISIONS, compare_side_record, record_conversion, side_white_view
+from capi_side_report import compare_side_record, record_conversion, side_white_view
 
 
 def sticker_row():
@@ -50,7 +50,8 @@ def test_existing_fully_covered_sticker_and_its_halo_convert_all_three_points_wi
     view = side_white_view(row)
     assert view["headline"] == "AOI 3 點可轉 OK"
     assert view["sticker"]["text"] == "已排除 · 3 點可轉 OK"
-    assert view["mark"]["text"] == "已套用屏蔽 · 1 區"
+    assert view["mark"]["text"] == "MARK 屏蔽範圍 1 區，AOI 未命中"
+    assert view["mark"]["tone"] == "muted"
     assert view["candidates"][0]["label"] == "貼紙已排除"
 
 
@@ -144,14 +145,17 @@ def test_treatment_conclusions_are_visible_without_nested_evidence_disclosures(s
     env.globals["side_white_view"] = side_white_view
     if statistics:
         html = env.get_template("_side_statistics_row.html").render(
-            row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
+            row=row, comparison=compare_side_record(row))
         summary = html.split('</summary>', 1)[0]
-        assert "已排除 · 3 點可轉 OK" in summary and "已套用屏蔽 · 1 區" in summary
+        assert "已排除 · 3 點可轉 OK" in summary and "MARK 屏蔽範圍 1 區，AOI 未命中" in summary
+        assert '<span class="sw-tone-muted">MARK 屏蔽範圍 1 區，AOI 未命中</span>' in summary
     else:
         html = env.get_template("_side_white_result.html").render(detail={**row, "side_white_result": row})
     parser = DisclosureParser()
     parser.feed(html)
+    assert '<div class="sw-conclusion sw-tone-muted" data-sw-treatment="mark">' in html
     assert parser.treatments == [("sticker", int(statistics)), ("mark", int(statistics)), ("tape", int(statistics))]
-    assert parser.details == parser.maximum == 1 + int(statistics)
+    assert parser.details == 2 + int(statistics)  # Legend help and detection details.
+    assert parser.maximum == 1 + int(statistics)
     assert html.count('<figure>') == 3
     assert '正式結果：NG' in html and 'AOI 3 點可轉 OK' in html

@@ -7,23 +7,11 @@
         <span class="ss-record-status"><small>貼紙／表面異物</small><span class="sw-tone-{{ view.sticker.tone }}">{{ view.sticker.text }}</span></span>
         <span class="ss-record-status"><small>MARK</small><span class="sw-tone-{{ view.mark.tone }}">{{ view.mark.text }}</span></span>
         <span class="ss-record-status"><small>易撕貼</small><span class="sw-tone-{{ view.tape.tone }}">{{ view.tape.text }}</span></span>
-        <span class="ss-record-status"><small>人工驗證</small><span data-review-label>{{ review_decisions.get(row.review_decision,'待驗證') }}</span><span data-review-dirty hidden>尚未儲存</span></span>
-        <span class="ss-record-action"><span class="ss-expand">查看／驗證</span><span class="ss-collapse">收合</span></span>
+        <span class="ss-record-action"><span class="ss-expand">查看明細</span><span class="ss-collapse">收合</span></span>
     </summary>
     <div class="ss-record-body">
         <div class="sw-head"><span class="sw-note">{{ row.glass_id }}</span><a href="/record/{{ row.record_id }}#side-white-result" target="_blank" rel="noopener">推論紀錄 #{{ row.record_id }} →</a></div>
         {% set detail = dict(row, side_white_result=dict(row, comparison=comparison)) %}{% set embedded = true %}{% set statistics_result = true %}{% include '_side_white_result.html' %}
-        {% if row.id %}
-        <form class="sw-controls ss-review" data-result-id="{{ row.id }}">
-            <input type="hidden" name="expected_reviewed_at" value="{{ row.reviewed_at or '' }}">
-            <label>人工驗證 <select name="decision">{% for value,label in review_decisions.items() %}<option value="{{ value }}" {{ 'selected' if row.review_decision == value else '' }}>{{ label }}</option>{% endfor %}</select></label>
-            <label>驗證人 <input name="reviewer" value="{{ row.reviewed_by or '' }}" maxlength="80" required></label>
-            <label for="ss-note-{{ row.id }}">備註</label>
-            <textarea id="ss-note-{{ row.id }}" name="note" maxlength="2000" placeholder="缺陷、定位或判斷依據">{{ row.review_note or '' }}</textarea>
-            <button class="sw-btn" type="submit">儲存驗證結果</button>
-            <p class="sw-note ss-review-state" role="status" data-review-state>{% if row.reviewed_at %}{{ row.reviewed_by }} · {{ row.reviewed_at }}{% else %}尚未驗證{% endif %}</p>
-        </form>
-        {% endif %}
     </div>
     </details>
 </article>

@@ -230,7 +230,7 @@ def _preview(gray, quad):
 
 def _candidate_preview_scope(payload):
     """Select annotations by AOI proximity without changing any detection evidence."""
-    from capi_side_report import compare_side_record
+    from capi_side_report import compare_side_record, retained_candidate_contours
 
     radius = normalize_side_white_params(payload.get("parameters"))["csjbl_preview_radius_product_px"]
     coords = {}
@@ -239,16 +239,17 @@ def _candidate_preview_scope(payload):
     comparison = compare_side_record(
         {"payload": payload, "status": payload["status"], "aoi_machine_coords": coords}, tolerance=radius)
     selected = {candidate_id for point in comparison["points"]
-                if point["status"] != "unavailable" for candidate_id in point["candidate_ids"]}
+                if point["status"] != "unavailable" for candidate_id in point["retained_candidate_ids"]}
     candidates = payload.get("candidates", [])
+    retained = retained_candidate_contours(payload)
     reason = ""
     if not comparison["has_csjbl"]:
         reason = "沒有 AOI CSJBL 座標，未顯示黃框。"
     elif comparison["mapped"] < len(comparison["points"]):
         reason = "有 CSJBL 座標無法映射，僅顯示可對應黃框。"
     return {"scope": "csjbl_nearby", "tolerance_product_px": radius,
-            "candidate_ids": [c["id"] for c in candidates if c["id"] in selected],
-            "total": len(candidates), "reason": reason}
+            "candidate_ids": [c["id"] for c in candidates if c["id"] in selected and c["id"] in retained],
+            "total": len(retained), "reason": reason}
 
 
 def _save_preview(path, image):

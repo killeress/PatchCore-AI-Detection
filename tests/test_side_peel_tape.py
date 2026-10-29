@@ -46,10 +46,13 @@ def test_saved_corner_tape_converts_without_candidates_or_omit(mode):
 def test_position_or_incomplete_evidence_never_creates_a_tape_ok(issue):
     row = tape_row()
     p = row["payload"]
+    # Isolate tape evidence: a valid MARK elsewhere in this large test ROI can
+    # independently clear the point under the MARK ROI rule.
+    p["evidence_context"]["inference_marks"] = []
     if issue == "no_detection":
         p["exclusions"] = []
     elif issue == "wrong_type":
-        p["exclusions"][0]["type"] = "corner_print"
+        p["exclusions"][0]["type"] = "configured_zone"
     elif issue == "no_panel":
         p.pop("side_polygon")
     elif issue == "wrong_corner":
