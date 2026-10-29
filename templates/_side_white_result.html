@@ -16,6 +16,11 @@
         </div>{% endfor %}
     </div>
     {% if detail.get('ai_judgment') or sw.get('ai_judgment') %}<p class="sw-note">正式結果：{{ detail.get('ai_judgment') or sw.get('ai_judgment') }}{% if view.conversion.category != 'none' %} · <span data-conversion-state>{{ '全部 NG 原因已涵蓋，可整筆轉 OK' if view.conversion.eligible else view.conversion.reason }}</span>{% endif %}</p>{% endif %}
+    {% if view.panel.formal %}<div class="sw-panel-projection" data-panel-state="{{ view.panel.state }}">
+        <strong class="sw-tone-{{ view.panel.tone }}">整片試算：{{ view.panel.text }}</strong>
+        <span>正式 {{ view.panel.formal }}{% if view.panel.projected %} → 試算 {{ view.panel.projected }}{% endif %}</span>
+        <p class="sw-note">{{ view.panel.reason }}。依同一次檢測各畫面的正式 NG 明細試算，不修改正式結果及 AOI 回覆。</p>
+    </div>{% endif %}
     {% if p.get('reason') %}<p class="sw-note">{{ p.reason }}</p>{% endif %}
     <div class="sw-legend" aria-label="圖片標記圖例">
         {% for item in view.legend %}<span class="sw-legend-item" style="--sw-annotation:{{ item.color }}" title="{{ item.hint }}"><b>{{ item.tag }}</b><span>{{ item.label }}</span></span>{% endfor %}

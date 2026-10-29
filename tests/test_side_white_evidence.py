@@ -57,14 +57,14 @@ def test_inference_mark_masks_only_support_inside_mark(right, area, disposition)
         assert min(p[0] for c in item["remaining_contours"] for p in c) == 40
 
 
-@pytest.mark.parametrize("mode,disposition,area", [("observe","retained",800),("suppress","dust_suppressed",0),("off","retained",800)])
-def test_dust_modes_use_support_pixels(mode, disposition, area):
+@pytest.mark.parametrize("mode", ["observe", "suppress", "off"])
+def test_side_dust_filtering_uses_support_pixels_for_all_legacy_modes(mode):
     item = candidate()
     omit = np.ones((100,100), np.uint8)
     detector = lambda crop: (True, np.full(crop.shape,255,np.uint8), 1, "surface evidence")
     evaluate(item,mode=mode,omit=omit,detector=detector)
-    assert item["disposition"] == disposition
-    assert item["remaining_area_px"] == area
+    assert item["disposition"] == "dust_suppressed"
+    assert item["remaining_area_px"] == 0
 
 
 def test_dust_partial_overlap_preserves_adjacent_anomaly():

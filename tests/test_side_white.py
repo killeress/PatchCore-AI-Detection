@@ -199,6 +199,7 @@ def test_config_default_persistence_and_hot_reload(tmp_path):
     config = CAPIConfig()
     assert config.side_white_detection_enabled is False
     assert config.side_white_detection_params == normalize_side_white_params()
+    assert config.side_white_detection_params["dust_mode"] == "suppress"
     custom = normalize_side_white_params({"min_contrast_gray": 3.1, "noise_sigma_factor": 6.0,
         "min_area_px": 30, "edge_margin_px": 25, "csjbl_preview_radius_product_px": 75})
     config.apply_db_overrides([{"param_name":"side_white_detection_params", "decoded_value":custom}])
@@ -218,6 +219,19 @@ def test_config_default_persistence_and_hot_reload(tmp_path):
     assert CAPIConfig.from_yaml(str(path)).side_white_detection_params == config.side_white_detection_params
     config.apply_db_overrides([{"param_name":"side_white_detection_enabled", "decoded_value":"false"}])
     assert config.side_white_detection_enabled is False
+
+
+@pytest.mark.parametrize("legacy_mode", ["off", "observe", "suppress"])
+def test_side_filtering_stays_enabled_when_loading_legacy_yaml_and_db_values(legacy_mode):
+    legacy = {"dust_mode": legacy_mode, "min_area_px": 35, "dust_overlap_ratio": .7}
+    normalized = normalize_side_white_params(legacy)
+    assert normalized["dust_mode"] == "suppress"
+    assert legacy["dust_mode"] == legacy_mode
+    config = CAPIConfig.from_dict({"side_white_detection_params": legacy})
+    assert config.side_white_detection_params == normalized
+    config.apply_db_overrides([{"param_name": "side_white_detection_params", "decoded_value": legacy}])
+    assert config.side_white_detection_params == normalized
+    assert normalized["min_area_px"] == 35 and normalized["dust_overlap_ratio"] == .7
 
 
 def test_legacy_review_data_preserved_in_readonly_storage_and_cascades(tmp_path):

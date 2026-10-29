@@ -552,9 +552,7 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
     omit_bounds = item["crop_bounds"]["side"] if aligned else None
     if aligned:
         item["crop_bounds"]["omit"] = list(omit_bounds)
-    if params["dust_mode"] == "off":
-        item["dust"].update(status="disabled", reason="灰塵判斷未啟用")
-    elif aligned and detector is not None and omit_info.get("status") != "unavailable":
+    if aligned and detector is not None and omit_info.get("status") != "unavailable":
         fx1, fy1, fx2, fy2 = omit_bounds
         if fx2 > fx1 and fy2 > fy1:
             try:
@@ -589,7 +587,7 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
                                     core_area_px=core_area, core_overlap_ratio=round(core_ratio, 4) if core_area else None,
                                     match_basis="support" if ratio >= params["dust_overlap_ratio"] else "dark_core" if core_match else "none",
                                     halo_removed_area_px=0)
-                if suspected and params["dust_mode"] == "suppress":
+                if suspected:
                     halo = (_omit_halo_mask(side, residual, item, comparison, omit_bounds, remaining, core,
                                            threshold, panel_quad) if core_match else np.zeros_like(remaining))
                     item["dust"]["halo_removed_area_px"] = int(np.count_nonzero(halo & ~dust_local))

@@ -105,14 +105,17 @@ def test_debug_radius_reads_settings_and_override_only_changes_preview(debug_sid
     small = default['payload']
     assert small['parameters']['csjbl_preview_radius_product_px'] == 20
     assert small['candidate_display']['tolerance_product_px'] == 20
-    assert len(small['candidate_display']['candidate_ids']) == 1
+    assert small['parameters']['dust_mode'] == 'suppress'
+    assert small['candidate_display']['candidate_ids'] == []
+    assert small['candidates'][0]['disposition'] == 'dust_suppressed'
     status, overridden = post(env, {'record_id': env.record_id,
         'parameters': {'csjbl_preview_radius_product_px': 200}})
     assert status == 200
     large = overridden['payload']
     assert large['parameters']['csjbl_preview_radius_product_px'] == 200
     assert large['candidate_display']['tolerance_product_px'] == 200
-    assert len(large['candidate_display']['candidate_ids']) == 2
+    assert large['candidate_display']['candidate_ids'] == []
+    assert small['candidate_display']['reference_total'] == large['candidate_display']['reference_total'] == 1
     assert 'CSJBL 附近 200 產品 px' in overridden['result_html']
     assert small['candidates'] == large['candidates']
     assert small['summary'] == large['summary']
@@ -134,12 +137,15 @@ def test_run_uses_real_pipeline_isolated_settings_record_and_artifacts(debug_sid
     assert payload['status'] != 'ERROR', payload
     assert payload['parameters']['min_contrast_gray'] == 3
     assert payload['parameters']['dust_overlap_ratio'] == .6
+    assert payload['parameters']['dust_mode'] == 'suppress'
     assert payload['rotation_applied'] is rotated
     assert payload['candidates'] and payload['bombs'][0]['status'] == 'matched'
     assert payload['omit']['image'] == 'SPINIGBI _153501.tif'
     assert payload['candidates'][0]['dust']['overlap_ratio'] > .8
+    assert payload['candidates'][0]['dust']['status'] == 'suppressed'
+    assert payload['candidates'][0]['disposition'] == 'dust_suppressed'
     assert payload['evidence_context']['zones'][0]['w'] == 10
-    assert payload['candidate_display']['candidate_ids'] == [payload['candidates'][0]['id']]
+    assert payload['candidate_display']['candidate_ids'] == []
     assert payload['evidence_context']['aoi_csjbl_points'][0]['defect_code'] == 'CSJBL'
     assert 'side_all' in payload['artifacts'] and 'residual_all' in payload['artifacts']
     assert all(Path(p).is_file() for p in payload['artifacts'].values())
@@ -307,6 +313,7 @@ async function fetch(url, options) {
  assert.equal(el('sw-debug-rotate').checked,true);
  assert.match(el('sw-debug-params').innerHTML,/value="0.6"/);
  assert.match(el('sw-debug-params').innerHTML,/id="sw-debug-csjbl_preview_radius_product_px"[^>]*value="70"/);
+ assert.equal(el('sw-debug-params').innerHTML.includes('sw-debug-dust_mode'),false);
  assert.equal(el('sw-debug-run').disabled,false);
  for (const [key] of sideWhiteParamFields) el('sw-debug-'+key).valueAsNumber=defaults[key];
  for (const [key] of sideWhiteSwitches) el('sw-debug-'+key).checked=defaults[key];
@@ -314,7 +321,6 @@ async function fetch(url, options) {
  el('sw-debug-csjbl_preview_radius_product_px').valueAsNumber=10;
  el('sw-debug-apply_exclusions').checked=false;
  el('sw-debug-bomb_force_detection_enabled').checked=true;
- el('sw-debug-dust_mode').value='suppress';
  const event={preventDefault(){},target:{reportValidity:()=>true}};
  const pending=runSideWhiteDebug(event);
  assert.equal(el('sw-debug-run').disabled,true);

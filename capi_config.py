@@ -21,7 +21,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
     """Validate observation-only inspection controls and fill older config defaults."""
     defaults = {"min_contrast_gray": 2.2, "noise_sigma_factor": 4.5,
                 "min_area_px": 20, "edge_margin_px": 16,
-                "apply_exclusions": True, "dust_mode": "observe", "dust_overlap_ratio": .8,
+                "apply_exclusions": True, "dust_mode": "suppress", "dust_overlap_ratio": .8,
                 "mapping_margin_px": 3, "crop_padding_px": 32,
                 "csjbl_preview_radius_product_px": 50,
                 "bomb_check_enabled": True, "bomb_tolerance_product_px": 50,
@@ -54,6 +54,8 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
             raise ValueError(f"{key} 必須是布林值")
     if result["dust_mode"] not in ("off", "observe", "suppress"):
         raise ValueError("灰塵模式必須是 off、observe 或 suppress")
+    # Older YAML/DB values remain readable; new side inspections always filter.
+    result["dust_mode"] = "suppress"
     return result
 
 

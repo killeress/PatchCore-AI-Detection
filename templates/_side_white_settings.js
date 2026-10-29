@@ -6,7 +6,7 @@
     function savedSideWhiteParams() {
         const defaults = Object.fromEntries(sideWhiteParamFields.map(([key,,value]) => [key,value]));
         const row = allParams.find(p => p.param_name === 'side_white_detection_params');
-        return {...defaults,...Object.fromEntries(sideWhiteSwitches.map(([k,,v]) => [k,v])),dust_mode:'observe',...parseJsonLoose(row ? row.param_value : null, defaults)};
+        return {...defaults,...Object.fromEntries(sideWhiteSwitches.map(([k,,v]) => [k,v])),...parseJsonLoose(row ? row.param_value : null, defaults),dust_mode:'suppress'};
     }
     function editSideWhiteParam(key, value) {
         if (!sideWhiteParamDraft) sideWhiteParamDraft = savedSideWhiteParams();
@@ -22,9 +22,9 @@
             <p class="sw-note">儲存後套用新推論。側拍檢測：<strong>${getPlainParamValue('side_white_detection_enabled','false')==='true'?'啟用':'關閉'}</strong>（於「推論設定」切換）。</p>
             <fieldset class="sw-param-grid" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamFields.map(([key,label,,min,max,step,hint]) => `<label for="sw-param-${key}">${label}<input id="sw-param-${key}" type="number" required min="${min}" max="${max}" step="${step}" value="${escapeAttr(values[key])}" oninput="editSideWhiteParam('${key}',this.value)"><span class="sw-note">${hint}</span></label>`).join('')}
             ${sideWhiteSwitches.map(([key,label]) => `<label>${label}<input id="sw-param-${key}" type="checkbox" ${values[key]?'checked':''} onchange="editSideWhiteParam('${key}',this.checked)"></label>`).join('')}
-            <label>灰塵處理模式<select id="sw-param-dust_mode" onchange="editSideWhiteParam('dust_mode',this.value)">${Object.entries({off:'關閉',observe:'標示疑似灰塵（預設）',suppress:'啟用灰塵屏蔽'}).map(([v,label]) => `<option value="${v}" ${values.dust_mode===v?'selected':''}>${label}</option>`).join('')}</select></label>
             </fieldset>
-            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定；灰塵比對使用側拍 SPINIGBI。CSJBL 顯示範圍只影響黃框，0 表示僅顯示涵蓋該座標的候選；統計與判定不變。</p></details>
+            <p class="sw-note">貼紙／灰塵過濾固定啟用，依側拍 SPINIGBI 證據屏蔽符合條件的候選。</p>
+            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定。CSJBL 顯示範圍只影響周邊參考，判斷仍只使用 AOI 報點命中的候選。</p></details>
             <button class="sw-btn" type="submit" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamSaving?'儲存中…':'儲存側拍參數'}</button>
             <span id="sw-param-message" class="sw-note" role="status">${escapeHtml(sideWhiteParamMessage||(sideWhiteParamDraft?'尚未儲存':''))}</span>
         </form>`;
@@ -34,7 +34,7 @@
         if (sideWhiteParamSaving || !event.target.reportValidity()) return;
         const values = Object.fromEntries(sideWhiteParamFields.map(([key]) => [key,document.getElementById('sw-param-'+key).valueAsNumber]));
         sideWhiteSwitches.forEach(([key]) => values[key] = document.getElementById('sw-param-'+key).checked);
-        values.dust_mode = document.getElementById('sw-param-dust_mode').value;
+        values.dust_mode = 'suppress';
         sideWhiteParamSaving = true; sideWhiteParamMessage = '';
         document.getElementById('sw-params-form').outerHTML = renderSideWhiteParams();
         try {

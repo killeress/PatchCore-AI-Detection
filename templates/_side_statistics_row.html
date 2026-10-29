@@ -4,6 +4,10 @@
     <details class="ss-record">
     <summary>
         <span class="ss-record-title"><strong>{{ row.glass_id }}</strong><small>{{ row.machine_no }} · {{ row.model_id }} · {{ row.request_time }}</small></span>
+        <span class="ss-record-status ss-panel-result" data-panel-state="{{ view.panel.state }}">
+            <small>整片試算 · 結合各畫面</small><strong class="sw-tone-{{ view.panel.tone }}">{{ view.panel.text }}</strong>
+            <span class="ss-panel-note" title="{{ view.panel.reason }}">{{ view.panel.reason }}</span>
+        </span>
         <span class="ss-record-status"><small>貼紙／表面異物</small><span class="sw-tone-{{ view.sticker.tone }}">{{ view.sticker.text }}</span></span>
         <span class="ss-record-status"><small>MARK</small><span class="sw-tone-{{ view.mark.tone }}">{{ view.mark.text }}</span></span>
         <span class="ss-record-status"><small>易撕貼</small><span class="sw-tone-{{ view.tape.tone }}">{{ view.tape.text }}</span></span>

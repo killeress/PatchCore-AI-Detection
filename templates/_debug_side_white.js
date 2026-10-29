@@ -27,8 +27,7 @@
             sideWhiteParamFields.map(([key,label,,min,max,step,hint]) =>
                 `<label for="sw-debug-${key}">${label}<input id="sw-debug-${key}" type="number" required min="${min}" max="${max}" step="${step}" value="${swDebugEscape(values[key])}"><span class="sw-note">${hint}</span></label>`).join('') +
             sideWhiteSwitches.map(([key,label]) =>
-                `<label>${label}<input id="sw-debug-${key}" type="checkbox" ${values[key]?'checked':''}></label>`).join('') +
-            `<label>灰塵處理模式<select id="sw-debug-dust_mode">${Object.entries({off:'關閉',observe:'標示疑似灰塵',suppress:'啟用灰塵屏蔽'}).map(([v,label]) => `<option value="${v}" ${values.dust_mode===v?'selected':''}>${label}</option>`).join('')}</select></label>`;
+                `<label>${label}<input id="sw-debug-${key}" type="checkbox" ${values[key]?'checked':''}></label>`).join('');
     }
     async function loadSideWhiteDebugDefaults() {
         if (swDebugBusy) return;
@@ -66,7 +65,7 @@
         if (swDebugBusy || !swDebugReady || !event.target.reportValidity()) return;
         const parameters = Object.fromEntries(sideWhiteParamFields.map(([key]) => [key, document.getElementById('sw-debug-'+key).valueAsNumber]));
         sideWhiteSwitches.forEach(([key]) => parameters[key] = document.getElementById('sw-debug-'+key).checked);
-        parameters.dust_mode = document.getElementById('sw-debug-dust_mode').value;
+        parameters.dust_mode = 'suppress';
         const body = {parameters, rotate_180:document.getElementById('sw-debug-rotate').checked};
         if (swDebugRecordId) body.record_id = swDebugRecordId;
         else {

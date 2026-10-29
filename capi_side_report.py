@@ -73,6 +73,22 @@ CONVERSION_FILTERS = {
 }
 
 
+def _covered_csjbl_ng(defect, points):
+    """Match a formal NG reason to a saved AOI point from the same screen."""
+    from capi_image_naming import canonical_image_prefix
+    if (not isinstance(defect, dict) or defect.get("type") != "aoi_passthrough"
+            or str(defect.get("defect_code", "")).upper() != "CSJBL"):
+        return False
+    try:
+        xy = np.asarray([defect["product_x"], defect["product_y"]], np.float64)
+        prefix = canonical_image_prefix(str(defect.get("image", ""))).upper()
+        return bool(prefix and np.isfinite(xy).all() and any(
+            canonical_image_prefix(p["image_prefix"]).upper() == prefix
+            and np.allclose(xy, p["product_xy"], atol=.001, rtol=0) for p in points))
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
 def record_conversion(row, comparison):
     """A point suggestion only removes a rejection when every formal NG is covered."""
     points = comparison["points"]
@@ -96,30 +112,47 @@ def record_conversion(row, comparison):
     elif row.get("review_decision") in {"confirmed", "missed", "mapping_error", "uncertain"}:
         result["reason"] = "既有紀錄仍有缺陷、定位疑慮或尚無法確認，暫不計入整筆轉 OK"
     else:
-        from capi_image_naming import canonical_image_prefix
         details = _json(row.get("ng_details"), None)
-        covered = isinstance(details, list) and bool(details)
-        for defect in details if isinstance(details, list) else []:
-            if (not isinstance(defect, dict) or defect.get("type") != "aoi_passthrough"
-                    or str(defect.get("defect_code", "")).upper() != "CSJBL"):
-                covered = False
-                break
-            try:
-                xy = np.asarray([defect["product_x"], defect["product_y"]], np.float64)
-                prefix = canonical_image_prefix(str(defect.get("image", ""))).upper()
-                if not prefix or not np.isfinite(xy).all() or not any(
-                        canonical_image_prefix(p["image_prefix"]).upper() == prefix
-                        and np.allclose(xy, p["product_xy"], atol=.001, rtol=0) for p in points):
-                    covered = False
-                    break
-            except (ValueError, TypeError, KeyError):
-                covered = False
-                break
+        covered = isinstance(details, list) and bool(details) and all(
+            _covered_csjbl_ng(defect, points) for defect in details)
         if covered:
             result.update(eligible=True, state="eligible", reason="全部 CSJBL 點及正式 NG 原因均由 MARK／貼紙／易撕貼涵蓋")
         else:
             result["reason"] = "另有正式 NG 原因，或 NG 明細不足以確認全部已涵蓋"
     return result
+
+
+def panel_projection(row, comparison, conversion):
+    """Explain the same record-wide projection used by rejection-rate statistics."""
+    from capi_image_naming import canonical_image_prefix
+    formal = str(row.get("ai_judgment") or "")
+    panel = {"formal": formal, "projected": None, "state": "unavailable", "tone": "muted",
+             "text": "無法試算", "reason": "尚無有效正式判定", "remaining_sources": []}
+    if formal in {"OK", "OK-i"}:
+        panel.update(projected=formal, state="already_ok", tone="ok", text=f"原本已 {formal}",
+                     reason="沿用同次檢測的整片正式結果")
+    elif formal.startswith("NG"):
+        panel.update(projected="NG", state="retained", tone="warn", text="整片仍為 NG",
+                     reason=conversion["reason"])
+        if conversion["eligible"]:
+            panel.update(projected="OK", state="eligible", tone="ok", text="整片可轉 OK",
+                         reason="各畫面的全部正式 NG 原因均已由側拍處理涵蓋")
+        else:
+            details = _json(row.get("ng_details"), None)
+            sources = []
+            for defect in details if isinstance(details, list) else []:
+                if isinstance(defect, dict) and not _covered_csjbl_ng(defect, comparison["points"]):
+                    prefix = canonical_image_prefix(str(defect.get("image") or "")).upper()
+                    if prefix and prefix not in sources:
+                        sources.append(prefix)
+            panel["remaining_sources"] = sources
+            if sources:
+                panel["reason"] = "仍有正式 NG：" + "、".join(sources)
+            elif not isinstance(details, list) or not details:
+                panel["reason"] = "正式 NG 明細不足，無法確認整片可轉 OK"
+    elif formal:
+        panel["reason"] = f"正式結果：{formal}，不納入轉 OK 試算"
+    return panel
 
 
 def matches_conversion_filter(result, value):
@@ -178,7 +211,7 @@ def _point_omit_evidence(payload, candidates):
              and not omit_sticker_candidate(payload, c) for c in relevant):
         evidence.update(status="partial", reason="已移除 OMIT 重疊像素，範圍外仍有異常候選")
     elif "suspected" in states:
-        evidence.update(status="suspected", reason="OMIT 表面特徵達重疊門檻；目前僅標示，候選保留")
+        evidence.update(status="suspected", reason="OMIT 表面特徵達重疊門檻；此筆保存為僅標示結果，候選保留")
     elif "suppressed" in states:
         evidence.update(status="suppressed", reason=("貼紙本體已由 OMIT 完整覆蓋，該貼紙周圍差分不再阻擋轉 OK"
                         if any(c["sticker"] for c in evidence["candidates"]) else
@@ -642,7 +675,7 @@ def side_white_view(row, detail=None):
     elif omit["status"] == "partial":
         sticker.update(tone="warn", text="部分屏蔽 · 仍有候選", reason="本體未完整覆蓋，或報點仍命中保留候選。")
     elif omit["status"] == "suspected":
-        sticker.update(tone="warn", text="已辨識 · 僅標示", reason="本次設定未啟用 OMIT 屏蔽。")
+        sticker.update(tone="warn", text="已辨識 · 僅標示", reason="此筆保存的是僅標示結果；重新側拍推論後套用貼紙／灰塵過濾。")
     elif omit["status"] in {"unavailable", "disabled"}:
         sticker.update(text="無法比對" if omit["status"] == "unavailable" else "未啟用", reason=omit["reason"])
     elif omit["status"] == "clear":
@@ -706,6 +739,7 @@ def side_white_view(row, detail=None):
                           and not payload.get("preview_annotation_version"))
     missing_bounds = bool(payload.get("artifacts", {}).get("side")
                           and not payload.get("preview_bounds", {}).get("side"))
+    conversion = source.get("conversion") or record_conversion(source, comparison)
     return {"headline": headline, "tone": tone, "sticker": sticker, "mark": mark, "tape": tape,
             "legend": SIDE_ANNOTATION_LEGEND, "legacy_preview": legacy_preview,
             "missing_preview_bounds": missing_bounds,
@@ -713,7 +747,7 @@ def side_white_view(row, detail=None):
             "yellow_candidates": {"nearby": len(yellow_ids & yellow_nearby_ids), "total": len(yellow_ids)},
             "reference_candidates": {"nearby": len((retained_ids - yellow_ids) & nearby_ids),
                                      "total": len(retained_ids - yellow_ids)},
-            "conversion": source.get("conversion") or record_conversion(source, comparison)}
+            "conversion": conversion, "panel": panel_projection(source, comparison, conversion)}
 
 
 def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference_marks=(),

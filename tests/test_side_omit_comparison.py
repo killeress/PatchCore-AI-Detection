@@ -35,21 +35,18 @@ def full_omit():
     return omit
 
 
-@pytest.mark.parametrize("mode,status,label", [
-    ("observe", "matched", "suspected"), ("suppress", "omit_suppressed", "suppressed"),
-    ("off", "matched", "disabled"),
-])
-def test_same_surface_evidence_respects_observe_suppress_and_off(mode, status, label):
+@pytest.mark.parametrize("mode", ["observe", "suppress", "off"])
+def test_surface_filtering_stays_enabled_with_legacy_mode_values(mode):
     row = observed_row(full_omit(), mode=mode)
     result = compare_side_record(row)
     point = result["points"][0]
-    assert point["status"] == status and point["omit"]["status"] == label
-    assert result["omit_suppressed"] == int(mode == "suppress")
-    if mode != "off":
-        evidence = point["omit"]["candidates"][0]
-        assert evidence["overlap_ratio"] == evidence["mask_overlap_ratio"] == 1
-        assert evidence["compared_area_px"] == evidence["overlap_area_px"] == 800
-        assert evidence["uncovered_area_px"] == 0
+    assert row["payload"]["parameters"]["dust_mode"] == "suppress"
+    assert point["status"] == "omit_suppressed" and point["omit"]["status"] == "suppressed"
+    assert result["omit_suppressed"] == 1
+    evidence = point["omit"]["candidates"][0]
+    assert evidence["overlap_ratio"] == evidence["mask_overlap_ratio"] == 1
+    assert evidence["compared_area_px"] == evidence["overlap_area_px"] == 800
+    assert evidence["uncovered_area_px"] == 0
     json.dumps(row)
 
 
@@ -173,21 +170,15 @@ def halo_candidate(*, mode="suppress", defect=None, edge=False):
 @pytest.mark.parametrize("mode", ["observe", "suppress", "off"])
 def test_supported_dark_core_can_clear_its_halo_without_lowering_overlap_threshold(mode):
     candidate = halo_candidate(mode=mode)
-    if mode == "off":
-        assert candidate["disposition"] == "retained"
-        return
     dust = candidate["dust"]
     assert dust["overlap_ratio"] < .8 and dust["core_overlap_ratio"] == 1
     assert dust["match_basis"] == "dark_core"
-    if mode == "suppress":
-        assert dust["halo_removed_area_px"] > 1000
-        assert candidate["disposition"] == "dust_suppressed"
-        from capi_side_report import _inside_omit_regions
-        assert _inside_omit_regions([600, 480], dust["suppressed_regions"])
-        assert not _inside_omit_regions([600, 430], dust["suppressed_regions"])
-    else:
-        assert dust["halo_removed_area_px"] == 0 and dust["status"] == "suspected"
-        assert candidate["disposition"] == "retained"
+    assert dust["halo_removed_area_px"] > 1000
+    assert dust["status"] == "suppressed"
+    assert candidate["disposition"] == "dust_suppressed"
+    from capi_side_report import _inside_omit_regions
+    assert _inside_omit_regions([600, 480], dust["suppressed_regions"])
+    assert not _inside_omit_regions([600, 430], dust["suppressed_regions"])
 
 
 @pytest.mark.parametrize("defect", ["bright", "dark"])

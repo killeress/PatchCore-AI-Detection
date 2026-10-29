@@ -31,14 +31,15 @@ const document={getElementById:id=>elements[id]};
 '''
     check = r'''
 (async()=>{
+ allParams=[{param_name:'side_white_detection_params',param_value:JSON.stringify({dust_mode:'observe'})}];
  const defaults=savedSideWhiteParams();
  assert.equal(defaults.csjbl_preview_radius_product_px,50);
+ assert.equal(defaults.dust_mode,'suppress');
  for(const [key] of sideWhiteParamFields) elements['sw-param-'+key]={valueAsNumber:Number(defaults[key])};
  for(const [key] of sideWhiteSwitches) elements['sw-param-'+key]={checked:defaults[key]};
  elements['sw-param-apply_exclusions'].checked=false;
  elements['sw-param-csjbl_preview_radius_product_px'].valueAsNumber=75;
  elements['sw-param-bomb_force_detection_enabled'].checked=true;
- elements['sw-param-dust_mode']={value:'suppress'};
  elements['sw-params-form']={outerHTML:''};
  await saveSideWhiteParams({preventDefault(){},target:{reportValidity:()=>true}});
  assert.equal(sent.new_value.apply_exclusions,false);
@@ -51,6 +52,9 @@ const document={getElementById:id=>elements[id]};
  const html=renderSideWhitePane();
  assert.equal(html.includes('儲存 Review'),false);
  assert.equal(html.includes('sw-filter-review'),false);
+ assert.equal(html.includes('sw-param-dust_mode'),false);
+ assert.equal(html.includes('灰塵處理模式'),false);
+ assert.equal(html.includes('貼紙／灰塵過濾固定啟用'),true);
  console.log(JSON.stringify(sent.new_value));
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
