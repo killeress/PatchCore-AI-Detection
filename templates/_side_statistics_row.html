@@ -3,14 +3,16 @@
 <article class="sw-card ss-row" data-record-id="{{ row.record_id }}">
     <details class="ss-record">
     <summary>
-        <span class="ss-record-title"><strong>{{ row.glass_id }}</strong><small>{{ row.machine_no }} · {{ row.model_id }} · {{ row.request_time }}</small></span>
+        <span class="ss-record-title"><strong>{{ row.glass_id }}</strong><small class="ss-record-meta"><span>{{ row.machine_no }} · {{ row.model_id }}</span><span>{{ row.request_time }}</span></small></span>
         <span class="ss-record-status ss-panel-result" data-panel-state="{{ view.panel.state }}">
-            <small>整片試算 · 結合各畫面</small><strong class="sw-tone-{{ view.panel.tone }}">{{ view.panel.text }}</strong>
-            <span class="ss-panel-note" title="{{ view.panel.reason }}">{{ view.panel.reason }}</span>
+            <small title="結合同一次檢測各畫面的正式 NG 原因">整片試算</small><strong class="sw-tone-{{ view.panel.tone }}">{{ view.panel.text }}</strong>
+            <span class="ss-panel-note" title="{{ view.panel.reason }}">{% if view.panel.state == 'eligible' %}全部 NG 原因已涵蓋{% elif view.panel.remaining_sources %}NG 來源：{{ view.panel.remaining_sources|join('、') }}{% elif view.panel.state == 'already_ok' %}沿用正式判定{% else %}{{ view.panel.reason }}{% endif %}</span>
         </span>
-        <span class="ss-record-status"><small>貼紙／表面異物</small><span class="sw-tone-{{ view.sticker.tone }}">{{ view.sticker.text }}</span></span>
-        <span class="ss-record-status"><small>MARK</small><span class="sw-tone-{{ view.mark.tone }}">{{ view.mark.text }}</span></span>
-        <span class="ss-record-status"><small>易撕貼</small><span class="sw-tone-{{ view.tape.tone }}">{{ view.tape.text }}</span></span>
+        <span class="ss-record-breakdown">
+            <span class="ss-record-status"><small>貼紙／表面異物</small><span class="sw-tone-{{ view.sticker.tone }}">{{ view.sticker.text }}</span></span>
+            <span class="ss-record-status"><small>MARK</small><span class="sw-tone-{{ view.mark.tone }}">{{ view.mark.text }}</span></span>
+            <span class="ss-record-status"><small>易撕貼</small><span class="sw-tone-{{ view.tape.tone }}">{{ view.tape.text }}</span></span>
+        </span>
         <span class="ss-record-action"><span class="ss-expand">查看明細</span><span class="ss-collapse">收合</span></span>
     </summary>
     <div class="ss-record-body">
