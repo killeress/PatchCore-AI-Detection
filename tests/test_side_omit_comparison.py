@@ -53,12 +53,14 @@ def test_same_surface_evidence_respects_observe_suppress_and_off(mode, status, l
     json.dumps(row)
 
 
-def test_partial_omit_keeps_uncovered_pixels_even_when_overlap_exceeds_threshold():
+@pytest.mark.parametrize("x,expected", [(40, "omit_suppressed"), (50, "matched")])
+def test_partial_omit_only_blocks_the_aoi_point_on_uncovered_pixels(x, expected):
     omit = full_omit()
     omit[:, 45:] = 0
     row = observed_row(omit, threshold=.5)
+    row["aoi_machine_coords"]["W0F00000"][0]["product_x"] = x
     point = compare_side_record(row)["points"][0]
-    assert point["status"] == "matched" and point["omit"]["status"] == "partial"
+    assert point["status"] == expected and point["omit"]["status"] == "partial"
     evidence = point["omit"]["candidates"][0]
     assert evidence["overlap_ratio"] == .625
     assert evidence["remaining_area_px"] == evidence["uncovered_area_px"] == 300

@@ -4,7 +4,7 @@
 {% include "_side_white_styles.html" %}
 {% set p = sw.payload %}
 {% set view = side_white_view(sw, detail) %}
-{% set matches = {'matched':'保留檢查','mark_suppressed':'MARK → OK','omit_suppressed':'貼紙／表面異物 → OK','tape_suppressed':'易撕貼 → OK','filtered':'附近候選已排除','unmatched':'附近未找到候選','unavailable':'無法定位','unverified':'尚未確認'} %}
+{% set matches = {'matched':'報點命中候選 · 保留檢查','mark_suppressed':'MARK → OK','omit_suppressed':'貼紙／表面異物 → OK','tape_suppressed':'易撕貼 → OK','filtered':'報點候選已排除','unmatched':'AOI 報點未命中候選','unavailable':'無法定位','unverified':'尚未確認'} %}
 {% macro sw_image_url(kind) -%}{% if debug_result %}{{ artifact_urls.get(kind, '') }}{% else %}/api/side-white/image?id={{ sw.id }}&amp;kind={{ kind }}&amp;annotations=2{% endif %}{%- endmacro %}
 {% macro sw_preview_attrs(kind) -%}{% if debug_result %}data-sw-preview-kind="{{ kind }}" data-sw-nearby-url="{{ sw_image_url(kind) }}" data-sw-all-url="{{ artifact_urls.get(kind ~ '_all', artifact_urls.get(kind, '')) }}"{% endif %}{%- endmacro %}
 <section class="sw-card{{ ' sw-embedded' if statistics_result else '' }}" id="side-white-result{% if embedded %}-{{ sw.id }}{% endif %}">
@@ -29,7 +29,7 @@
         {% endfor %}
     </div>
     <div class="sw-head sw-result-links">
-        <span class="sw-note">黃色只標示仍需保留檢查的候選，# 編號沿用原始明細；MARK／PRINT、ZONE、TAPE 分別表示屏蔽範圍。</span>
+        <span class="sw-note">黃色僅標示 AOI 報點命中且仍需保留檢查的候選；灰色候選僅供參考，不影響該點判斷。# 編號沿用原始明細。</span>
         <div class="sw-controls">{% set record_id = sw.get('record_id') or detail.get('id') %}{% if record_id and not debug_result %}<a href="/debug?tab=side-white&amp;record_id={{ record_id|string|urlencode }}" target="_blank" rel="noopener">DEBUG 側拍推論 →</a>{% endif %}{% if not embedded %}<a href="/settings?tab=side-white&amp;glass_id={{ detail.get('glass_id','')|urlencode }}">側拍結果總表 →</a>{% endif %}</div>
     </div>
     {% if view.comparison.points %}
@@ -43,10 +43,10 @@
     {% else %}<p class="sw-note">此筆沒有已保存的 AOI CSJBL 座標，無法標出 AOI 報點。</p>{% endif %}
     <details class="sw-technical"><summary>檢測明細 · {{ p.get('candidates',[])|length }} 個原始候選</summary>
         {% if view.candidates %}<div class="sw-scroll"><table class="sw-table"><thead><tr><th>候選</th><th>處理結論</th><th>OMIT 本體覆蓋</th><th>證據</th></tr></thead><tbody>
-        {% for c in view.candidates %}<tr><td>#{{ c.id }}{% if c.nearby %} · AOI 附近{% endif %}</td><td>{{ c.label }}</td><td>{{ (c.core_overlap_ratio * 100)|round(1)|string + '%' if c.core_overlap_ratio is not none else '—' }}</td><td>{% if c.composite_key %}<a href="{{ sw_image_url(c.composite_key) }}" target="_blank" rel="noopener">同區域對照圖 ↗</a>{% else %}未保存對照圖{% endif %}</td></tr>{% endfor %}
+        {% for c in view.candidates %}<tr><td>#{{ c.id }}{% if c.aoi_hit %} · AOI 命中{% elif c.nearby %} · 附近參考{% endif %}</td><td>{{ c.label }}</td><td>{{ (c.core_overlap_ratio * 100)|round(1)|string + '%' if c.core_overlap_ratio is not none else '—' }}</td><td>{% if c.composite_key %}<a href="{{ sw_image_url(c.composite_key) }}" target="_blank" rel="noopener">同區域對照圖 ↗</a>{% else %}未保存對照圖{% endif %}</td></tr>{% endfor %}
         </tbody></table></div>{% endif %}
-        {% if p.get('candidate_display') %}{% set display = p.candidate_display %}{% set nearby_note = 'CSJBL 附近 ' ~ display.tolerance_product_px ~ ' 產品 px · 黃框 ' ~ view.yellow_candidates.nearby ~ '／' ~ view.yellow_candidates.total ~ (' · ' ~ display.reason if display.reason else '') %}
-        <p class="sw-note" {% if debug_result %}data-sw-nearby-note="{{ nearby_note }}" data-sw-all-note="全圖保留候選 · 黃框 {{ view.yellow_candidates.total }}"{% endif %}>{{ nearby_note }}</p>{% elif not debug_result and p.get('artifacts',{}).get('side') %}<p class="sw-note">舊預覽：重新推論或進入 DEBUG 更新框選。</p>{% endif %}
+        {% if p.get('candidate_display') %}{% set display = p.candidate_display %}{% set nearby_note = 'CSJBL 附近 ' ~ display.tolerance_product_px ~ ' 產品 px · AOI 命中黃框 ' ~ view.yellow_candidates.nearby ~ ' · 灰色參考 ' ~ view.reference_candidates.nearby ~ (' · ' ~ display.reason if display.reason else '') %}
+        <p class="sw-note" {% if debug_result %}data-sw-nearby-note="{{ nearby_note }}" data-sw-all-note="全圖 · AOI 命中黃框 {{ view.yellow_candidates.total }} · 灰色參考 {{ view.reference_candidates.total }}"{% endif %}>{{ nearby_note }}</p>{% elif not debug_result and p.get('artifacts',{}).get('side') %}<p class="sw-note">舊預覽：重新推論或進入 DEBUG 更新框選。</p>{% endif %}
         <p class="sw-note">{{ p.get('side_image','') }}{% if p.get('front_image') %} → {{ p.front_image }}{% endif %} · {{ p.get('algorithm','') }} · {{ p.get('processing_ms',0) }} ms</p>
         {% if p.get('parameters') %}<p class="sw-note">OMIT 模式：{{ {'off':'關閉','observe':'僅標示','suppress':'啟用屏蔽'}.get(p.parameters.get('dust_mode'),'未保存') }} · 重疊門檻 {{ p.parameters.get('dust_overlap_ratio','—') }} · 比對外擴 {{ p.parameters.get('mapping_margin_px','—') }} 側拍 px · 最低局部反差 {{ p.parameters.get('min_contrast_gray','—') }} · 最小面積 {{ p.parameters.get('min_area_px','—') }} px</p>{% else %}<p class="sw-note">此筆未保存參數快照。</p>{% endif %}
         {% if p.get('omit') %}<p class="sw-note">側拍 OMIT（SPINIGBI）：{{ p.omit.get('image','無可用影像') }} · {{ p.omit.get('reason','') }}</p>{% endif %}

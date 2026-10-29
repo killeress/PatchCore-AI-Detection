@@ -84,10 +84,12 @@ def test_product_coordinates_map_through_front_plane_and_keep_raw_orientation(ro
         assert np.allclose(point[kind + "_raw_xy"], expected)
 
 
-def test_distance_uses_contour_boundary_and_product_pixels():
+def test_distance_selects_references_without_matching_the_aoi_point():
     row = mapped_row()
     row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(440, 200), coordinate(800, 400)]})
-    assert compare_side_record(row, 31)["points"][0]["status"] == "matched"
+    assert compare_side_record(row, 31)["points"][0]["status"] == "unmatched"
+    assert compare_side_record(row, 31)["points"][0]["candidate_ids"] == [1]
+    assert compare_side_record(row, 31)["points"][0]["retained_candidate_ids"] == []
     assert compare_side_record(row, 29)["points"][0]["status"] == "unmatched"
     result = compare_side_record(row, 31)
     assert result["points"][1]["status"] == "unmatched" and result["mapped"] == 2
@@ -151,7 +153,7 @@ def test_mark_roi_excludes_mark_without_hiding_nearby_defect():
     assert view["mark"]["tone"] == "muted"
     assert view["mark"]["text"] == "MARK 屏蔽範圍 1 區，AOI 未命中"
     row = marked_row()
-    contour = np.array(row["payload"]["candidates"][0]["side_contour"]) + [25, 0]
+    contour = np.array(row["payload"]["candidates"][0]["side_contour"]) + [[0, 0], [50, 0], [50, 0], [0, 0]]
     row["payload"]["candidates"].append({"id": 2, "side_contour": contour.tolist(), "disposition": "retained"})
     result = compare_side_record(row, 50)
     assert result["mark_suppressed"] == 0
@@ -407,7 +409,7 @@ def test_report_row_escapes_identity_and_shows_no_match_crops_without_review_con
     html = env.get_template("_side_statistics_row.html").render(row=row, comparison=compare_side_record(row))
     assert '<script>bad()</script>' not in html and '&lt;script&gt;bad()&lt;/script&gt;' in html
     assert '<img src=x onerror=bad()>' not in html
-    assert '附近未找到候選' in html and '&amp;point=1' in html
+    assert 'AOI 報點未命中候選' in html and '&amp;point=1' in html
     assert '查看明細' in html and '<form' not in html
     for label in ('人工驗證', '待驗證', '驗證人', '儲存驗證結果', 'data-review-'):
         assert label not in html
@@ -424,7 +426,7 @@ def test_mark_suggestion_is_shown_per_point_and_keeps_formal_ng_label():
     html = env.get_template("_side_statistics_row.html").render(
         row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
     assert "已屏蔽 · 1 點可轉 OK" in html
-    assert "正式結果：NG" in html and "附近未找到候選" in html
+    assert "正式結果：NG" in html and "AOI 報點未命中候選" in html
 
 
 def test_side_report_dependencies_are_in_codeonly_release_inputs():
@@ -510,7 +512,7 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
         assert 'id="ss-summary"' in get("/ric?tab=side-statistics").decode("utf-8")
         query_url = "/api/ric/side-stats?start_date=2026-10-22&end_date=2026-10-22"
         data = json.loads(get(query_url))
-        assert data["total"] == 1 and "附近未找到候選" in data["rows_html"]
+        assert data["total"] == 1 and "AOI 報點未命中候選" in data["rows_html"]
         assert data["conversion_summary"]["scope"]["denominator"] == 1
         assert data["conversion_summary"]["scope"]["before_pct"] == 100
         eligible = json.loads(get(query_url + "&conversion=eligible"))

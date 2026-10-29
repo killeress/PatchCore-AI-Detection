@@ -249,7 +249,7 @@ def _candidate_preview_scope(payload):
         reason = "有 CSJBL 座標無法映射，僅顯示可對應黃框。"
     return {"scope": "csjbl_nearby", "tolerance_product_px": radius,
             "candidate_ids": [c["id"] for c in candidates if c["id"] in selected and c["id"] in retained],
-            "total": len(retained), "reason": reason}
+            "total": len(selected & retained.keys()), "reference_total": len(retained.keys() - selected), "reason": reason}
 
 
 def _save_preview(path, image):

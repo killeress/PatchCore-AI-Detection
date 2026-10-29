@@ -144,12 +144,12 @@ def test_invalid_formal_judgment_cannot_remove_ng_from_an_empty_denominator(db):
     assert s["scope"]["scenarios"]["combined"]["remaining_ng"] == 0
 
 
-def test_saved_review_and_report_tolerance_change_eligibility_consistently(db):
+def test_saved_review_blocks_but_nearby_reference_does_not_block_conversion(db):
     row = sample()
     contour = [[130, 90], [140, 90], [140, 110], [130, 110]]
     row["payload"]["candidates"].append({"id": 2, "side_contour": contour, "disposition": "retained"})
     _, result_id = save(db, row)
-    assert query(db, tolerance=50)["conversion_summary"]["eligible_records"] == 0
+    assert query(db, tolerance=50)["conversion_summary"]["eligible_records"] == 1
     result = query(db, tolerance=0)
     assert result["conversion_summary"]["eligible_records"] == 1
     assert result["rows"][0]["conversion"]["eligible"]

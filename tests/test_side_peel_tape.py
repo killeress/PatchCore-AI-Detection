@@ -105,7 +105,7 @@ def test_tape_uses_same_detection_orientation_and_perspective_mapping(rotated):
     assert comparison["points"][0]["side_xy"] == pytest.approx(side_xy, abs=.001)
 
 
-def test_only_contained_candidates_are_tape_and_neighbouring_defects_stay_blocked():
+def test_tape_ignores_neighbours_but_blocks_an_aoi_hit_outside_the_tape():
     row = tape_row()
     p = row["payload"]
     p["candidates"] = [{"id": 2, "disposition": "retained", "side_contour":
@@ -116,10 +116,10 @@ def test_only_contained_candidates_are_tape_and_neighbouring_defects_stay_blocke
     p["candidates"].append({"id": 3, "disposition": "retained", "side_contour":
                              [[350, 225], [360, 225], [360, 230], [350, 230]]})
     comparison = compare_side_record(row, tolerance=50)
-    assert comparison["tape_suppressed"] == 0
-    assert all(pt["retained_candidate_ids"] == [3] for pt in comparison["points"])
-    assert not record_conversion(row, comparison)["eligible"]
-    assert side_white_view(row)["tape"]["tone"] == "warn"
+    assert comparison["tape_suppressed"] == 2
+    assert all(pt["retained_candidate_ids"] == [] for pt in comparison["points"])
+    assert record_conversion(row, comparison)["eligible"]
+    assert side_white_view(row)["tape"]["tone"] == "ok"
     assert compare_side_record(row, tolerance=0)["tape_suppressed"] == 2
     p["candidates"] = [{"id": 4, "disposition": "retained", "side_contour":
                          [[350, 225], [388, 225], [388, 232], [350, 232]]}]

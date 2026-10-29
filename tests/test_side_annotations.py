@@ -72,7 +72,8 @@ def test_region_sources_use_distinct_colors_with_names_outside_the_picture(monke
         configured_zones=[{"front_bbox": [800, 500, 80, 30],
                            "side_polygon": [[800, 500], [880, 500], [880, 530], [800, 530]]}],
         bombs=[{"id": 1, "side_tolerance_polygon": [[300, 300], [340, 300], [340, 340], [300, 340]]}],
-        candidates=[{"id": 1, "side_contour": [[500, 200], [530, 200], [530, 230], [500, 230]]}])
+        candidates=[{"id": 1, "side_contour": [[945, 535], [965, 535], [965, 555], [945, 555]]},
+                    {"id": 2, "side_contour": [[500, 200], [530, 200], [530, 230], [500, 230]]}])
     labels = {}
     put_text = cv2.putText
     def capture(image, text, origin, font, size, color, *args):
@@ -82,10 +83,11 @@ def test_region_sources_use_distinct_colors_with_names_outside_the_picture(monke
     image = np.full((600, 1000, 3), 80, np.uint8)
     draw_side_annotations(image, row["payload"], compare_side_record(row), "side", [0, 0, 1000, 600],
                           all_candidates=True)
-    assert set(labels) == {"A1", "B1", "#1"}
+    assert set(labels) == {"A1", "B1", "#1", "#2"}
     assert labels["B1"] == annotation_color("bomb")
     assert labels["#1"] == annotation_color("candidate")
-    assert len({annotation_color(item["key"]) for item in SIDE_ANNOTATION_LEGEND}) == 6
+    assert labels["#2"] == annotation_color("reference")
+    assert len({annotation_color(item["key"]) for item in SIDE_ANNOTATION_LEGEND}) == 7
     for item in SIDE_ANNOTATION_LEGEND:
         difference = np.abs(image.astype(np.int16) - annotation_color(item["key"]))
         assert np.any(difference.max(axis=2) < 25), item["key"]
@@ -97,7 +99,7 @@ def test_yellow_only_marks_retained_candidates_in_nearby_and_all_views(kind, all
     row = roi_row()
     payload = row["payload"]
     for candidate_id, x, disposition, bombs in [
-            (2, 145, "retained", []), (3, 300, "retained", []),
+            (2, 137, "retained", []), (3, 300, "retained", []),
             (4, 160, "excluded", []), (5, 165, "dust_suppressed", []),
             (6, 170, "mark_suppressed", []), (7, 175, "retained", [1])]:
         contour = [[x, 95], [x + 5, 95], [x + 5, 105], [x, 105]]
@@ -113,7 +115,7 @@ def test_yellow_only_marks_retained_candidates_in_nearby_and_all_views(kind, all
     assert {label for label in labels if label.startswith('#')} == ({"#2", "#3"} if all_candidates else {"#2"})
     roi = image[90:121, 90:121]
     assert not np.any((roi[:, :, 0] < 100) & (roi[:, :, 1] > 130) & (roi[:, :, 2] > 170))
-    assert side_white_view(dict(row, comparison=comparison))["yellow_candidates"] == {"nearby": 1, "total": 2}
+    assert side_white_view(dict(row, comparison=comparison))["yellow_candidates"] == {"nearby": 1, "total": 1}
     assert row == before
 
 
@@ -130,7 +132,8 @@ def test_yellow_draws_only_nearby_remaining_contours_of_a_partly_masked_candidat
     draw_side_annotations(image, row["payload"], compare_side_record(row), kind, [0, 0, 500, 300])
     yellow = (image[:, :, 0] < 100) & (image[:, :, 1] > 130) & (image[:, :, 2] > 170)
     assert not yellow[90:121, 90:121].any()
-    assert yellow[94:107, remaining_x - 1:remaining_x + 12].any() == (remaining_x == 170)
+    assert not yellow[94:107, remaining_x - 1:remaining_x + 12].any()
+    assert side_white_view(row)["reference_candidates"]["total"] == 1
     assert row == before
 
 

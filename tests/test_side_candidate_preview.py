@@ -24,12 +24,12 @@ def point(x=400, y=200, **extra):
     return {'defect_code': 'CSJBL', 'image_prefix': 'W0F00000', 'product_x': x, 'product_y': y, **extra}
 
 
-def test_preview_uses_contour_distance_and_multiple_csjbl_points_only():
+def test_preview_only_counts_aoi_hits_and_keeps_neighbours_as_references():
     payload = mapped_payload([point(460, 200), point(800, 400, defect_code='OTHER')])
     before = copy.deepcopy(payload)
     scope = _candidate_preview_scope(payload)
-    assert scope['candidate_ids'] == [1]  # 50 from contour, 60 from centre
-    assert scope['total'] == 2 and scope['tolerance_product_px'] == 50
+    assert scope['candidate_ids'] == []  # Nearby is not an AOI point hit.
+    assert scope['total'] == 0 and scope['reference_total'] == 2 and scope['tolerance_product_px'] == 50
     assert payload == before
     payload['evidence_context']['aoi_csjbl_points'][0]['product_x'] = 461
     assert _candidate_preview_scope(payload)['candidate_ids'] == []
@@ -43,15 +43,15 @@ def test_preview_counts_only_retained_yellow_candidates_and_keeps_original_ids(d
     payload['candidates'][0]['disposition'] = disposition
     before = copy.deepcopy(payload)
     scope = _candidate_preview_scope(payload)
-    assert scope['candidate_ids'] == [] and scope['total'] == 1
+    assert scope['candidate_ids'] == [] and scope['total'] == 0 and scope['reference_total'] == 1
     assert payload == before
     payload['evidence_context']['aoi_csjbl_points'] = [point(800, 400)]
     assert _candidate_preview_scope(payload)['candidate_ids'] == [2]
 
 
 @pytest.mark.parametrize('radius,x,expected', [(0, 400, [1]), (0, 411, []),
-    (20, 430, [1]), (20, 431, []), (100, 500, [1]), (500, 400, [1, 2])])
-def test_preview_uses_configured_product_radius(radius, x, expected):
+    (20, 430, []), (20, 431, []), (100, 500, []), (500, 400, [1])])
+def test_preview_radius_does_not_expand_aoi_point_hits(radius, x, expected):
     payload = mapped_payload([point(x, 200)])
     payload['parameters'] = {'csjbl_preview_radius_product_px': radius}
     before = copy.deepcopy(payload)
@@ -127,7 +127,11 @@ def test_real_previews_only_draw_nearby_but_debug_can_show_all(tmp_path, rotated
             roi = image[y-25:y+26, x-25:x+26]
             return np.count_nonzero((roi[:, :, 0] < 100) & (roi[:, :, 1] > 130) & (roi[:, :, 2] > 170))
         assert yellow_count(near_view) == 0
-        assert yellow_count(all_view) > 20
+        assert yellow_count(all_view) == 0
+        # DEBUG can still inspect the non-AOI candidate, using reference gray.
+        def colored_count(image):
+            return np.count_nonzero(np.ptp(image[y-25:y+26, x-25:x+26], axis=2) > 10)
+        assert colored_count(near_view) == 0 and colored_count(all_view) > 20
     formal = inspect_side_white_image(side_path, front_path, tmp_path / 'formal',
         context=context, rotate_180=rotated)
     assert formal['candidates'] == payload['candidates']
