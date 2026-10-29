@@ -17,7 +17,8 @@ from capi_database import CAPIDatabase
 from capi_web import CAPIWebHandler
 
 
-@pytest.mark.parametrize('scenario', ['normal', 'rotated', 'disabled', 'missing', 'error', 'without_csjbl'])
+@pytest.mark.parametrize('scenario', ['normal', 'rotated', 'disabled', 'missing', 'error',
+                                     'localization_error', 'without_csjbl'])
 def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monkeypatch, scenario):
     import capi_server
     import capi_side_white
@@ -68,6 +69,11 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
         side.unlink()
     elif scenario == 'error':
         monkeypatch.setattr(capi_side_white, 'inspect_side_white_image', MagicMock(side_effect=ValueError('side failure')))
+    elif scenario == 'localization_error':
+        failure = capi_side_white.PanelLocalizationError('unstable edge', {
+            'source_image': side.name, 'view': 'side', 'stage': 'edge_fit',
+            'edge': 'bottom', 'residual_p95_px': 12.0, 'limit_px': 3.0})
+        monkeypatch.setattr(capi_side_white, 'detect_panel_quad', MagicMock(side_effect=failure))
     original_save = db.save_side_white_result
     def save_when_running(record_id, payload, **kwargs):
         assert cls._rerun_tasks[record_id]['status'] == 'running'
@@ -89,14 +95,25 @@ def test_page_rerun_replaces_side_results_and_waits_for_evidence(tmp_path, monke
     row = updated['side_white_result']
     assert row['review_decision'] == 'unreviewed' and row['review_note'] == ''
     payload = row['payload']
+    side_notes = [line for line in updated['inference_log'].splitlines()
+                  if line.startswith('[SIDE_WHITE_RESULT] ')]
+    assert len(side_notes) == 1
+    saved_summary = json.loads(side_notes[0].split(' ', 1)[1])
+    assert saved_summary['status'] == payload['status']
     assert row['id'] != old_id and db.list_side_white_results()['total'] == 1
-    if scenario in {'missing', 'error'}:
+    if scenario in {'missing', 'error', 'localization_error'}:
         assert payload['status'] == ('NO_IMAGE' if scenario == 'missing' else 'ERROR')
         assert payload['candidates'] == [] and payload['artifacts'] == {}
         assert '側拍' in cls._rerun_tasks[record]['message']
+        if scenario == 'localization_error':
+            assert saved_summary['diagnostics'] == payload['diagnostics']
+            assert saved_summary['diagnostics']['edge'] == 'bottom'
+            assert saved_summary['diagnostics']['residual_p95_px'] == 12.0
         return
     assert payload['rotation_applied'] == (scenario == 'rotated')
     assert payload['mapping']['front_geometry_source'] == 'formal_inference'
+    assert saved_summary['mapping']['front_geometry_source'] == 'formal_inference'
+    assert saved_summary['localization']['method'] == 'straight_edges'
     assert payload['omit']['image'] == 'SPINIGBI _153501.tif'
     assert payload['candidates'][0]['dust']['overlap_ratio'] > .8
     assert payload['bombs'][0]['status'] == 'matched'

@@ -2073,7 +2073,7 @@ class CAPIDatabase:
         return result
 
     def save_side_white_result(self, record_id: int, payload: Dict, *, heatmap_dir: str = "") -> int:
-        """Store observation-only results without changing inference or report fields."""
+        """Store side evidence and its log summary without changing formal judgments."""
         with self._lock:
             conn = self._get_conn()
             try:
@@ -2086,6 +2086,20 @@ class CAPIDatabase:
                 if heatmap_dir:
                     conn.execute("UPDATE inference_records SET heatmap_dir=? WHERE id=? AND heatmap_dir=''",
                                  (heatmap_dir, record_id))
+                # Side inspection runs after the formal stdout capture closes.
+                # Save its diagnostics with the result, for both live and rerun paths.
+                summary = {key: payload[key] for key in (
+                    "algorithm", "status", "side_image", "front_image", "rotation_applied",
+                    "reason", "diagnostics", "mapping", "processing_ms") if key in payload}
+                localization = payload.get("localization") or {}
+                if localization:
+                    summary["localization"] = {key: localization[key] for key in ("method", "edges")
+                                               if key in localization}
+                note = "[SIDE_WHITE_RESULT] " + json.dumps(summary, ensure_ascii=False)
+                conn.execute("""UPDATE inference_records
+                                SET inference_log = CASE WHEN COALESCE(inference_log, '') = '' THEN ?
+                                    ELSE inference_log || char(10) || ? END WHERE id = ?""",
+                             (note, note, record_id))
                 conn.commit()
                 return cursor.lastrowid
             finally:

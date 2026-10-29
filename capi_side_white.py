@@ -12,7 +12,7 @@ import numpy as np
 
 from capi_config import normalize_side_white_params
 
-ALGORITHM = "side-white-cv-v5"
+ALGORITHM = "side-white-cv-v6"
 logger = logging.getLogger("capi.side_white")
 _SIDE_NAME = re.compile(r"^(.*?)SW0F00000(_?\d{6})?$", re.IGNORECASE)
 _FRONT_NAME = re.compile(r"^(.*?)W0F00000(_?\d{6})?$", re.IGNORECASE)
@@ -91,8 +91,46 @@ class PanelLocalizationError(ValueError):
         self.diagnostics = diagnostics
 
 
-def detect_panel_quad(gray: np.ndarray, *, source_name="", view="unknown", rotate_180=False) -> np.ndarray:
-    """Fit the four bright-panel boundaries, returning TL/TR/BR/BL pixels."""
+def _curved_panel_edge(edge, start, end, radius, limit):
+    """Recover a shallow, smooth bow, not arbitrary failed straight-line fits.
+
+    Fit every sample; validate each eighth of the edge as well as the whole
+    edge. Never discard a damaged interval to manufacture a good residual.
+    The endpoint chord is used for corners; the curve is retained for masking.
+    """
+    length = float(np.linalg.norm(end - start))
+    direction = (end - start) / length
+    normal = np.array([-direction[1], direction[0]])
+    position = (edge - start) @ direction / length
+    offset = (edge - start) @ normal
+    coefficients = np.polyfit(position, offset, 2)
+    residual = np.abs(offset - np.polyval(coefficients, position))
+    curve_p95 = float(np.percentile(residual, 95))
+    segment_p95 = max(float(np.percentile(part, 95)) for part in np.array_split(residual, 8))
+    # Quadratic midpoint-to-chord distance; cap the bow by search range and
+    # edge length so strongly distorted panels cannot silently pass mapping.
+    bow = float(abs(coefficients[0]) / 4)
+    bow_limit = min(radius * .5, length * .015)
+    curve_limit = limit * .5
+    t = np.linspace(0, 1, 65)
+    curve_offsets = np.polyval(coefficients, t)
+    accepted = (limit < bow <= bow_limit and segment_p95 <= curve_limit
+                and float(residual.max()) <= limit
+                and float(np.abs(curve_offsets).max()) < radius * .9)
+    diagnostics = {"curve_residual_p95_px": curve_p95, "curve_limit_px": curve_limit,
+                   "curve_segment_p95_max_px": segment_p95, "bow_px": bow,
+                   "bow_limit_px": bow_limit, "curve_accepted": bool(accepted)}
+    if not accepted:
+        return None, None, diagnostics
+    curve = start + t[:, None] * (end - start) + curve_offsets[:, None] * normal
+    chord = np.cross(np.r_[curve[0], 1], np.r_[curve[-1], 1])
+    chord /= np.linalg.norm(chord[:2])
+    return chord, curve, diagnostics
+
+
+def detect_panel_quad(gray: np.ndarray, *, source_name="", view="unknown", rotate_180=False,
+                      localization=None) -> np.ndarray:
+    """Return TL/TR/BR/BL; optionally expose validated curved boundary evidence."""
     def fail(reason, stage, **metrics):
         diagnostics = {"source_image": source_name, "view": view, "stage": stage,
                        "image_size": [gray.shape[1], gray.shape[0]],
@@ -115,7 +153,7 @@ def detect_panel_quad(gray: np.ndarray, *, source_name="", view="unknown", rotat
     top, bottom = np.array_split(coarse[np.argsort(coarse[:, 1])], 2)
     quad = np.array([top[np.argmin(top[:, 0])], top[np.argmax(top[:, 0])],
                      bottom[np.argmax(bottom[:, 0])], bottom[np.argmin(bottom[:, 0])]], np.float32)
-    lines = []
+    lines, curves, edge_diagnostics = [], [], []
     radius = max(8, min(65, min(gray.shape) * .025))
     offsets = np.linspace(-radius, radius, int(radius * 4) + 1)
     for index in range(4):
@@ -135,11 +173,20 @@ def detect_panel_quad(gray: np.ndarray, *, source_name="", view="unknown", rotat
         line = np.array([-vy, vx, vy * x - vx * y])
         residual_p95 = float(np.percentile(np.abs(edge @ line[:2] + line[2]), 95))
         limit = max(3, radius * .1)
+        metrics = dict(edge=("top", "right", "bottom", "left")[index],
+                       residual_p95_px=residual_p95, limit_px=limit, samples=len(edge), radius_px=radius)
+        curve = None
         if residual_p95 > limit:
-            fail("面板邊線不穩定，無法可靠定位", "edge_fit",
-                 edge=("top", "right", "bottom", "left")[index],
-                 residual_p95_px=residual_p95, limit_px=limit, samples=len(edge), radius_px=radius)
+            chord, curve, curve_metrics = _curved_panel_edge(edge, start, end, radius, limit)
+            metrics.update(curve_metrics)
+            if chord is None:
+                fail("面板邊線不穩定，無法可靠定位", "edge_fit", **metrics)
+            line = chord
+            logger.info("[SIDE_WHITE_LOCALIZATION] source=%s view=%s rotation=%s "
+                        "status=curved_edge details=%s", source_name, view, rotate_180, metrics)
         lines.append(line)
+        curves.append(curve)
+        edge_diagnostics.append({"model": "quadratic" if curve is not None else "line", **metrics})
     intersections = [np.cross(lines[(i - 1) % 4], lines[i]) for i in range(4)]
     if any(abs(point[2]) < 1e-6 for point in intersections):
         fail("面板邊線無法相交", "intersection")
@@ -148,6 +195,22 @@ def detect_panel_quad(gray: np.ndarray, *, source_name="", view="unknown", rotat
             or np.any(quad < -2) or np.any(quad[:, 0] > gray.shape[1] + 1)
             or np.any(quad[:, 1] > gray.shape[0] + 1)):
         fail("面板邊界超出影像或形狀無效", "quad_validation", polygon=quad.tolist())
+    if any(curve is not None for curve in curves):
+        # Keep actual bowed pixels in the inspection region. A quadrilateral
+        # alone would cut off an outward bow or include background in an inward one.
+        boundary = np.concatenate([
+            np.vstack([quad[i], curve[1:-1]]) if curve is not None else quad[i:i + 1]
+            for i, curve in enumerate(curves)
+        ]).astype(np.float32)
+        if (not np.isfinite(boundary).all() or np.any(boundary < -2)
+                or np.any(boundary[:, 0] > gray.shape[1] + 1)
+                or np.any(boundary[:, 1] > gray.shape[0] + 1)):
+            fail("面板曲線超出影像或形狀無效", "boundary_validation")
+    else:
+        boundary = quad
+    if localization is not None:
+        localization.update(edges=edge_diagnostics, boundary=boundary.tolist(),
+                            method="bounded_curved_edges" if len(boundary) > 4 else "straight_edges")
     return quad
 
 
@@ -225,9 +288,13 @@ def _front_quad_for_mapping(side_path, front_path, front, context, rotate_180):
     return quad, "formal_inference"
 
 
-def _candidates(gray, quad, params, *, limit=100, force_mask=None):
+def _candidates(gray, quad, params, *, limit=100, force_mask=None, panel_boundary=None):
     mask = np.zeros_like(gray)
-    cv2.fillConvexPoly(mask, np.rint(quad).astype(np.int32), 255)
+    boundary = quad if panel_boundary is None else np.asarray(panel_boundary, np.float32)
+    if len(boundary) == 4:
+        cv2.fillConvexPoly(mask, np.rint(boundary).astype(np.int32), 255)
+    else:
+        cv2.fillPoly(mask, [np.rint(boundary).astype(np.int32)], 255)
     # Only remove the immediate transition; defects near the border remain eligible.
     kernel_size = 2 * params["edge_margin_px"] + 1
     valid = cv2.erode(mask, np.ones((kernel_size, kernel_size), np.uint8)) > 0
@@ -760,7 +827,11 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
             raise ValueError("側拍圖片無法讀取")
         if rotate_180:
             side = cv2.rotate(side, cv2.ROTATE_180)
-        quad = detect_panel_quad(side, source_name=side_path.name, view="side", rotate_180=rotate_180)
+        localization = {}
+        quad = detect_panel_quad(side, source_name=side_path.name, view="side", rotate_180=rotate_180,
+                                 localization=localization)
+        payload["localization"] = localization
+        panel_boundary = np.asarray(localization["boundary"], np.float32)
         payload.update(side_size=[side.shape[1], side.shape[0]], side_polygon=quad.tolist())
         front, front_quad, transform = None, None, None
         if front_path:
@@ -793,7 +864,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                            side_path, rotate_180, payload["mapping"]["reason"])
         bombs, force_mask = _bomb_geometry(context, front_quad, transform, side.shape, params)
         candidates, residual, exclusions, threshold, _ = _candidates(
-            side, quad, params, limit=None, force_mask=force_mask)
+            side, quad, params, limit=None, force_mask=force_mask, panel_boundary=panel_boundary)
         _match_bombs(candidates, bombs)
         zone_mask, zones = _zone_mask(context, side.shape, transform, params)
         from capi_side_report import mapped_inference_marks
@@ -829,7 +900,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
             support = item["_mask"]
             composite = _candidate_evidence(item, side, front, omit_image, dust_detector, omit_info,
                                             transform, zone_mask, residual, params, mark_mask=mark_mask,
-                                            detection_threshold=threshold, panel_quad=quad)
+                                            detection_threshold=threshold, panel_quad=panel_boundary)
             item["excluded_zone_names"] = []
             if item["excluded_area_px"]:
                 bx, by, bw, bh = item["side_bbox"]
@@ -886,7 +957,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                            "omit": omit_view}.items():
             if view is not None:
                 # Show the panel at a useful size; coordinates remain those of the full image.
-                preview_quad = front_quad if name.startswith("front") else quad
+                preview_quad = front_quad if name.startswith("front") else panel_boundary
                 bx, by, bw, bh = cv2.boundingRect(preview_quad)
                 left, top = max(0, bx - 20), max(0, by - 20)
                 crop = view[top:min(view.shape[0], by + bh + 20), left:min(view.shape[1], bx + bw + 20)]
