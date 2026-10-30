@@ -204,6 +204,15 @@ class BombDefect:
             coordinates=coord_tuples,
         )
 
+    @classmethod
+    def from_client_info(cls, data: Dict[str, Any], defect_code: str = "UNKNOWN") -> List["BombDefect"]:
+        """Expand consecutive endpoint pairs into independent client line bombs."""
+        bomb = cls.from_dict(dict(data, defect_code=defect_code))
+        if bomb.defect_type != "line":
+            return [bomb]
+        return [cls(bomb.image_prefix, defect_code, "line", bomb.coordinates[i:i + 2])
+                for i in range(0, len(bomb.coordinates) - 1, 2)]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "image_prefix": self.image_prefix,

@@ -56,7 +56,7 @@ from typing import Callable, Dict, Optional, Tuple, List, Any
 # 確保模組路徑
 sys.path.insert(0, str(Path(__file__).parent))
 
-from capi_config import CAPIConfig
+from capi_config import BombDefect, CAPIConfig
 from capi_image_orientation import (
     read_detection_image, panel_image_cache, use_capi_aoi_fast_path,
 )
@@ -339,10 +339,10 @@ def _parse_bomb_coordinates(image_prefix: str, coords_raw: str) -> Optional[Dict
 
     格式:
         點型: (x1/y1;x2/y2;x3/y3;...)   — 多組 x/y 用分號分隔
-        線型: (x1/y1/x2/y2)             — 一組含 4 個值
+        線型: (x1/y1/x2/y2;...)         — 每組含 4 個值，各組為獨立線段
 
     區分邏輯:
-        括號內只有一組且含 4 個值 → 線型 (line)
+        每組均含 4 個值 → 線型 (line)，coordinates 每兩點為一條獨立線段
         其他 → 點型 (point)
 
     Returns:
@@ -363,6 +363,17 @@ def _parse_bomb_coordinates(image_prefix: str, coords_raw: str) -> Optional[Dict
 
     # 用分號分隔各組座標
     groups = [g.strip() for g in coords_str.split(";") if g.strip()]
+
+    if len(groups) > 1 and all(len(group.split("/")) == 4 for group in groups):
+        try:
+            coordinates = []
+            for group in groups:
+                x1, y1, x2, y2 = map(int, group.split("/"))
+                coordinates.extend([(x1, y1), (x2, y2)])
+            return {"image_prefix": image_prefix, "defect_type": "line", "coordinates": coordinates}
+        except ValueError:
+            logger.warning("炸彈座標解析失敗 (line groups): %s", coords_raw)
+            return None
 
     if len(groups) == 1:
         # 只有一組 — 檢查是否為線型 (4 個值: x1/y1/x2/y2)
@@ -1069,20 +1080,13 @@ def _is_white_frame_ng(result: ImageResult) -> bool:
 
 
 def _has_white_frame_ng(results: List[ImageResult]) -> bool:
-    """Keep frame CV and AAPI white-screen follow-up NG out of OK-i conversion."""
-    return any(
-        _is_white_frame_ng(result) or any(
-            getattr(tile, "aoi_source_prefix", "") == "WHITEFRA"
-            and not getattr(tile, "is_bomb", False)
-            and _is_reportable_tile(tile)
-            for tile, _score, _map in getattr(result, "anomaly_tiles", [])
-        )
-        for result in (results or [])
-    )
+    """Keep formal frame CV NG out of OK-i conversion."""
+    return any(_is_white_frame_ng(result) for result in (results or []))
 
 
-def _iter_white_frame_gaps(result: ImageResult):
+def _iter_white_frame_gaps(result: ImageResult, *, bombs: bool = False):
     payload = _white_frame_payload(result)
+    gap_key = "bomb_gaps" if bombs else "gaps"
     sides = payload.get("sides", {})
     if not isinstance(sides, dict):
         return
@@ -1090,7 +1094,7 @@ def _iter_white_frame_gaps(result: ImageResult):
         side_result = sides.get(side, {})
         if not isinstance(side_result, dict):
             continue
-        for gap in side_result.get("gaps", []) or []:
+        for gap in side_result.get(gap_key, []) or []:
             if not isinstance(gap, dict):
                 continue
             try:
@@ -1100,8 +1104,8 @@ def _iter_white_frame_gaps(result: ImageResult):
                 continue
             yield side, gap, image_x, image_y
     for tile in payload.get("aoi_tiles", []):
-        if tile.get("status") == "NG":
-            for gap in tile.get("gaps", []):
+        if bombs or tile.get("status") == "NG":
+            for gap in tile.get(gap_key, []):
                 yield tile["side"], gap, int(gap["center_x"]), int(gap["center_y"])
 
 
@@ -1213,6 +1217,11 @@ def _iter_qjpg_defect_records(
         )
         raw_bounds = getattr(result, "raw_bounds", None) or getattr(result, "otsu_bounds", None)
         panel_polygon = getattr(result, "panel_polygon", None)
+
+        for _side, gap, _image_x, _image_y in _iter_white_frame_gaps(result, bombs=True):
+            records.append(_format_qjpg_product_defect_record(
+                _report_defect_code(config, "bomb"), gap["product_x"], gap["product_y"], "WHITEFRA",
+            ))
 
         if _is_white_frame_ng(result) and not bomb_only:
             for _side, _gap, image_x, image_y in _iter_white_frame_gaps(result):
@@ -1663,6 +1672,8 @@ def results_to_db_data(
             is_ng = 1
             is_dust_only = 0
             is_bomb = 0
+        elif _white_frame_payload(result).get("bomb_excluded_count") and not is_ng:
+            is_bomb = 1
 
         max_score = max((s for _, s, _ in result.anomaly_tiles), default=0.0)
 
@@ -1814,33 +1825,28 @@ def results_to_db_data(
     return db_images
 
 
-def _white_frame_aoi_kwargs(station_adapter, aoi_report, config, model_id):
+def _white_frame_aoi_kwargs(station_adapter, aoi_report, config, model_id, *,
+                            bomb_info=None, product_resolution=None):
     points = (aoi_report or {}).get("WHITEFRA", [])
-    if station_adapter.profile != "aapi" or not points:
-        return {}
-    return {
-        "aoi_points": [
+    kwargs = {}
+    if station_adapter.profile == "aapi" and points:
+        kwargs["aoi_points"] = [
             {"defect_code": d.defect_code, "product_x": d.product_x, "product_y": d.product_y}
             for d in points
-        ],
-        "product_resolution": resolve_product_resolution(
+        ]
+        kwargs["tile_size"] = getattr(config, "tile_size", 512)
+    bombs = (BombDefect.from_client_info(bomb_info) if bomb_info is not None else
+             getattr(config, "bomb_defects", []))
+    frame_bombs = [bomb for bomb in bombs
+                   if station_adapter.image_prefix(bomb.image_prefix).upper() == "WHITEFRA"]
+    if frame_bombs:
+        kwargs["bomb_defects"] = frame_bombs
+        kwargs["bomb_match_tolerance"] = getattr(config, "bomb_match_tolerance", 20)
+    if kwargs:
+        kwargs["product_resolution"] = product_resolution or resolve_product_resolution(
             model_id, getattr(config, "model_resolution_map", None),
-        ),
-        "tile_size": getattr(config, "tile_size", 512),
-    }
-
-
-def _link_white_frame_white_screen(inspection, results, station_adapter):
-    white_screen = next((r for r in results
-        if station_adapter.image_prefix(r.image_path.name) == "W0F00000"), None)
-    tile_ids = [t.tile_id for t, _score, _map in white_screen.anomaly_tiles
-        if t.aoi_source_prefix == "WHITEFRA"] if white_screen else []
-    inspection.payload["white_screen"] = {
-        "image_name": white_screen.image_path.name if white_screen else "",
-        "tile_ids": tile_ids,
-        "status": "INSPECTED" if tile_ids else "UNAVAILABLE",
-        "reason": "" if tile_ids else "未取得 W0F00000 補檢結果，請確認影像及 AOI 推論設定",
-    }
+        )
+    return kwargs
 
 
 def _white_frame_image_result(inspection: WhiteFrameInspection) -> ImageResult:
@@ -1874,6 +1880,10 @@ def _normalize_machine_judgment_for_bomb_only_panel(
     has_bomb = False
     has_excluded_zone = False
     for result in results:
+        if _is_white_frame_ng(result):
+            return machine_judgment
+        if _white_frame_payload(result).get("bomb_excluded_count"):
+            has_bomb = True
         for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
             if getattr(tile, "is_aoi_coord_below_threshold", False):
                 continue
@@ -3782,6 +3792,7 @@ class CAPIServer:
                     if white_frame_path is not None:
                         white_frame_kwargs = _white_frame_aoi_kwargs(
                             station_adapter, aoi_report, inferencer.config, model_id,
+                            bomb_info=parsed.get("bomb_info"), product_resolution=product_resolution,
                         )
                         white_frame_inspection = inspect_white_frame_image(
                             white_frame_path,
@@ -3792,8 +3803,6 @@ class CAPIServer:
                             ),
                             **white_frame_kwargs,
                         )
-                        if white_frame_kwargs:
-                            _link_white_frame_white_screen(white_frame_inspection, results, station_adapter)
                         white_result = _white_frame_image_result(white_frame_inspection)
                         results.append(white_result)
                         payload = white_frame_inspection.payload

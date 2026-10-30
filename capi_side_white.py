@@ -552,7 +552,8 @@ def _bomb_geometry(context, front_quad, transform, shape, params):
             continue
         coords = definition.get("coordinates", [])
         kind = definition.get("defect_type", "")
-        groups = [[p] for p in coords] if kind == "point" else [coords[:2]]
+        groups = ([[p] for p in coords] if kind == "point" else
+                  [coords[i:i + 2] for i in range(0, len(coords) - 1, 2)])
         for points in groups:
             bomb = {"id": len(bombs) + 1, "type": kind, "product_coordinates": points,
                     "image_prefix": definition.get("image_prefix", ""),

@@ -5181,7 +5181,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 tile["aoi_point_number"] = None
                 if not tile.get("is_aoi_coord"):
                     continue
-                point_prefix = "WHITEFRA" if tile.get("is_white_frame_followup") else prefix
+                point_prefix = prefix
                 coords = coords_by_prefix.get(point_prefix) or []
                 matches = []
                 for number, coord in enumerate(coords, 1):
@@ -14230,7 +14230,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
             _stored_machine_judgment_for_record, _white_frame_image_result,
             _has_white_frame_ng, _serialize_aoi_machine_coords, parse_request,
-            _white_frame_aoi_kwargs, _link_white_frame_white_screen,
+            _white_frame_aoi_kwargs,
             build_qjpg_response, AOI_PASSTHROUGH_CODES, apply_side_white_inference,
         )
         from capi_station_adapter import create_station_adapter
@@ -14267,6 +14267,24 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            aoi_report_override = None
+            client_request_text = str(detail.get("client_request_text") or "").strip()
+            if client_request_text:
+                # AAPI AOI 字串保存在原始 Testing request，rerun 時需還原成 override。
+                stored_request = parse_request(client_request_text)
+                # Older records lost multi-line bombs during protocol parsing.
+                # Recover them from the preserved request when no JSON was saved.
+                if bomb_info is None:
+                    bomb_info = stored_request.get("bomb_info")
+                report_payload = stored_request.get("aoi_report_payload", "")
+                if report_payload:
+                    aoi_report_override = inferencer._parse_aoi_report_txt(
+                        panel_dir,
+                        glass_id=detail.get("glass_id", ""),
+                        machine_judgment=stored_request.get("machine_judgment", detail.get("machine_judgment", "")),
+                        report_payload=report_payload,
+                    )
+
             side_white_context = None
             if getattr(inferencer.config, "side_white_detection_enabled", False):
                 from capi_side_white import snapshot_context
@@ -14275,20 +14293,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     getattr(getattr(inferencer, "edge_inspector", None), "config", None),
                     {"model_id": model_id, "bomb_info": bomb_info},
                 )
-
-            aoi_report_override = None
-            client_request_text = str(detail.get("client_request_text") or "").strip()
-            if client_request_text:
-                # AAPI AOI 字串保存在原始 Testing request，rerun 時需還原成 override。
-                stored_request = parse_request(client_request_text)
-                report_payload = stored_request.get("aoi_report_payload", "")
-                if report_payload:
-                    aoi_report_override = inferencer._parse_aoi_report_txt(
-                        panel_dir,
-                        glass_id=detail.get("glass_id", ""),
-                        machine_judgment=detail.get("machine_judgment", ""),
-                        report_payload=report_payload,
-                    )
 
             _update_status("正在等待 GPU...")
             start_time = _time.time()
@@ -14306,6 +14310,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if white_frame_path is not None:
                     white_frame_kwargs = _white_frame_aoi_kwargs(
                         station_adapter, aoi_report_override, inferencer.config, model_id,
+                        bomb_info=bomb_info, product_resolution=resolution,
                     )
                     white_frame_inspection = inspect_white_frame_image(
                         white_frame_path,
@@ -14378,8 +14383,6 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             aoi_report = panel_result[6] if len(panel_result) > 6 else {}
 
             if white_frame_inspection is not None:
-                if white_frame_kwargs:
-                    _link_white_frame_white_screen(white_frame_inspection, results, station_adapter)
                 results.append(_white_frame_image_result(white_frame_inspection))
 
             if is_duplicate:

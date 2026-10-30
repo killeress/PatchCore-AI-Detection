@@ -669,7 +669,7 @@
             {% from "_edge_ng_evidence.html" import badge as edge_ng_badge, reason_link, tile_evidence %}
             {% for img in detail.images %}
             {% set wf = img.get("white_frame_result") %}
-            {% set display_tiles = img.tiles | rejectattr("is_white_frame_followup") | list %}
+            {% set display_tiles = img.tiles %}
             {% set aoi_sample_classification_enabled = false %}
             {% set img_status, img_badge = img | img_status_info %}
             <div class="white-panel {% if not wf %}{% if img_status == 'NG' %}panel-status-ng{% elif img_status == 'OK' %}panel-status-ok{% else %}panel-status-err{% endif %}{% endif %}"

@@ -59,13 +59,21 @@ def test_duplicate_coordinates_match_codes_then_creation_order():
     assert [t["aoi_point_number"] for t in tiles] == [3, 2, 1]
 
 
-def test_image_coordinates_and_white_frame_followup():
+def test_image_coordinates_use_their_own_screen():
     coords = [dict(coordinate_space="image", product_x=-1, source_x=100, source_y=200)]
     tile = _tile(20, -1, -1)
-    tile.update(aoi_image_x=100, aoi_image_y=200, is_white_frame_followup=True)
-    detail = _detail(coords, [tile], prefix="WHITEFRA")
+    tile.update(aoi_image_x=100, aoi_image_y=200)
+    detail = _detail(coords, [tile])
     CAPIWebHandler._decorate_record_aoi_point_numbers(detail, create_station_adapter("aapi"))
     assert tile["aoi_point_number"] == 1
+
+
+def test_old_followup_marker_does_not_borrow_white_frame_point_number():
+    tile = _tile(0, 10, 20)
+    tile["is_white_frame_followup"] = True
+    detail = _detail([dict(product_x=10, product_y=20)], [tile], prefix="WHITEFRA")
+    CAPIWebHandler._decorate_record_aoi_point_numbers(detail, create_station_adapter("aapi"))
+    assert tile["aoi_point_number"] is None
 
 
 @pytest.mark.parametrize("raw", [None, "", "invalid", "[]", "{}"])

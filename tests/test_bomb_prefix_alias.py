@@ -101,3 +101,95 @@ def test_stations_keep_u0f_separate_from_standard(profile):
         bomb_list=[BombDefect("U0F00000", "B01", "point", BOMB_POINTS)],
     )
     assert not matched
+
+
+@pytest.mark.parametrize("client_prefix", ["STANDARD", "Windows_BG", "WINDOWS_BG"])
+@pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
+def test_aapi_standard_line_bomb_matches_raw_testing_request(client_prefix, orientation, capsys):
+    from capi_server import parse_request
+
+    # Actual horizontal/vertical incidents: bomb endpoints use product units,
+    # while AOI report X values use three-channel units and must be divided by 3.
+    if orientation == "horizontal":
+        glass_id, machine, timestamp = "YQ713C226G17", "AAPI2612", "144114"
+        bomb_coords = [(1, 540), (1920, 540)]
+        report_payload = (
+            "W0F00000,CM00(03142,00963)STANDARD,CLH2(00592,00534)"
+            "STANDARD,CLH2(01022,00546)STANDARD,CLH2(01275,00546)"
+            "STANDARD,CDB6(01596,00540)STANDARD,CLH2(01998,00547)"
+            "STANDARD,CDB6(02275,00540)STANDARD,CLH2(02820,00535)"
+            "STANDARD,CLH2(03198,00548)STANDARD,CLH2(03501,00534)"
+            "STANDARD,CLH2(03747,00546)STANDARD,CLH2(04293,00547)"
+            "STANDARD,CLH2(04571,00547)STANDARD,CLH2(04893,00541)"
+            "STANDARD,CM00(05431,00542)"
+        )
+        expected_points = [
+            (197, 534), (340, 546), (425, 546), (532, 540), (666, 547),
+            (758, 540), (940, 535), (1066, 548), (1167, 534), (1249, 546),
+            (1431, 547), (1523, 547), (1631, 541), (1810, 542),
+        ]
+        outside_point = (960, 561)
+    else:
+        glass_id, machine, timestamp = "YQ71QN205F46", "AAPI2622", "154655"
+        bomb_coords = [(960, 1), (960, 1200)]
+        report_payload = (
+            "W0F00000,CO05(00345,00289)W0F00000,CO05(00345,00289)"
+            "STANDARD,CLV2(02873,00298)STANDARD,CLV2(02886,00297)"
+            "STANDARD,CLV2(02872,00697)STANDARD,CLV2(02884,00697)"
+            "STANDARD,CLV2(02870,00998)STANDARD,CLV2(02882,00996)"
+            "White_Frame,CDB6(00601,01186)B8F00000,CLH2(00533,01186)"
+        )
+        expected_points = [
+            (957, 298), (962, 297), (957, 697), (961, 697), (956, 998), (960, 996),
+        ]
+        outside_point = (981, 600)
+    wire_coords = "/".join(str(value) for point in bomb_coords for value in point)
+    request = parse_request(
+        f"AOI@{glass_id};GN160JCEL250S;{machine};1920,1200;NG;"
+        f"{client_prefix};({wire_coords});/image/{glass_id};{report_payload}"
+    )
+    inferencer = make_inferencer("aapi")
+    inferencer.config.bomb_defects = [
+        BombDefect("STANDARD", "B01", "line", bomb_coords),
+    ]
+    report = inferencer.station_adapter.parse_aoi_report(
+        Path(request["image_dir"]), glass_id=request["glass_id"],
+        machine_judgment=request["machine_judgment"],
+        report_payload=request["aoi_report_payload"],
+    )
+    points = [(defect.x, defect.y) for defect in report["WINDOWS_BG"]]
+    assert points == expected_points
+    assert request["bomb_info"]["coordinates"] == bomb_coords
+
+    # Synthetic maps and identity bounds isolate matching from GPU inference.
+    # Include one neighboring real defect just outside the 20 px tolerance.
+    tiles = []
+    for index, (x, y) in enumerate(points + [outside_point]):
+        tiles.append(TileInfo(
+            index, x - 256, y - 256, 512, 512,
+            np.zeros((512, 512), dtype=np.uint8), zone="inner",
+            is_aoi_coord_tile=True, aoi_product_x=x, aoi_product_y=y,
+            aoi_image_x=x, aoi_image_y=y,
+            anomaly_peak_source="aoi_real_region", anomaly_peak_x=x,
+            anomaly_peak_y=y, aoi_roi_mask=np.ones((512, 512), dtype=np.uint8),
+        ))
+    anomaly_map = np.zeros((512, 512), dtype=np.float32)
+    anomaly_map[253:259, 20:492] = 0.8
+    if orientation == "vertical":
+        anomaly_map = anomaly_map.T.copy()
+    result = ImageResult(
+        image_path=Path(f"{glass_id}STANDARD{timestamp}.tif"),
+        image_size=(1920, 1200), otsu_bounds=(0, 0, 1920, 1200),
+        raw_bounds=(0, 0, 1920, 1200), exclusion_regions=[], tiles=tiles,
+        excluded_tile_count=0, processed_tile_count=len(tiles), processing_time=0.0,
+        anomaly_tiles=[(tile, 0.8, anomaly_map) for tile in tiles],
+    )
+
+    inferencer._apply_bomb_postprocess(
+        [result], request["bomb_info"], request["resolution"],
+    )
+
+    assert [tile.is_bomb for tile in tiles] == [True] * len(points) + [False]
+    assert all(tile.bomb_defect_code == "B01" for tile in tiles[:-1])
+    assert f"B01×{len(points)}" in capsys.readouterr().out
+    assert request["bomb_info"]["image_prefix"] == client_prefix

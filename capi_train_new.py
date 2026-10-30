@@ -847,8 +847,8 @@ def sample_ng_tiles(
                 continue
         defect_type = str(bomb_info.get("defect_type") or "point").strip().lower()
         if defect_type == "line" and len(valid_coords) >= 2:
-            pt1, pt2 = valid_coords[0], valid_coords[1]
-            crop_centers = [((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)]
+            crop_centers = [((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
+                            for pt1, pt2 in zip(valid_coords[::2], valid_coords[1::2])]
         else:
             crop_centers = valid_coords
             defect_type = "point"

@@ -2466,20 +2466,6 @@ class CAPIDatabase:
 
                 result["images"].append(img_dict)
 
-            # Resolve saved follow-up tile references to the real database rows,
-            # retaining heatmaps and sample classification IDs under WHITEFRA.
-            for frame in result["images"]:
-                wf = frame.get("white_frame_result") or {}
-                reference = wf.get("white_screen") or {}
-                source = next((image for image in result["images"]
-                    if image["image_name"] == reference.get("image_name")), None)
-                if source is not None:
-                    tiles = [tile for tile in source["tiles"]
-                        if tile["tile_id"] in reference.get("tile_ids", [])]
-                    for tile in tiles:
-                        tile["is_white_frame_followup"] = True
-                    wf["white_screen_result"] = dict(source, tiles=tiles)
-
             decorate_edge_ng_evidence(result)
             return result
         finally:

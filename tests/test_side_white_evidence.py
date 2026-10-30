@@ -178,6 +178,16 @@ def test_line_bomb_rejects_dot_and_wrong_direction():
     assert bombs[0]["candidate_ids"] == [3]
 
 
+def test_multiline_bombs_keep_separate_force_regions():
+    quad = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], np.float32)
+    context = bomb_context([[10, 20], [90, 20], [10, 80], [90, 80]], kind="line")
+    options = normalize_side_white_params({"bomb_tolerance_product_px": 2, "bomb_force_detection_enabled": True})
+    bombs, force = _bomb_geometry(context, quad, np.eye(3), (100, 100), options)
+    assert [bomb["product_coordinates"] for bomb in bombs] == [[[10, 20], [90, 20]], [[10, 80], [90, 80]]]
+    assert force[20, 50] and force[80, 50]
+    assert not force[50, 50]
+
+
 def pair(tmp_path, defect=True):
     front=np.zeros((800,1200),np.uint8)
     cv2.rectangle(front,(80,70),(1120,730),90,-1)

@@ -626,7 +626,7 @@
         {% endif %}
         {% endfor %}
         {# ====== AOI 機檢座標區域 (獨立區塊) ====== #}
-        {% set aoi_tiles = img.tiles | selectattr("is_aoi_coord") | rejectattr("is_white_frame_followup") | list %}
+        {% set aoi_tiles = img.tiles | selectattr("is_aoi_coord") | list %}
         {% include "_aoi_coord_result.html" %}
 
         {% if img.edge_defects %}

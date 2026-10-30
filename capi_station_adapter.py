@@ -163,11 +163,12 @@ class AAPIStationAdapter(StationAdapter):
     def image_prefix(self, image_name: str) -> str:
         stem = Path(str(image_name)).stem
         upper = stem.upper()
-        # Client bomb coordinates and CLI lookups can pass a bare screen code.
-        if upper == "B8F00000":
-            return "B0F00000"
         for source, internal in self._SOURCE_PREFIXES:
             marker = source.upper()
+            # Client bombs and CLI lookups use bare screen codes. Normalize
+            # their aliases exactly like image filenames and AOI reports.
+            if upper == marker:
+                return internal
             index = upper.rfind(marker)
             if index <= 0:
                 continue

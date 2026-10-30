@@ -30,7 +30,7 @@ _warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 import cv2
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Any
 import re
 import time
@@ -253,7 +253,7 @@ class TileInfo:
     anomaly_peak_x: int = -1    # 熱力圖峰值 x (圖片座標, -1=未計算)
     anomaly_peak_y: int = -1    # 熱力圖峰值 y (圖片座標, -1=未計算)
     is_aoi_coord_tile: bool = False  # 是否來自 AOI 機檢座標
-    aoi_source_prefix: str = ""  # 保留跨畫面補檢的 AOI 來源
+    aoi_source_prefix: str = ""  # 原始 AOI 畫面來源
     aoi_defect_code: str = ""        # AOI 異常代碼 (PCDK2, C1111, PTMD6)
     aoi_product_x: int = -1         # AOI 產品座標 X (-1=非 AOI 座標 tile)
     aoi_product_y: int = -1         # AOI 產品座標 Y (-1=非 AOI 座標 tile)
@@ -6817,18 +6817,13 @@ class CAPIInferencer:
             for prefix, defects in (aoi_report or {}).items()
             if self.station_adapter.is_inference_prefix(prefix)
         }
-        if self.station_adapter.profile == "aapi" and (aoi_report or {}).get("WHITEFRA"):
-            # Copy before coordinate resolution: WHITEFRA and W0F00000 have
-            # different image bounds, while the source product point is shared.
-            filtered.setdefault("W0F00000", []).extend(
-                replace(defect) for defect in aoi_report["WHITEFRA"]
-            )
         return {
             prefix: retained
             for prefix, defects in filtered.items()
             if (retained := [
                 defect for defect in defects
                 if defect.defect_code not in AOI_PASSTHROUGH_CODES
+                and defect.image_prefix != "WHITEFRA"
             ])
         }
 
@@ -6869,7 +6864,7 @@ class CAPIInferencer:
 
         if aoi_report is None:
             aoi_report = self._parse_aoi_report_txt(panel_dir)
-        # WHITEFRA itself stays on CV; AAPI also checks its points on W0F00000.
+        # WHITEFRA points belong only to the dedicated frame CV inspection.
         aoi_report = self._filter_aoi_report_for_inference(aoi_report)
         if not aoi_report:
             if is_new_arch:
@@ -6932,21 +6927,6 @@ class CAPIInferencer:
                 continue
 
             defects = aoi_report[img_prefix]
-            if self.station_adapter.profile == "aapi" and img_prefix == "W0F00000":
-                followups = [d for d in defects if d.image_prefix == "WHITEFRA"]
-                if followups:
-                    # Legacy models also need inward tiles for this white-screen
-                    # follow-up, rather than the ordinary v1 CV edge fallback.
-                    aoi_tile_count += self._create_aoi_centered_tiles_v2(
-                        image=aoi_image, result=result, defects=followups,
-                        product_resolution=product_resolution,
-                        pre_cfg=PreprocessConfig(
-                            tile_size=self.config.tile_size,
-                            enable_panel_polygon=self.config.enable_panel_polygon,
-                            product_resolution=product_resolution or self._product_resolution(),
-                        ),
-                    )
-                defects = [d for d in defects if d.image_prefix != "WHITEFRA"]
             new_tiles, edge_defs = self._create_aoi_coord_tiles(
                 aoi_image, result, defects, product_resolution,
             )
@@ -8674,12 +8654,7 @@ class CAPIInferencer:
         if bomb_info is not None:
             # 從協議取得炸彈座標，defect_code 從 config 匹配
             defect_code = self._match_bomb_defect_code(bomb_info)
-            active_bombs = [BombDefect(
-                image_prefix=bomb_info["image_prefix"],
-                defect_code=defect_code,
-                defect_type=bomb_info["defect_type"],
-                coordinates=bomb_info["coordinates"],
-            )]
+            active_bombs = BombDefect.from_client_info(bomb_info, defect_code)
             print(f"💣 使用協議炸彈資料: prefix={bomb_info['image_prefix']} "
                   f"type={bomb_info['defect_type']} defect_code={defect_code} "
                   f"coords={bomb_info['coordinates']}")
@@ -8821,10 +8796,7 @@ class CAPIInferencer:
                     if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                         continue
                     # 計算此 bomb line 已確認的 tile 數
-                    confirmed = sum(
-                        1 for t, _, _ in result.anomaly_tiles
-                        if t.is_bomb and t.bomb_defect_code == bomb.defect_code
-                    )
+                    confirmed = self._count_line_bomb_confirmations(result, bomb, product_resolution)
                     if confirmed < 3:
                         continue
                     # 對未匹配的 tile 做位置-only 第二輪檢查
@@ -10087,6 +10059,22 @@ class CAPIInferencer:
         )
         return is_bomb, code
 
+    def _count_line_bomb_confirmations(self, result, bomb, product_resolution):
+        """Keep line-shape consensus local to one segment, even with shared codes."""
+        count = 0
+        for tile, _score, _map in result.anomaly_tiles:
+            if not tile.is_bomb or tile.bomb_defect_code != bomb.defect_code:
+                continue
+            matched, _ = self.check_bomb_match(
+                self._get_image_prefix(result.image_path.name),
+                tile.anomaly_peak_x, tile.anomaly_peak_y, result.raw_bounds,
+                product_resolution=product_resolution, bomb_list=[bomb], skip_shape_check=True,
+                product_coords=((tile.aoi_product_x, tile.aoi_product_y)
+                    if tile.is_aoi_coord_tile and min(tile.aoi_product_x, tile.aoi_product_y) >= 0 else None),
+            )
+            count += int(matched)
+        return count
+
     def _apply_bomb_postprocess(
         self,
         results: List[ImageResult],
@@ -10097,12 +10085,7 @@ class CAPIInferencer:
         active_bombs = []
         if bomb_info is not None:
             defect_code = self._match_bomb_defect_code(bomb_info)
-            active_bombs = [BombDefect(
-                image_prefix=bomb_info["image_prefix"],
-                defect_code=defect_code,
-                defect_type=bomb_info["defect_type"],
-                coordinates=bomb_info["coordinates"],
-            )]
+            active_bombs = BombDefect.from_client_info(bomb_info, defect_code)
         elif self.config.bomb_defects:
             active_bombs = self.config.bomb_defects
         if not active_bombs:
@@ -10306,10 +10289,7 @@ class CAPIInferencer:
                 img_prefix = self._get_image_prefix(result.image_path.name)
                 if not self._aoi_prefix_matches(img_prefix, bomb.image_prefix):
                     continue
-                confirmed = sum(
-                    1 for t, _, _ in result.anomaly_tiles
-                    if t.is_bomb and t.bomb_defect_code == bomb.defect_code
-                )
+                confirmed = self._count_line_bomb_confirmations(result, bomb, product_resolution)
                 if confirmed < 3:
                     continue
                 for tile, _score, anomaly_map in result.anomaly_tiles:
@@ -10715,8 +10695,8 @@ class CAPIInferencer:
         panel_results = preprocess_panel_folder(panel_path, pre_cfg, **preprocess_kwargs)
         if not panel_results and not aoi_only_mode:
             logger.warning(f"[v2] {panel_path}: preprocess_panel_folder 回傳空結果")
-            # 回傳與 v1 格式相容的空結果
-            return [], omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, {}
+            # 沒有 PatchCore 輸入時，專用畫面的 CV 檢測仍需要原始 AOI 報點。
+            return [], omit_vis, omit_overexposed, omit_overexposure_info, is_duplicate, omit_image, aoi_report or {}
         preprocess_end = time.time()
         preprocess_elapsed = preprocess_end - preprocess_start
         grid_tile_count = sum(len(result.tiles) for result in panel_results.values())
@@ -11572,12 +11552,7 @@ class CAPIInferencer:
         if result.client_bomb_info:
             bomb_info = result.client_bomb_info
             defect_code = self._match_bomb_defect_code(bomb_info)
-            active_bombs = [BombDefect(
-                image_prefix=bomb_info["image_prefix"],
-                defect_code=defect_code,
-                defect_type=bomb_info["defect_type"],
-                coordinates=bomb_info["coordinates"],
-            )]
+            active_bombs = BombDefect.from_client_info(bomb_info, defect_code)
         elif self.config.bomb_defects:
             active_bombs = self.config.bomb_defects
             

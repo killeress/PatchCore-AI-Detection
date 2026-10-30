@@ -14,6 +14,10 @@
         {% endif %}
     </div>
 
+    {% if wf.get('bomb_excluded_count') %}
+    <div style="margin-bottom:12px;color:#C026D3;font-size:0.8rem;">炸彈已排除：{{ wf.bomb_excluded_count }} 筆白框檢測結果；不列入正式 NG。</div>
+    {% endif %}
+
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;">
         {% for side in ['top', 'right', 'bottom', 'left'] %}
         {% set side_result = wf.get('sides', {}).get(side, {}) %}
@@ -28,7 +32,11 @@
                 斷線 {{ side_result.get('gap_count', 0) }} 處；最長 {{ side_result.get('largest_gap_px', 0) }} px
             </div>
             {% elif side_status == 'OK' %}
+            {% if side_result.get('bomb_gaps') %}
+            <div style="margin-top:5px;color:#C026D3;font-size:0.72rem;">炸彈排除 {{ side_result.bomb_gaps | length }} 處</div>
+            {% else %}
             <div style="margin-top:5px;color:#94A3B8;font-size:0.72rem;">有效區間連續</div>
+            {% endif %}
             {% endif %}
         </div>
         {% endfor %}
@@ -82,6 +90,7 @@
                 AOI ({{ tile.aoi_product_x }}, {{ tile.aoi_product_y }}) → 圖片 ({{ tile.aoi_image_x }}, {{ tile.aoi_image_y }})<br>
                 TILE ({{ tile.x }}, {{ tile.y }}) · {{ tile.width }}×{{ tile.height }} · 修正量 ({{ tile.aoi_tile_shift_dx }}, {{ tile.aoi_tile_shift_dy }})
                 {% if tile.status == 'NG' %}<br><span style="color:#EF4444;">局部白線缺口／變細 {{ tile.gaps | length }} 處，紅框標示異常位置</span>{% endif %}
+                {% if tile.get('bomb_gaps') %}<br><span style="color:#C026D3;">炸彈排除 {{ tile.bomb_gaps | length }} 處，紫框標示炸彈位置</span>{% endif %}
                 {% if tile.get('reason') %}<br>{{ tile.reason }}{% endif %}
             </div>
             <img src="/images/{{ detail.id }}/{{ image_name | urlencode }}?white_frame_tile={{ tile.tile_id }}"
@@ -100,19 +109,5 @@
         檢測耗時: {{ wf.get('processing_ms', 0) | round(1) }}ms
         {% if wf.get('reason') %} | 原因: {{ wf.reason }}{% endif %}
     </div>
-    {% if wf.get('white_screen') %}
-        {% if wf.get('white_screen_result') %}
-            {% with img=wf.white_screen_result, aoi_tiles=wf.white_screen_result.tiles,
-                    aoi_section_title='White_Frame 座標 · W0F00000 白畫面 PatchCore 補檢',
-                    aoi_section_note='(同一產品座標，套用白畫面邊緣修正)' %}
-                {% include "_aoi_coord_result.html" %}
-            {% endwith %}
-        {% endif %}
-        {% if wf.white_screen.status == 'UNAVAILABLE' %}
-        <div style="margin-top:16px;padding:12px;border-top:2px solid #10b981;color:#F59E0B;">
-            W0F00000 白畫面 PatchCore 補檢：{{ wf.white_screen.reason }}
-        </div>
-        {% endif %}
-    {% endif %}
 </div>
 {% endif %}

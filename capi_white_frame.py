@@ -9,6 +9,7 @@ formal panel judgment.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, Optional, Tuple
@@ -107,6 +108,8 @@ def inspect_white_frame_image(
     aoi_points: Optional[list] = None,
     product_resolution: Optional[Tuple[int, int]] = None,
     tile_size: int = 512,
+    bomb_defects: Optional[list] = None,
+    bomb_match_tolerance: float = 20,
 ) -> WhiteFrameInspection:
     started = perf_counter()
     path = Path(image_path)
@@ -167,7 +170,75 @@ def inspect_white_frame_image(
         if any(tile["status"] == "NG" for tile in payload["aoi_tiles"]):
             payload["status"] = "NG"
         payload["processing_ms"] = round((perf_counter() - started) * 1000.0, 1)
+    if bomb_defects and product_resolution:
+        _exclude_bomb_gaps(payload, quad, product_resolution, bomb_defects, bomb_match_tolerance)
+        payload["processing_ms"] = round((perf_counter() - started) * 1000.0, 1)
     return WhiteFrameInspection(path, (width, height), bounds, payload)
+
+
+def _exclude_bomb_gaps(payload, quad, product_resolution, bombs, tolerance):
+    """Exclude a gap only when its full extent fits one known bomb's tolerance."""
+    product_w, product_h = product_resolution
+    if min(product_w, product_h) <= 0:
+        return
+    transform = cv2.getPerspectiveTransform(
+        np.asarray(quad, np.float32),
+        np.array([[0, 0], [product_w, 0], [product_w, product_h], [0, product_h]], np.float32),
+    )
+
+    def contains(bomb, points):
+        coords = np.asarray(bomb.coordinates, dtype=np.float64)
+        if bomb.defect_type == "point":
+            return any(np.all(np.abs(points - coord) <= tolerance) for coord in coords)
+        if bomb.defect_type != "line" or len(coords) != 2:
+            return False
+        start, end = coords
+        vector = end - start
+        length_sq = float(vector @ vector)
+        fractions = np.clip((points - start) @ vector / length_sq, 0, 1) if length_sq else np.zeros(len(points))
+        distances = np.linalg.norm(points - (start + fractions[:, None] * vector), axis=1)
+        return bool(np.all(distances <= tolerance))
+
+    excluded_count = 0
+    payload["status_before_bomb"] = payload["status"]
+    for item in list(payload["sides"].values()) + payload.get("aoi_tiles", []):
+        kept, excluded = [], []
+        for gap in item.get("gaps", []):
+            # Newly inspected gaps always have endpoints; retain center-only
+            # compatibility for callers supplying older inspection evidence.
+            center = (gap["center_x"], gap["center_y"])
+            extent = [center, (gap.get("start_x", center[0]), gap.get("start_y", center[1])),
+                      (gap.get("end_x", center[0]), gap.get("end_y", center[1]))]
+            points = cv2.perspectiveTransform(np.array([extent], np.float32), transform)[0]
+            matched = next((bomb for bomb in bombs if contains(bomb, points)), None)
+            if matched is None:
+                kept.append(gap)
+            else:
+                excluded.append(dict(gap, is_bomb=True, bomb_code=matched.defect_code,
+                                     product_x=int(round(float(points[0, 0]))),
+                                     product_y=int(round(float(points[0, 1])))))
+        if excluded:
+            item["status_before_bomb"] = item["status"]
+            item["gaps"] = kept
+            item["bomb_gaps"] = excluded
+            item["is_bomb"] = not kept
+            item["status"] = "NG" if kept else "OK"
+            if "gap_count" in item:
+                item["gap_count"] = len(kept)
+                item["largest_gap_px"] = max((gap.get("length_px", 0) for gap in kept), default=0)
+            excluded_count += len(excluded)
+    payload["bomb_excluded_count"] = excluded_count
+    payload["bomb_match_tolerance"] = tolerance
+    payload["ng_sides"] = [side for side in SIDE_ORDER if payload["sides"][side]["status"] == "NG"]
+    full_status = "NG" if payload["ng_sides"] else "OK"
+    if "full_frame_status" in payload:
+        payload["full_frame_status"] = full_status
+    payload["status"] = ("NG" if full_status == "NG" or any(
+        tile["status"] == "NG" for tile in payload.get("aoi_tiles", [])) else "OK")
+    logging.getLogger("capi.white_frame").info(
+        "[WHITE_FRAME_BOMB] image=%s definitions=%s excluded_gaps=%s status=%s",
+        payload["image_name"], len(bombs), excluded_count, payload["status"],
+    )
 
 
 def _inspect_aoi_tiles(gray, quad, bounds, points, product_resolution, tile_size, config):
@@ -244,6 +315,8 @@ def _inspect_aoi_tiles(gray, quad, bounds, points, product_resolution, tile_size
             item["gaps"].append({
                 "center_x": int(round(float(center[0]))),
                 "center_y": int(round(float(center[1]))),
+                "start_x": float(centers[begin][0]), "start_y": float(centers[begin][1]),
+                "end_x": float(centers[end - 1][0]), "end_y": float(centers[end - 1][1]),
                 "length_px": end - begin,
                 "line_ratio": round(float(ratios[begin:end].min()), 3),
                 "source": "aoi_tile",
@@ -257,10 +330,11 @@ def render_white_frame_aoi_tile(image: np.ndarray, tile: dict) -> np.ndarray:
     x, y, width, height = (int(tile[key]) for key in ("x", "y", "width", "height"))
     crop = _to_gray_u8(image[y:y + height, x:x + width])
     canvas = cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
-    for gap in tile.get("gaps", []):
+    for gap in tile.get("gaps", []) + tile.get("bomb_gaps", []):
         cx, cy = int(gap["center_x"]) - x, int(gap["center_y"]) - y
         radius = max(10, min(40, int(gap["length_px"]) // 2 + 6))
-        cv2.rectangle(canvas, (cx - radius, cy - radius), (cx + radius, cy + radius), (0, 0, 255), 1)
+        color = (255, 0, 255) if gap.get("is_bomb") else (0, 0, 255)
+        cv2.rectangle(canvas, (cx - radius, cy - radius), (cx + radius, cy + radius), color, 1)
     return canvas
 
 
@@ -440,6 +514,8 @@ def _inspect_sides(
             if gap_length < config.min_break_gap_px:
                 continue
             center_x, center_y = _gap_center(side, (start + end - 1) / 2.0, output_w, output_h, inverse)
+            start_x, start_y = _gap_center(side, start, output_w, output_h, inverse)
+            end_x, end_y = _gap_center(side, end - 1, output_w, output_h, inverse)
             gaps.append({
                 "start_px": int(start),
                 "end_px": int(end),
@@ -448,6 +524,8 @@ def _inspect_sides(
                 "end_ratio": round((end - 1) / max(1, length - 1), 4),
                 "center_x": center_x,
                 "center_y": center_y,
+                "start_x": start_x, "start_y": start_y,
+                "end_x": end_x, "end_y": end_y,
             })
         valid = present[margin:length - margin] if length - margin > margin else present
         results[side] = {

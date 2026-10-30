@@ -1,3 +1,8 @@
+import json
+
+import pytest
+
+
 def test_module_imports():
     from capi_train_new import (
         TrainingConfig, generate_job_id,
@@ -758,7 +763,8 @@ def test_sample_ng_tiles_uses_formal_polygon_mapping_and_inward_roi(tmp_path, mo
     assert int(crop.mean()) > 190
 
 
-def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path):
+@pytest.mark.parametrize("multi_segment", [False, True])
+def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path, multi_segment):
     import cv2
     import numpy as np
     from pathlib import Path
@@ -767,6 +773,7 @@ def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path):
     source = tmp_path / "WGF50500_line.png"
     image = np.zeros((1024, 1024), dtype=np.uint8)
     image[510:515, 256:769] = 255
+    image[766:771, 256:769] = 255
     assert cv2.imwrite(str(source), image)
 
     class MockDB:
@@ -774,7 +781,8 @@ def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path):
         def list_training_bomb_candidates(self, machine_id, lightings):
             return [{
                 "inference_record_id": 8, "source_result_id": 9,
-                "client_bomb_info": '{"image_prefix":"WGF50500","defect_type":"line","coordinates":[[256,512],[768,512]]}',
+                "client_bomb_info": json.dumps({"image_prefix": "WGF50500", "defect_type": "line",
+                    "coordinates": [[256,512],[768,512]] + ([[256,768],[768,768]] if multi_segment else [])}),
                 "image_path": str(source), "image_dir": str(tmp_path), "image_name": source.name,
                 "image_width": 1024, "image_height": 1024,
                 "resolution_x": 1024, "resolution_y": 1024, "otsu_bounds": "0,0,1024,1024",
@@ -790,7 +798,7 @@ def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path):
         lightings=("WGF50500",),
     )
 
-    assert stats["sampled"] == 1
+    assert stats["sampled"] == (2 if multi_segment else 1)
     crop_path = Path(db.tiles[0]["source_path"])
     crop = cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE)
     assert crop is not None
