@@ -15,6 +15,7 @@ import numpy as np
 from pathlib import Path
 from capi_edge_cv import clamp_median_kernel, compute_fg_aware_diff
 from capi_tile_diagnostics import edge_ng_evidence
+from capi_dust_review import build_aoi_roi_core_mask
 from typing import List, Dict, Optional, Tuple, Any
 import time
 from functools import lru_cache
@@ -51,30 +52,6 @@ def draw_roi_threshold_label(panel: np.ndarray) -> None:
     alpha = mask[:, :, None].astype(np.float32) / 255.0
     patch = panel[5:23, 5:5 + width]
     patch[:] = (patch * (1 - alpha) + np.array((0, 200, 255)) * alpha).astype(np.uint8)
-
-
-def build_aoi_roi_core_mask(
-    anomaly_map: np.ndarray,
-    heatmap_binary: np.ndarray,
-    roi_mask: np.ndarray,
-    top_percent: float,
-) -> np.ndarray:
-    """依既有 percentile 取法選出 ROI 內的 Top% 核心，僅供顯示。"""
-    percent = float(top_percent)
-    if not 0 < percent <= 100:
-        raise ValueError("top_percent 必須大於 0 且不超過 100")
-    values = np.asarray(anomaly_map, dtype=np.float32)
-    h, w = values.shape
-    allowed = cv2.resize((roi_mask > 0).astype(np.uint8), (w, h),
-                          interpolation=cv2.INTER_NEAREST) > 0
-    candidates = cv2.resize((heatmap_binary > 0).astype(np.uint8), (w, h),
-                             interpolation=cv2.INTER_NEAREST) > 0
-    valid = allowed & np.isfinite(values) & (values > 0)
-    core = np.zeros(values.shape, dtype=np.uint8)
-    if np.any(valid):
-        cutoff = np.percentile(values[valid], 100 - percent)
-        core[valid & candidates & (values >= cutoff)] = 255
-    return core
 
 
 def _aoi_roi_outline_mask(roi_mask: np.ndarray, shape, thickness: int = 1) -> np.ndarray:
@@ -627,6 +604,7 @@ def build_region_zoom_panels(
     display_heatmap_binary: Optional[np.ndarray] = None,
     display_top_percent: Optional[float] = None,
     roi_mask: Optional[np.ndarray] = None,
+    shared_core_decision: bool = False,
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
 
@@ -746,7 +724,8 @@ def build_region_zoom_panels(
             # Dark backing keeps scores/reasons readable on bright source images.
             core_view = decision_labels is not None and display_top_percent is not None
             extra_y = 160 if method_label else 135
-            header_bottom = extra_y + 40 if core_view else 145 if method_label else 120
+            header_bottom = (extra_y + (15 if shared_core_decision else 40)
+                             if core_view else 145 if method_label else 120)
             cv2.rectangle(panel, (0, 0), (tile_size - 1, header_bottom),
                           (20, 20, 20), -1)
             cv2.rectangle(panel, (0, tile_size - 30), (tile_size - 1, tile_size - 1),
@@ -771,7 +750,7 @@ def build_region_zoom_panels(
                 metric_text = f"{metric_name}: {cov:.4f} (overlap:{dust_ol})"
             else:
                 metric_text = f"{metric_name}: {dust_ol}/{metric_denominator} = {cov:.4f}"
-            if core_view:
+            if core_view and not shared_core_decision:
                 metric_text = "Decision " + metric_text
             cv2.putText(panel, metric_text, (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
@@ -818,7 +797,10 @@ def build_region_zoom_panels(
                 cv2.putText(panel, f"[{method_label}]", (10, 135),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, ml_color, 1)
 
-            if core_view:
+            if core_view and shared_core_decision:
+                cv2.putText(panel, f"ROI Top {display_top_percent:g}% (decision / display)",
+                            (10, extra_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+            elif core_view:
                 region_core = (display_bin > 0) & (decision_labels == region["label_id"])
                 core_area = int(np.count_nonzero(region_core))
                 core_overlap = 0
@@ -1508,14 +1490,19 @@ class HeatmapManager:
         bomb_diagnostics = getattr(tile_info, 'bomb_region_diagnostics', None) if tile_info else None
         ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
         roi_core = None
-        roi_top_percent = float(roi.get('display_top_percent', dust_heatmap_top_percent))
+        shared_core_decision = roi.get('dust_scope') == 'roi_top_percent'
+        roi_top_percent = float(roi.get('dust_top_percent', roi.get('display_top_percent', dust_heatmap_top_percent)))
         if has_omit and roi.get('enabled') and roi_mask is not None and not bomb_diagnostics:
             decision_binary = getattr(tile_info, 'dust_heatmap_binary', None)
             display_map = getattr(tile_info, 'aoi_roi_full_map', None)
             if display_map is None:
                 display_map = anomaly_map
             if decision_binary is not None and display_map is not None:
-                roi_core = build_aoi_roi_core_mask(display_map, decision_binary, roi_mask, roi_top_percent)
+                if shared_core_decision:
+                    # Render the stored formal core verbatim; do not take Top% twice.
+                    roi_core = decision_binary.copy()
+                else:
+                    roi_core = build_aoi_roi_core_mask(display_map, decision_binary, roi_mask, roi_top_percent)
                 display_dust = dust_mask
                 if "TWO_STAGE" in dust_detail:
                     precise_dust = getattr(tile_info, 'dust_two_stage_dust_mask', None)
@@ -1580,6 +1567,7 @@ class HeatmapManager:
                 display_heatmap_binary=roi_core if roi_overlap_debug else None,
                 display_top_percent=roi_top_percent if roi_overlap_debug else None,
                 roi_mask=roi_mask if roi.get('enabled') else None,
+                shared_core_decision=shared_core_decision,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
@@ -1596,7 +1584,8 @@ class HeatmapManager:
                 debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
                 debug_label = f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"
-            labels = ["Original", "Preprocessed", "Heatmap", "OMIT Crop", f"Dust Mask (Overall{metric_name}:{dust_iou:.3f})", debug_label]
+            cov_scope = "ROI Core" if shared_core_decision else "Overall"
+            labels = ["Original", "Preprocessed", "Heatmap", "OMIT Crop", f"Dust Mask ({cov_scope}{metric_name}:{dust_iou:.3f})", debug_label]
             panels = [orig, preprocessed, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
             for zoom_img, zoom_label in zoom_results:
                 panels.append(zoom_img)

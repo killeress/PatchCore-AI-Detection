@@ -271,6 +271,8 @@ def test_roi_heatmap_banner_box_preserves_full_tile_display(tmp_path, monkeypatc
 @pytest.mark.parametrize('has_inner_ng', [False, True])
 def test_dust_inside_roi_cannot_hide_another_valid_inner_region(has_inner_ng, monkeypatch):
     inf, result, tile = case([(256, 256, 1), (280, 256, .7), (400, 400, 1)])
+    # Both regions must be selected for this mixed-core regression case.
+    inf.config.dust_heatmap_top_percent = 100
     inf.config.dust_two_stage_enabled = False
     inf._apply_aoi_judgment_roi([result], RESOLUTION)
     dust = np.full((512, 512), 255, dtype=np.uint8)

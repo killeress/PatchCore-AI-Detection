@@ -1,4 +1,4 @@
-"""Verify low-coverage AOI heat regions against physical image features.
+"""Select AOI Top% cores and verify low-coverage regions against image features.
 
 Unlike the legacy two-stage check, this review starts from an NG decision.
 An empty or incomplete observation must therefore never suppress a region.
@@ -6,6 +6,25 @@ An empty or incomplete observation must therefore never suppress a region.
 
 import cv2
 import numpy as np
+
+
+def build_aoi_roi_core_mask(anomaly_map, heatmap_binary, roi_mask, top_percent):
+    """Select the ROI Top% core shared by formal dust judgment and rendering."""
+    percent = float(top_percent)
+    if not 0 < percent <= 100:
+        raise ValueError("top_percent 必須大於 0 且不超過 100")
+    values = np.asarray(anomaly_map, dtype=np.float32)
+    h, w = values.shape
+    allowed = cv2.resize((roi_mask > 0).astype(np.uint8), (w, h),
+                         interpolation=cv2.INTER_NEAREST) > 0
+    candidates = cv2.resize((heatmap_binary > 0).astype(np.uint8), (w, h),
+                            interpolation=cv2.INTER_NEAREST) > 0
+    valid = allowed & np.isfinite(values) & (values > 0)
+    core = np.zeros(values.shape, dtype=np.uint8)
+    if np.any(valid):
+        cutoff = np.percentile(values[valid], 100 - percent)
+        core[valid & candidates & (values >= cutoff)] = 255
+    return core
 
 
 def review_low_coverage_regions(

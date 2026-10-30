@@ -4873,6 +4873,47 @@ class CAPIInferencer:
             soft_decay_px=max(0, int(getattr(self.config, "cv_edge_exclude_soft_decay_px", 64))),
         )
 
+    def _check_tile_dust_regions(self, tile, anomaly_map, dust_mask):
+        """Use one captured ROI Top% core for dust metrics and displayed evidence."""
+        roi_mask = getattr(tile, "aoi_roi_mask", None)
+        kwargs = {}
+        top_percent = self.config.dust_heatmap_top_percent
+        if roi_mask is not None:
+            from capi_dust_review import build_aoi_roi_core_mask
+            context = dict(tile.decision_context or {})
+            roi = dict(context.get("aoi_judgment_roi") or {})
+            top_percent = float(roi.get("display_top_percent", top_percent))
+            full_map = getattr(tile, "aoi_roi_full_map", None)
+            if full_map is None:
+                full_map = anomaly_map
+            kwargs["core_mask"] = build_aoi_roi_core_mask(
+                full_map, (np.asarray(anomaly_map) > 0).astype(np.uint8), roi_mask, top_percent,
+            )
+        else:
+            seed, radius, minimum = self._aoi_center_seed_for_tile(tile, anomaly_map)
+            kwargs.update(force_include_yx=seed, force_include_radius=radius,
+                          force_include_min_score=minimum)
+        outcome = self.check_dust_per_region(
+            dust_mask, anomaly_map, top_percent=top_percent,
+            metric=self.config.dust_heatmap_metric,
+            iou_threshold=self.config.dust_heatmap_iou_threshold, **kwargs,
+        )
+        if roi_mask is not None:
+            count = int(np.count_nonzero(outcome[4])) if outcome[4] is not None else 0
+            roi.update(dust_scope="roi_top_percent", dust_top_percent=top_percent,
+                       display_top_percent=top_percent, dust_core_pixel_count=count)
+            context["aoi_judgment_roi"] = roi
+            tile.decision_context = context
+            logger.info("[AOI_DUST_CORE] tile=%s top_percent=%s core_pixels=%s regions=%s",
+                        tile.tile_id, top_percent, count, len(outcome[3]))
+        return outcome
+
+    @staticmethod
+    def _aoi_dust_core_map(tile, anomaly_map, core_mask):
+        if getattr(tile, "aoi_roi_mask", None) is None or core_mask is None:
+            return anomaly_map
+        return np.where(core_mask > 0, anomaly_map, 0).astype(np.float32)
+
     def check_dust_per_region(
         self,
         dust_mask: np.ndarray,
@@ -4883,6 +4924,7 @@ class CAPIInferencer:
         force_include_yx: Optional[Tuple[int, int]] = None,
         force_include_radius: int = 0,
         force_include_min_score: Optional[float] = None,
+        core_mask: Optional[np.ndarray] = None,
     ) -> tuple:
         """
         逐區域灰塵判定 — 將 anomaly_map 的熱區拆成獨立連通區域，
@@ -4896,6 +4938,7 @@ class CAPIInferencer:
             - region_details: list of dict，每個區域的判定詳情
             - heatmap_binary: 二值化後的熱區遮罩 (向後相容)
             - force_include_yx: 額外納入的 seed 中心 (row, col)，用於 AOI center rescue
+            - core_mask: 已選定的 AOI TOP % 核心，直接計算面積與重疊，不再取百分位或補點
         """
         if dust_mask is None or anomaly_map is None:
             return True, None, 0.0, [], None, None
@@ -4921,7 +4964,16 @@ class CAPIInferencer:
         # === Step 1: 取前 top_percent% 像素作為熱區 ===
         use_mask_mode = getattr(self.config, 'dust_mask_before_binarize', False)
 
-        if use_mask_mode:
+        if core_mask is not None:
+            # Already selected from the full ROI using the captured Top% setting.
+            # Never rerank this core or expand it with the AOI center seed.
+            heat_bool = cv2.resize((core_mask > 0).astype(np.uint8),
+                                  (anomaly_map_f.shape[1], anomaly_map_f.shape[0]),
+                                  interpolation=cv2.INTER_NEAREST) > 0
+            heat_bool &= anomaly_map_f > 0
+            if not np.any(heat_bool):
+                return True, None, 0.0, [], np.zeros_like(anomaly_map_f, dtype=np.uint8), None
+        elif use_mask_mode:
             # 方法 4: 先將灰塵區域歸零，再對剩餘區域做 top% 二值化
             masked_anomaly = anomaly_map_f.copy()
             masked_anomaly[dust_bool] = 0
@@ -4940,7 +4992,7 @@ class CAPIInferencer:
             threshold = np.percentile(positive_values, 100 - top_percent)
             heat_bool = anomaly_map_f >= threshold
 
-        if force_include_yx is not None:
+        if force_include_yx is not None and core_mask is None:
             seed_y, seed_x = int(force_include_yx[0]), int(force_include_yx[1])
             if 0 <= seed_y < heat_bool.shape[0] and 0 <= seed_x < heat_bool.shape[1]:
                 seed_radius = max(0, int(force_include_radius))
@@ -4959,11 +5011,11 @@ class CAPIInferencer:
 
         heatmap_binary = (heat_bool.astype(np.uint8)) * 255
 
-        # === Step 3: 整體 IOU (向後相容，用於 DB 記錄) ===
+        # ROI 的整體 COV 與逐區域 COV 均以核心為分母；一般模式保留既有指標。
         intersection_all = np.count_nonzero(dust_bool & heat_bool)
         if metric == "coverage":
-            dust_area_all = np.count_nonzero(dust_bool)
-            overall_iou = float(intersection_all / dust_area_all) if dust_area_all > 0 else 0.0
+            coverage_area = np.count_nonzero(heat_bool if core_mask is not None else dust_bool)
+            overall_iou = float(intersection_all / coverage_area) if coverage_area > 0 else 0.0
         else:
             union_all = np.count_nonzero(dust_bool | heat_bool)
             overall_iou = float(intersection_all / union_all) if union_all > 0 else 0.0
@@ -5110,6 +5162,7 @@ class CAPIInferencer:
         score_threshold: Optional[float] = None,
         candidate_dust_mask: Optional[np.ndarray] = None,
         evaluation_mask: Optional[np.ndarray] = None,
+        heatmap_core_mask: Optional[np.ndarray] = None,
     ) -> tuple:
         """
         兩階段灰塵判定：
@@ -5117,6 +5170,7 @@ class CAPIInferencer:
                    另做一份灰塵抑制後的 heatmap 重新排名（原 score 不變）
           Stage 2: 回到原圖找 feature 點，依原 Top 核心、重排核心或
                    feature 局部等效分數確認，再精準比對無擴展 dust mask
+          AOI 傳入已選定的 heatmap_core_mask 時，沿用該核心及其候選範圍，避免重複取 TOP %。
 
         Returns:
             (has_real_defect, real_peak_yx, feature_details, detail_text)
@@ -5182,18 +5236,24 @@ class CAPIInferencer:
         if len(pos_vals) == 0:
             return True, None, [], "TWO_STAGE: no positive heatmap -> REAL_NG"
 
-        hot_thr = np.percentile(pos_vals, 95)
-        hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
-        core_top_percent = min(
-            100.0,
-            max(0.01, float(getattr(cfg, "dust_heatmap_top_percent", 5.0))),
-        )
-        core_thr = np.percentile(pos_vals, 100.0 - core_top_percent)
-        hot_core_mask = (anomaly_f >= core_thr).astype(np.uint8)
+        if heatmap_core_mask is not None:
+            hot_core_mask = cv2.resize((heatmap_core_mask > 0).astype(np.uint8),
+                                      (w_am, h_am), interpolation=cv2.INTER_NEAREST)
+            hot_core_mask[anomaly_f <= 0] = 0
+            hot_mask = hot_core_mask * 255
+        else:
+            hot_thr = np.percentile(pos_vals, 95)
+            hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
+            core_top_percent = min(
+                100.0,
+                max(0.01, float(getattr(cfg, "dust_heatmap_top_percent", 5.0))),
+            )
+            core_thr = np.percentile(pos_vals, 100.0 - core_top_percent)
+            hot_core_mask = (anomaly_f >= core_thr).astype(np.uint8)
 
         # 僅在候選排名的副本抑制已知灰塵/氣泡；保留原 anomaly map 與 score。
         reranked_core_mask = np.zeros_like(hot_core_mask)
-        if candidate_dust_mask is not None:
+        if candidate_dust_mask is not None and heatmap_core_mask is None:
             candidate_dm = np.asarray(candidate_dust_mask, dtype=np.uint8)
             if len(candidate_dm.shape) == 3:
                 candidate_dm = cv2.cvtColor(candidate_dm, cv2.COLOR_BGR2GRAY)
@@ -8273,24 +8333,16 @@ class CAPIInferencer:
                         heatmap_binary = None
                         top_pct = self.config.dust_heatmap_top_percent
                         if tile.aoi_roi_mask is not None:
-                            top_pct = 100.0
+                            top_pct = ((tile.decision_context or {}).get("aoi_judgment_roi") or {}).get(
+                                "display_top_percent", top_pct)
                         metric_mode = self.config.dust_heatmap_metric
                         metric_name = "COV" if metric_mode == "coverage" else "IOU"
 
                         if is_dust and anomaly_map is not None:
                             # 逐區域判定：拆開異常連通區域，各自與灰塵比對
-                            aoi_seed_yx, aoi_seed_radius, aoi_seed_min_score = \
-                                self._aoi_center_seed_for_tile(tile, anomaly_map)
                             has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
-                                self.check_dust_per_region(
-                                    dust_mask, anomaly_map,
-                                    top_percent=top_pct,
-                                    metric=metric_mode,
-                                    iou_threshold=self.config.dust_heatmap_iou_threshold,
-                                    force_include_yx=aoi_seed_yx,
-                                    force_include_radius=aoi_seed_radius,
-                                    force_include_min_score=aoi_seed_min_score,
-                                )
+                                self._check_tile_dust_regions(tile, anomaly_map, dust_mask)
+                            anomaly_map = self._aoi_dust_core_map(tile, anomaly_map, heatmap_binary)
                             if has_real_defect:
                                 region_details, review_note = self._review_aoi_low_coverage_dust(
                                     tile, anomaly_map, region_details, region_labels,
@@ -8361,7 +8413,9 @@ class CAPIInferencer:
                                             score,
                                             score_threshold=tile.score_threshold,
                                             candidate_dust_mask=dust_mask,
-                                            **({"evaluation_mask": tile.aoi_roi_mask} if getattr(tile, "aoi_roi_mask", None) is not None else {}),
+                                            **({"evaluation_mask": tile.aoi_roi_mask,
+                                                "heatmap_core_mask": heatmap_binary}
+                                               if tile.aoi_roi_mask is not None else {}),
                                         )
                                     _two_stage_ran = True
                                     _ts_features = ts_features
@@ -9385,25 +9439,17 @@ class CAPIInferencer:
                 if is_dust and anomaly_map is not None and dust_mask is not None:
                     top_pct = self.config.dust_heatmap_top_percent
                     if tile.aoi_roi_mask is not None:
-                        top_pct = 100.0
+                        top_pct = ((tile.decision_context or {}).get("aoi_judgment_roi") or {}).get(
+                            "display_top_percent", top_pct)
                     metric_mode = self.config.dust_heatmap_metric
                     anomaly_map_for_dust, exclude_zone_masked = \
                         self._mask_aoi_exclude_zones_for_dust(tile, anomaly_map, model_id)
                     if exclude_zone_masked:
                         detail_text += " EXCLUDE_ZONE_HEATMAP_ZEROED"
-                    aoi_seed_yx, aoi_seed_radius, aoi_seed_min_score = \
-                        self._aoi_center_seed_for_tile(tile, anomaly_map_for_dust)
                     has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
-                        self.check_dust_per_region(
-                            dust_mask,
-                            anomaly_map_for_dust,
-                            top_percent=top_pct,
-                            metric=metric_mode,
-                            iou_threshold=self.config.dust_heatmap_iou_threshold,
-                            force_include_yx=aoi_seed_yx,
-                            force_include_radius=aoi_seed_radius,
-                            force_include_min_score=aoi_seed_min_score,
-                        )
+                        self._check_tile_dust_regions(tile, anomaly_map_for_dust, dust_mask)
+                    anomaly_map_for_dust = self._aoi_dust_core_map(
+                        tile, anomaly_map_for_dust, heatmap_binary)
                     if has_real:
                         region_details, review_note = self._review_aoi_low_coverage_dust(
                             tile, anomaly_map_for_dust, region_details, region_labels,
@@ -9466,7 +9512,9 @@ class CAPIInferencer:
                                     score,
                                     score_threshold=tile.score_threshold,
                                     candidate_dust_mask=dust_mask,
-                                    **({"evaluation_mask": tile.aoi_roi_mask} if getattr(tile, "aoi_roi_mask", None) is not None else {}),
+                                    **({"evaluation_mask": tile.aoi_roi_mask,
+                                        "heatmap_core_mask": heatmap_binary}
+                                       if tile.aoi_roi_mask is not None else {}),
                                 )
                             _two_stage_ran = True
                             _ts_features = ts_features
@@ -9855,9 +9903,13 @@ class CAPIInferencer:
                 product_coords=(tile.aoi_product_x, tile.aoi_product_y),
             )
             if matched:
-                _real, _peak, _iou, details, binary, _labels = self.check_dust_per_region(
-                    np.zeros(amap.shape, dtype=np.uint8), amap, top_percent=100.0,
-                )
+                if tile.is_bright_spot_detection or tile.is_half_spot_detection:
+                    _real, _peak, _iou, details, binary, _labels = self.check_dust_per_region(
+                        np.zeros(amap.shape, dtype=np.uint8), amap, top_percent=100.0,
+                    )
+                else:
+                    _real, _peak, _iou, details, binary, _labels = self._check_tile_dust_regions(
+                        tile, amap, np.zeros(amap.shape, dtype=np.uint8))
                 tile.bomb_region_diagnostics = {
                     "regions": [dict(
                         detail, bomb_status="IGNORED_BY_AOI_BOMB",
@@ -9930,19 +9982,11 @@ class CAPIInferencer:
             details = tile.dust_region_details
             _count, labels = cv2.connectedComponents((binary > 0).astype(np.uint8), connectivity=8)
         else:
-            seed, radius, min_score = self._aoi_center_seed_for_tile(tile, amap)
             dust_mask = tile.dust_mask
             if dust_mask is None:
                 dust_mask = np.zeros(amap.shape, dtype=np.uint8)
-            _real, _peak, _iou, details, binary, labels = self.check_dust_per_region(
-                dust_mask, amap,
-                top_percent=100.0 if tile.aoi_roi_mask is not None else self.config.dust_heatmap_top_percent,
-                metric=self.config.dust_heatmap_metric,
-                iou_threshold=self.config.dust_heatmap_iou_threshold,
-                force_include_yx=seed,
-                force_include_radius=radius,
-                force_include_min_score=min_score,
-            )
+            _real, _peak, _iou, details, binary, labels = self._check_tile_dust_regions(
+                tile, amap, dust_mask)
         if labels is None or not details:
             return None
         dust_labels = [detail["label_id"] for detail in details if detail.get("is_dust")]
