@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 RETENTION_PARAM = "data_retention_policy"
 RETENTION_DESCRIPTION = "資料保留與每日清理設定（全機台共用）"
 RETENTION_DAY_LABELS = {
-    "ok_retain_days": "OK／OK-i 判定紀錄",
+    "ok_retain_days": "OK／OK-i／OK-s 判定紀錄",
     "ng_retain_days": "NG／錯誤等其他判定紀錄",
     "tile_retain_days": "Tile 切塊明細",
     "heatmap_retain_days": "熱圖與相關檢查圖片",

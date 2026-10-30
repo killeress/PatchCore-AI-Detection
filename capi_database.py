@@ -171,7 +171,7 @@ class CAPIDatabase:
 
     # 共用 SQL 條件片段（search_records 與 get_inference_stats 共用）
     _AOI_NG_COND = "machine_judgment != '' AND machine_judgment != 'OK'"
-    _AI_OK_COND = "ai_judgment = 'OK' OR ai_judgment = 'OK-i'"
+    _AI_OK_COND = "ai_judgment IN ('OK', 'OK-i', 'OK-s')"
     _AI_NG_COND = "ai_judgment LIKE 'NG%'"
     _ERR_COND = "ai_judgment LIKE 'ERR%'"
 
@@ -2090,12 +2090,16 @@ class CAPIDatabase:
                 # Save its diagnostics with the result, for both live and rerun paths.
                 summary = {key: payload[key] for key in (
                     "algorithm", "status", "side_image", "front_image", "rotation_applied",
-                    "reason", "diagnostics", "mapping", "processing_ms") if key in payload}
+                    "reason", "diagnostics", "mapping", "processing_ms", "inference_decision") if key in payload}
                 localization = payload.get("localization") or {}
                 if localization:
                     summary["localization"] = {key: localization[key] for key in ("method", "edges")
                                                if key in localization}
                 note = "[SIDE_WHITE_RESULT] " + json.dumps(summary, ensure_ascii=False)
+                decision = payload.get("inference_decision")
+                if decision:
+                    note += (f"\n[SIDE_WHITE_INFERENCE] 原始 AI={decision['original_judgment']}，"
+                             f"最終判定 {decision['final_judgment']}；{decision['reason']}")
                 conn.execute("""UPDATE inference_records
                                 SET inference_log = CASE WHEN COALESCE(inference_log, '') = '' THEN ?
                                     ELSE inference_log || char(10) || ? END WHERE id = ?""",
@@ -2141,13 +2145,16 @@ class CAPIDatabase:
 
     def get_side_statistics(self, *, start_date, end_date, group="with_csjbl", machine_no="",
                             model_id="", glass_id="", status="", review="", limit=10, offset=0,
-                            include_rows=True, conversion="", tolerance=50) -> Dict:
+                            include_rows=True, conversion="", tolerance=50, shift="current",
+                            now: Optional[datetime] = None) -> Dict:
         """Compare AOI CSJBL records, including observations not yet run.
 
         Summary counts cover only AOI CSJBL within the date/machine/model/glass
         scope. Status and review filter only the detail rows and their total.
         Conversion estimates stream saved evidence in bounded batches across the
         whole scope; pagination and detail filters never change the rate denominator.
+        Default to the dashboard's current shift, using created_at and all inputs
+        (including ERR). Explicit day/night dates refer to the shift's starting day.
         """
         from capi_side_report import (REVIEW_DECISIONS, CONVERSION_FILTERS, has_csjbl, compare_side_record,
                                       record_conversion, matches_conversion_filter, conversion_rate_projection)
@@ -2165,11 +2172,32 @@ class CAPIDatabase:
             raise ValueError("未知的側拍狀態")
         if any(value not in REVIEW_DECISIONS for value in reviews):
             raise ValueError("未知的驗證結果")
-        start, end = datetime.strptime(start_date, "%Y-%m-%d"), datetime.strptime(end_date, "%Y-%m-%d")
-        if start > end:
-            raise ValueError("開始日期不可晚於結束日期")
-        conditions = ["datetime(r.request_time) >= ?", "datetime(r.request_time) < ?"]
-        params = [start.strftime("%Y-%m-%d %H:%M:%S"), (end + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")]
+        if shift == "current":
+            shift_name, shift_start, shift_end = self._get_shift_window(now or datetime.now())
+            last_shift_start = shift_start
+        else:
+            start, end = datetime.strptime(start_date, "%Y-%m-%d"), datetime.strptime(end_date, "%Y-%m-%d")
+            if start > end:
+                raise ValueError("開始日期不可晚於結束日期")
+            shift_name, shift_start, _ = self._get_shift_window_for_date(start_date, shift)
+            _, last_shift_start, shift_end = self._get_shift_window_for_date(end_date, shift)
+        time_scope = {
+            "mode": shift, "shift": "day" if shift_name == "白班" else "night", "shift_name": shift_name,
+            "start_date": shift_start.strftime("%Y-%m-%d"),
+            "end_date": last_shift_start.strftime("%Y-%m-%d"),
+            "start": shift_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "end": shift_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "time_range": f"{shift_start:%Y-%m-%d %H:%M} ~ {shift_end:%Y-%m-%d %H:%M}",
+        }
+        conditions = ["datetime(r.created_at) >= datetime(?)", "datetime(r.created_at) < datetime(?)"]
+        params = [time_scope["start"], time_scope["end"]]
+        if shift_start.date() != last_shift_start.date():
+            # A date range selects this shift on each day, excluding intervening
+            # opposite shifts (night shifts belong to their starting date).
+            operator = "AND" if shift == "day" else "OR"
+            conditions.append(f"(time(r.created_at) >= ? {operator} time(r.created_at) < ?)")
+            params.extend([shift_start.strftime("%H:%M:%S"), shift_end.strftime("%H:%M:%S")])
+            time_scope["time_range"] += f"（僅{shift_name}）"
         for column, value in (("r.machine_no", machine_no), ("r.model_id", model_id)):
             if value:
                 conditions.append(column + " = ?")
@@ -2209,19 +2237,21 @@ class CAPIDatabase:
                 stats["accuracy"] = round(100 * (stats["confirmed"] + stats["correct_clear"]) / verified, 1) if verified else None
             scope_counts = dict(conn.execute(
                 "SELECT COUNT(*) AS total, "
-                "COALESCE(SUM(CASE WHEN r.ai_judgment IN ('OK', 'OK-i') THEN 1 ELSE 0 END),0) AS ok, "
-                "COALESCE(SUM(CASE WHEN r.ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END),0) AS ng "
+                "COALESCE(SUM(CASE WHEN r.ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END),0) AS ok, "
+                "COALESCE(SUM(CASE WHEN r.ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END),0) AS ng, "
+                "COALESCE(SUM(CASE WHEN r.ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END),0) AS err "
                 "FROM inference_records r" + scope_where, summary_params).fetchone())
             scope_counts["other"] = scope_counts["total"] - scope_counts["ok"] - scope_counts["ng"]
-            csjbl_counts = {key: 0 for key in ("total", "ok", "ng", "other")}
+            csjbl_counts = {key: 0 for key in ("total", "ok", "ng", "err", "other")}
             conversions = {"mark": {"points": 0, "records": 0}, "omit": {"points": 0, "records": 0},
                            "tape": {"points": 0, "records": 0},
+                           "clear": {"points": 0, "records": 0}, "converted_records": 0,
                            "both_records": 0, "mixed_records": 0, "any_records": 0, "eligible_records": 0,
                            "blocked_records": 0, "already_ok_records": 0,
-                           "eligible": {"mark": 0, "omit": 0, "tape": 0, "mixed": 0}}
+                           "eligible": {"mark": 0, "omit": 0, "tape": 0, "clear": 0, "mixed": 0}}
             cursor = conn.execute(
                 "SELECT s.*, r.id AS inference_record_id, r.glass_id, r.model_id, r.machine_no, r.request_time, "
-                "r.ai_judgment, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
+                "r.created_at AS inference_created_at, r.ai_judgment, r.aoi_machine_coords, r.ng_details, r.resolution_x, r.resolution_y"
                 + join + summary_where + " ORDER BY r.id DESC", summary_params)
             decoded, total = [], 0
             limit, offset = max(1, min(int(limit), 20)), max(0, int(offset))
@@ -2245,9 +2275,11 @@ class CAPIDatabase:
                     item.update(comparison=comparison, conversion=converted)
                     csjbl_counts["total"] += 1
                     judgment = str(item.get("ai_judgment") or "")
-                    csjbl_counts["ok" if judgment in {"OK", "OK-i"} else
+                    csjbl_counts["ok" if judgment in {"OK", "OK-i", "OK-s"} else
                                  "ng" if judgment.startswith("NG") else "other"] += 1
-                    for kind in ("mark", "omit", "tape"):
+                    csjbl_counts["err"] += judgment.startswith("ERR")
+                    conversions["converted_records"] += judgment == "OK-s"
+                    for kind in ("mark", "omit", "tape", "clear"):
                         count = converted[kind + "_points"]
                         conversions[kind]["points"] += count
                         conversions[kind]["records"] += bool(count)
@@ -2267,7 +2299,8 @@ class CAPIDatabase:
                         total += 1
             conversions["scope"] = conversion_rate_projection(scope_counts, conversions["eligible"])
             conversions["csjbl"] = conversion_rate_projection(csjbl_counts, conversions["eligible"])
-            return {"rows": decoded, "summary": summary, "conversion_summary": conversions, "total": total}
+            return {"rows": decoded, "summary": summary, "conversion_summary": conversions, "total": total,
+                    "time_scope": time_scope}
         finally:
             conn.close()
 
@@ -2464,7 +2497,7 @@ class CAPIDatabase:
             row = conn.execute(
                 """SELECT
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,
                      AVG(processing_seconds) as avg_time,
@@ -2480,7 +2513,7 @@ class CAPIDatabase:
             rows = conn.execute(
                 """SELECT machine_no,
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count
                    FROM inference_records
                    WHERE created_at >= datetime('now', 'localtime', ?)
@@ -2583,7 +2616,7 @@ class CAPIDatabase:
                      CASE WHEN time(created_at, '-450 minutes') < '12:00:00'
                           THEN 'day' ELSE 'night' END AS shift,
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count
@@ -2645,7 +2678,7 @@ class CAPIDatabase:
             row = conn.execute(
                 """SELECT
                      COUNT(*) as total,
-                     SUM(CASE WHEN ai_judgment = 'OK' OR ai_judgment = 'OK-i' THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END) as ok_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,
@@ -4242,8 +4275,8 @@ class CAPIDatabase:
                         JOIN inference_records ir ON im.record_id = ir.id
                         WHERE ir.created_at < ? OR (
                             (
-                                (ir.ai_judgment IN ('OK', 'OK-i') AND ir.created_at < ?)
-                                OR (ir.ai_judgment NOT IN ('OK', 'OK-i') AND ir.created_at < ?)
+                                (ir.ai_judgment IN ('OK', 'OK-i', 'OK-s') AND ir.created_at < ?)
+                                OR (ir.ai_judgment NOT IN ('OK', 'OK-i', 'OK-s') AND ir.created_at < ?)
                             )
                 """ + (
                     " AND ir.id NOT IN (SELECT id FROM cleanup_heatmap_retry_ids)"
@@ -4269,8 +4302,8 @@ class CAPIDatabase:
                 cur = conn.execute("""
                     DELETE FROM inference_records
                     WHERE (
-                        ((ai_judgment = 'OK' OR ai_judgment = 'OK-i') AND created_at < ?)
-                        OR (ai_judgment NOT IN ('OK', 'OK-i') AND created_at < ?)
+                        ((ai_judgment IN ('OK', 'OK-i', 'OK-s')) AND created_at < ?)
+                        OR (ai_judgment NOT IN ('OK', 'OK-i', 'OK-s') AND created_at < ?)
                     )
                 """ + (
                     " AND id NOT IN (SELECT id FROM cleanup_heatmap_retry_ids)"
@@ -4408,7 +4441,7 @@ class CAPIDatabase:
 
         for rec in comparisons:
             ric_j = rec["ric_judgment"]
-            ai_j = "OK" if rec["ai_judgment"] in ("OK", "OK-i") else "NG"
+            ai_j = "OK" if rec["ai_judgment"] in ("OK", "OK-i", "OK-s") else "NG"
             aoi_j = "OK" if rec["machine_judgment"] == "OK" else "NG"
 
             # AOI 準確率: AOI 判定與 RIC 一致
@@ -4566,7 +4599,7 @@ class CAPIDatabase:
                 f"""SELECT COUNT(*) as total,
                            SUM(CASE WHEN {_aoi_ng} THEN 1 ELSE 0 END) as aoi_ng,
                            SUM(CASE WHEN {_ai_ng} THEN 1 ELSE 0 END) as ai_ng,
-                           SUM(CASE WHEN ({_aoi_ng}) AND (ai_judgment = 'OK' OR ai_judgment = 'OK-i') THEN 1 ELSE 0 END) as ai_revival,
+                           SUM(CASE WHEN ({_aoi_ng}) AND (ai_judgment IN ('OK', 'OK-i', 'OK-s')) THEN 1 ELSE 0 END) as ai_revival,
                            SUM(CASE WHEN {_err} THEN 1 ELSE 0 END) as err_count,
                            SUM(CASE WHEN {_hy} THEN 1 ELSE 0 END) as hy_count,
                            SUM(CASE WHEN NOT ({_aoi_ng}) AND NOT ({_ai_ng}) AND NOT ({_err_all}) THEN 1 ELSE 0 END) as ok_ok,
@@ -4622,7 +4655,7 @@ class CAPIDatabase:
                 stats = ai_miss_by_day.setdefault(day, {"total": 0, "ai_miss": 0})
                 stats["total"] += 1
                 ai = (row["result_ai"] or "OK").strip()
-                if ai == "OK-i":
+                if ai in {"OK-i", "OK-s"}:
                     ai = "OK"
                 if (
                     ai == "OK"
@@ -7180,7 +7213,7 @@ class CAPIDatabase:
         # 定義要遷移的參數
         params_def = [
             ("anomaly_threshold", config.anomaly_threshold, "float", "異常分數閾值 (fallback)"),
-            ("side_white_detection_enabled", config.side_white_detection_enabled, "bool", "側拍白畫面檢測：僅記錄自動處理結果，不影響最終判定及 AOI／QJPG 回報"),
+            ("side_white_detection_enabled", config.side_white_detection_enabled, "bool", "側拍白畫面檢測：全部 CSJBL 及 NG 原因符合放行條件時轉 OK-s，AOI／QJPG 回覆 OK"),
             ("side_white_detection_params", config.side_white_detection_params, "dict", "側拍白畫面檢測參數：CV 候選、不檢測區域、OMIT 灰塵、炸彈比對與組合圖"),
             ("inference_rotate_180_enabled", config.inference_rotate_180_enabled, "bool", "推論來源影像統一旋轉 180°（正式推論、規格內判定與 Debug 共用；MARK PPOCR Crop 依定位方向處理：normal 不旋轉，rot180 才旋轉 180°；不修改原始檔）"),
             ("model_mapping", config.model_mapping, "dict", "前綴 → 模型路徑映射"),
@@ -7345,6 +7378,7 @@ class CAPIDatabase:
             if name.startswith("image_abnormal_")
         }
         description_refresh_param_names = image_abnormal_param_names | {
+            "side_white_detection_enabled",
             "aoi_judgment_roi_enabled",
             "inference_rotate_180_enabled",
             "dust_pixel_grid_filter_enabled",

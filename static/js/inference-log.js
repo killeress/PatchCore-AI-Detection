@@ -66,6 +66,7 @@
                 decision = ({not_within_spec: 'NG · 規格內檢查未通過', within_spec: '規格內檢查通過'})[m[1]] || `規格判定：${m[1]}`;
             }
             if (/\[WITHIN_SPEC_INFERENCE\].*最終判定 OK-i/.test(raw)) decision = 'OK-i · 符合規格內，已轉為放行';
+            if (/\[SIDE_WHITE_INFERENCE\].*最終判定 OK-s/.test(raw)) decision = 'OK-s · 側拍轉 OK，已轉為放行';
             if (raw.includes('AOI Report: 解析到')) report = message.replace('AOI Report: ', '');
             if ((m = raw.match(/Panel (\S+) 總耗時 ([\d.]+)s/))) {
                 overview = `面板 ${m[1]} · 推論流程 ${m[2]} 秒`;

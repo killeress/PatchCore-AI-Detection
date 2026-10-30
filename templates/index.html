@@ -112,7 +112,11 @@
                 <td>{{ r.machine_no }}</td>
                 <td><span class="badge {{ r.machine_judgment | mj_badge }}">{{ r.machine_judgment }}</span></td>
                 <td>
-                    {% if r.ai_judgment == 'OK-i' %}
+                    {% if r.ai_judgment == 'OK-s' %}
+                    <a href="/record/{{ r.id }}#side-white-result" title="側拍轉 OK：查看 AOI 各點放行原因與距離容錯">
+                        <span class="badge {{ r.ai_judgment | ai_badge }}">OK-s</span>
+                    </a>
+                    {% elif r.ai_judgment == 'OK-i' %}
                     <a href="/ric/within-spec-logs" title="原始 AI=NG，符合規格內後轉 OK；查看規格內計算明細">
                         <span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span>
                     </a>

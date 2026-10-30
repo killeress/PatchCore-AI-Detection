@@ -47,7 +47,7 @@ def collect(db_path, start, end):
         where = "datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)"
         summary = dict(conn.execute("""
             SELECT COUNT(*) AS total,
-                   COALESCE(SUM(ai_judgment IN ('OK', 'OK-i')), 0) AS ok,
+                   COALESCE(SUM(ai_judgment IN ('OK', 'OK-i', 'OK-s')), 0) AS ok,
                    COALESCE(SUM(ai_judgment LIKE 'NG%'), 0) AS ng,
                    COALESCE(SUM(ai_judgment LIKE 'ERR%'), 0) AS err
             FROM inference_records WHERE """ + where, (start, end)).fetchone())
@@ -103,7 +103,7 @@ def main():
 
     print("主機：{}  資料庫：{}".format(socket.gethostname(), db_path))
     print("區間：[{}, {})  UTC+8；created_at 與中控當班統計一致".format(start_text, end_text))
-    print("總投入：{total}  OK/OK-i：{ok}  NG：{ng}  ERR：{err}".format(**result))
+    print("總投入：{total}  OK/OK-i/OK-s：{ok}  NG：{ng}  ERR：{err}".format(**result))
     print("目前 AI 排片率：{}（分母含 ERR）".format(rate(ng)))
     print("含 CSJBL 的 NG：{}；占 NG {}，占投入 {}".format(csjbl, rate(csjbl, ng), rate(csjbl)))
     print("  A. 明細只有 CSJBL：{}；占 NG {}".format(result["only"], rate(result["only"], ng)))

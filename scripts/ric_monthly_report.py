@@ -38,7 +38,7 @@ source AS (
         COALESCE(NULLIF(c.result_eqp, ''), 'OK') AS eqp,
 
         CASE
-            WHEN COALESCE(NULLIF(c.result_ai, ''), 'OK') = 'OK-i'
+            WHEN COALESCE(NULLIF(c.result_ai, ''), 'OK') IN ('OK-i', 'OK-s')
                 THEN 'OK'
             ELSE COALESCE(NULLIF(c.result_ai, ''), 'OK')
         END AS ai,
@@ -167,7 +167,7 @@ inference_monthly AS (
             CASE
                 WHEN machine_judgment != ''
                  AND machine_judgment != 'OK'
-                 AND ai_judgment IN ('OK', 'OK-i')
+                 AND ai_judgment IN ('OK', 'OK-i', 'OK-s')
                     THEN 1
                 ELSE 0
             END

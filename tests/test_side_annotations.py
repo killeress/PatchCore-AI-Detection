@@ -31,7 +31,7 @@ def test_unmatched_aoi_is_drawn_at_scaled_position_without_changing_source_or_ro
     before = copy.deepcopy(row)
     comparison = compare_side_record(row)
     point = comparison["points"][0]
-    assert point["status"] == "unmatched"
+    assert point["status"] == "no_anomaly"
     image = np.full((300, 500, 3), 80, np.uint8)
     labels = []
     put_text = cv2.putText
@@ -39,7 +39,7 @@ def test_unmatched_aoi_is_drawn_at_scaled_position_without_changing_source_or_ro
     draw_side_annotations(image, row["payload"], comparison, "side", [0, 0, 1000, 600])
     x, y = np.rint(np.array(point["side_xy"]) * .5).astype(int)
     assert np.array_equal(image[y, x], [80, 80, 80])
-    assert np.array_equal(image[y, x + 3], annotation_color("aoi"))
+    assert np.array_equal(image[y, x + 16], annotation_color("aoi"))
     assert set(labels) == {"A1"}
     assert point["source_xy"] == [1830, 980]
     expected_raw = np.array([999, 599]) - point["side_xy"] if rotated else point["side_xy"]
@@ -151,6 +151,59 @@ def test_aoi_annotation_keeps_defect_pixels_and_covers_under_three_percent_of_it
     assert not np.any(np.all(image == [15, 23, 42], axis=2))  # no opaque label backing
 
 
+def test_aoi_frame_is_64_native_pixels_and_leaves_the_entire_interior_untouched():
+    row = side_row()
+    comparison = compare_side_record(row)
+    xy = comparison["points"][0]["side_xy"]
+    # Offset preview origin and reduce resolution: the frame follows original pixels.
+    bounds = [100, 100, 1000, 600]
+    image = np.full((300, 500, 3), 80, np.uint8)
+    draw_side_annotations(image, row["payload"], comparison, "side", bounds)
+    low = np.rint((np.asarray(xy) - 32 - bounds[:2]) * .5).astype(int)
+    high = np.rint((np.asarray(xy) + 32 - bounds[:2]) * .5).astype(int)
+    assert np.array_equal(high - low, [32, 32])
+    assert np.all(image[low[1] + 1:high[1], low[0] + 1:high[0]] == 80)
+    assert np.array_equal(image[low[1], low[0]], annotation_color("aoi"))
+    assert np.array_equal(image[high[1], high[0]], annotation_color("aoi"))
+
+
+def test_point_crops_render_inline_with_detachable_frame_and_missing_camera_placeholder():
+    from html.parser import HTMLParser
+
+    class Images(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.crops = []
+            self.current_crop = False
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == 'a':
+                self.current_crop = attrs.get('class') == 'sw-crop-open'
+                if self.current_crop:
+                    assert 'target' not in attrs
+                    assert 'data-sw-image' in attrs
+                    assert float(attrs['data-sw-frame-ratio']) > 0
+            if tag == 'img' and self.current_crop:
+                self.crops.append(attrs)
+
+        def handle_endtag(self, tag):
+            if tag == 'a':
+                self.current_crop = False
+
+    row = side_row()
+    row['payload']['artifacts'] = {'front': 'front.jpg', 'side': 'side.jpg'}
+    env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / 'templates'))
+    env.globals['side_white_view'] = side_white_view
+    html = env.get_template('_side_white_result.html').render(detail={'side_white_result': row})
+    parser = Images()
+    parser.feed(html)
+    assert len(parser.crops) == 2
+    assert all('point=1' in item['src'] and item['loading'] == 'lazy' for item in parser.crops)
+    assert '未保存OMIT影像' in html
+    assert '64×64 原圖 px' in html
+
+
 def test_saved_clean_preview_rebuilds_old_colors_and_keeps_point_evidence_clean(tmp_path):
     row = side_row()
     clean = np.full((300, 500, 3), 80, np.uint8)
@@ -167,8 +220,11 @@ def test_saved_clean_preview_rebuilds_old_colors_and_keeps_point_evidence_clean(
     point = comparison["points"][0]
     x, y = np.rint(np.array(point["side_xy"]) * .5).astype(int)
     assert np.array_equal(overview[y, x], [225, 225, 225])
-    assert np.array_equal(overview[y, x + 3], annotation_color("aoi"))
-    assert np.all(render_comparison_image(row, comparison, tmp_path, point_id=1) == 80)
+    assert np.array_equal(overview[y, x + 16], annotation_color("aoi"))
+    crop = render_comparison_image(row, comparison, tmp_path, point_id=1)
+    centre = crop.shape[0] // 2
+    assert np.all(crop[centre - 16:centre + 16, centre - 16:centre + 16] == 80)
+    assert crop.shape[0] == crop.shape[1] == point['crop_size']
     assert row == before
     assert Path(row["payload"]["artifacts"]["side"]).read_bytes() != Path(row["payload"]["artifacts"]["side_clean"]).read_bytes()
 
@@ -196,7 +252,7 @@ def test_clean_image_links_are_available_for_record_and_debug_views():
     env.globals["side_white_view"] = side_white_view
     template = env.get_template("_side_white_result.html")
     html = template.render(detail={"side_white_result": row})
-    assert "kind=side_clean" in html and "無標記圖 ↗" in html
+    assert "kind=side_clean" in html and "無標記圖 ⤢" in html
     html = template.render(detail={"side_white_result": row}, debug_result=True,
                            artifact_urls={"side": "/debug/side.jpg", "side_clean": "/debug/clean.jpg"})
     assert 'href="/debug/clean.jpg"' in html

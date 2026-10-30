@@ -16,13 +16,13 @@
     function renderSideWhiteParams() {
         const values = sideWhiteParamDraft || savedSideWhiteParams();
         return `<form id="sw-params-form" class="sw-card" onsubmit="saveSideWhiteParams(event)">
-            <div class="sw-head"><h3>側拍檢測參數</h3><span class="sw-badge">只影響側拍候選</span></div>
+            <div class="sw-head"><h3>側拍檢測參數</h3><span class="sw-badge">側拍放行 · OK-s</span></div>
             <p class="sw-note">儲存後套用新推論。側拍檢測：<strong>${getPlainParamValue('side_white_detection_enabled','false')==='true'?'啟用':'關閉'}</strong>（於「推論設定」切換）。</p>
             <fieldset class="sw-param-grid" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamFields.map(([key,label,,min,max,step,hint]) => `<label for="sw-param-${key}">${label}<input id="sw-param-${key}" type="number" required min="${min}" max="${max}" step="${step}" value="${escapeAttr(values[key])}" oninput="editSideWhiteParam('${key}',this.value)"><span class="sw-note">${hint}</span></label>`).join('')}
             ${sideWhiteSwitches.map(([key,label]) => `<label>${label}<input id="sw-param-${key}" type="checkbox" ${values[key]?'checked':''} onchange="editSideWhiteParam('${key}',this.checked)"></label>`).join('')}
             </fieldset>
             <p class="sw-note">貼紙／灰塵過濾固定啟用，依側拍 SPINIGBI 證據屏蔽符合條件的候選。</p>
-            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定。CSJBL 顯示範圍只影響周邊參考，判斷仍只使用 AOI 報點命中的候選。</p></details>
+            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定。CSJBL 顯示範圍只控制參考範圍；判定距離容錯內仍有保留候選即維持 NG。全部 CSJBL 及正式 NG 原因均可放行時，轉 OK-s 並回覆 testing OK；缺圖或映射失敗時保留原判定。</p></details>
             <button class="sw-btn" type="submit" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamSaving?'儲存中…':'儲存側拍參數'}</button>
             <span id="sw-param-message" class="sw-note" role="status">${escapeHtml(sideWhiteParamMessage||(sideWhiteParamDraft?'尚未儲存':''))}</span>
         </form>`;
@@ -65,7 +65,7 @@
             {% include "_side_white_styles.html" %}
             ${renderSideWhiteParams()}
             <div class="sw-card">
-                <div class="sw-head"><h3>側拍結果查閱</h3><span class="sw-badge">側拍分析 · 不影響正式判定</span></div>
+                <div class="sw-head"><h3>側拍結果查閱</h3><span class="sw-badge">OK-s · 側拍轉 OK</span></div>
                 <p class="sw-note">側拍統計提供 AOI 有 CSJBL 的結果查詢、分類統計與轉 OK 試算。</p>
                 <div class="sw-controls"><a class="sw-btn" href="/ric?tab=side-statistics" target="_blank" rel="noopener">前往側拍統計 →</a></div>
                 <p class="sw-note">沒有 CSJBL 的已保存結果也可由推論紀錄查閱。依玻璃 ID、機台或日期搜尋後，開啟單筆紀錄查看「側拍處理結果」。</p>

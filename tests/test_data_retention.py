@@ -112,9 +112,9 @@ def test_plan_a_keeps_searchable_records_but_expires_tiles_and_images(tmp_path):
 
 
 @pytest.mark.parametrize("ok_days,ng_days,age,ok_survives", [(180, 90, 120, True), (30, 180, 31, False)])
-def test_ok_i_uses_only_ok_retention(tmp_path, ok_days, ng_days, age, ok_survives):
+def test_ok_tags_use_only_ok_retention(tmp_path, ok_days, ng_days, age, ok_survives):
     db = make_db(tmp_path)
-    ok_ids = {insert_record(db, "OK", age), insert_record(db, "OK-i", age)}
+    ok_ids = {insert_record(db, judgment, age) for judgment in ("OK", "OK-i", "OK-s")}
     ng_id = insert_record(db, "NG", age)
     db.cleanup_old_records(ok_days, ng_days, vacuum=False)
     assert remaining_ids(db) == (ok_ids if ok_survives else {ng_id})

@@ -689,11 +689,11 @@ class _AppVersionProxy:
 def ai_simple(ai_judgment):
     if not ai_judgment: return ""
     if ai_judgment.startswith("ERR:HY"): return "HY"
-    return "OK-i" if ai_judgment == "OK-i" else ("OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else ("ERR" if ai_judgment.startswith("ERR") else ai_judgment)))
+    return ai_judgment if ai_judgment in {"OK-i", "OK-s"} else ("OK" if ai_judgment == "OK" else ("NG" if ai_judgment.startswith("NG") else ("ERR" if ai_judgment.startswith("ERR") else ai_judgment)))
 
 def ai_badge(ai_judgment):
     simple = ai_simple(ai_judgment)
-    return "badge-ok-i" if simple == "OK-i" else ("badge-ok" if simple == "OK" else ("badge-ng" if simple == "NG" else "badge-err"))
+    return "badge-ok-s" if simple == "OK-s" else ("badge-ok-i" if simple == "OK-i" else ("badge-ok" if simple == "OK" else ("badge-ng" if simple == "NG" else "badge-err")))
 
 def mj_badge(machine_judgment):
     if machine_judgment == "OK":
@@ -7539,7 +7539,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             eqp = rec["result_eqp"] or "OK"
             raw_ai = rec["result_ai"] or "OK"
             inference_ai = rec.get("inference_ai_judgment") or ""
-            ai = "OK" if raw_ai == "OK-i" else raw_ai
+            ai = "OK" if raw_ai in {"OK-i", "OK-s"} else raw_ai
             within_spec_converted_ok = raw_ai == "OK-i" or inference_ai == "OK-i"
             raw_ric = CAPIDatabase.parse_ric_judgment(rec.get("datastr", ""))
             review_cat = rec.get("review_category")
@@ -12631,7 +12631,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             today = datetime.now().strftime("%Y-%m-%d")
             filters = {key: query.get(key, [default])[0] for key, default in (
                 ("start_date", today), ("end_date", today), ("group", "with_csjbl"),
-                ("machine_no", ""), ("model_id", ""), ("glass_id", ""), ("status", ""), ("review", ""), ("conversion", ""))}
+                ("machine_no", ""), ("model_id", ""), ("glass_id", ""), ("status", ""), ("review", ""), ("conversion", ""),
+                ("shift", "current"))}
             limit = max(1, min(int(query.get("limit", [10])[0]), 20))
             offset = max(0, int(query.get("offset", [0])[0]))
             tolerance = float(query.get("tolerance", [50])[0])
@@ -14204,7 +14205,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             _stored_machine_judgment_for_record, _white_frame_image_result,
             _has_white_frame_ng, _serialize_aoi_machine_coords, parse_request,
             _white_frame_aoi_kwargs, _link_white_frame_white_screen,
-            build_qjpg_response, AOI_PASSTHROUGH_CODES,
+            build_qjpg_response, AOI_PASSTHROUGH_CODES, apply_side_white_inference,
         )
         from capi_station_adapter import create_station_adapter
         from capi_white_frame import inspect_white_frame_image
@@ -14375,7 +14376,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     )
 
             within_spec_info = None
-            if ai_judgment.startswith("NG") and _has_white_frame_ng(results):
+            passthrough_defects = [d for defects in (aoi_report or {}).values() for d in defects
+                                   if d.defect_code in AOI_PASSTHROUGH_CODES]
+            if passthrough_defects:
+                ai_judgment = "NG"
+                details = json.loads(ng_details)
+                details.extend({"image": d.image_prefix, "type": "aoi_passthrough", "defect_code": d.defect_code,
+                                "product_x": d.product_x, "product_y": d.product_y} for d in passthrough_defects)
+                ng_details = json.dumps(details, ensure_ascii=False)
+            elif ai_judgment.startswith("NG") and _has_white_frame_ng(results):
                 logger.info(
                     "[WHITE_FRAME][RERUN] Glass=%s formal NG bypasses within-spec OK-i conversion",
                     detail.get("glass_id", ""),
@@ -14502,6 +14511,27 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 aoi_report,
             )
             aoi_machine_coords = _serialize_aoi_machine_coords(aoi_report)
+            completion_message = "完成"
+            side_parsed = {
+                "glass_id": detail.get("glass_id", ""), "model_id": model_id,
+                "image_dir": str(panel_dir),
+                "aoi_passthrough_records": [
+                    f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}" for d in passthrough_defects],
+            }
+            if side_white_context is not None:
+                _update_status("正在重新檢測側拍與產生 OMIT 組合圖...")
+                side_started = _time.perf_counter()
+                base_dir = heatmap_info.get("dir") or (
+                    str(getattr(getattr(cls, "heatmap_manager", None), "base_dir", "") or cls.heatmap_base_dir or "heatmaps"))
+                ai_judgment = apply_side_white_inference(
+                    side_parsed, results, ai_judgment, ng_details, aoi_report, inferencer.config,
+                    Path(base_dir) / f"side_white_{record_id}", side_white_context,
+                    coords=aoi_machine_coords if aoi_report else detail.get("aoi_machine_coords"),
+                )
+                processing_seconds += _time.perf_counter() - side_started
+                side_payload = side_parsed.get("_side_white_payload")
+                if side_payload and side_payload["status"] in {"ERROR", "NO_IMAGE"}:
+                    completion_message = f"正拍完成；側拍：{side_payload.get('reason', side_payload['status'])}"
             if is_duplicate:
                 dup_note = "[DUPLICATE_PANEL] 重複投片，已依建立時間選取最新圖片推論"
                 err_suffix = ai_judgment if ai_judgment.startswith("ERR") else ""
@@ -14514,11 +14544,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             preview_context = {
                 "glass_id": detail.get("glass_id", ""),
                 "model_id": model_id,
-                "aoi_passthrough_records": [
-                    f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}"
-                    for defects in (aoi_report or {}).values() for d in defects
-                    if d.defect_code in AOI_PASSTHROUGH_CODES
-                ],
+                "aoi_passthrough_records": side_parsed["aoi_passthrough_records"],
             }
             response_preview = build_qjpg_response(
                 preview_context, ai_judgment, results, inferencer.config,
@@ -14577,37 +14603,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     source="inference",
                 )
 
-            completion_message = "完成"
-            if side_white_context is not None:
-                from capi_side_white import prepare_aoi_context
-                side_white_context = prepare_aoi_context(
-                    side_white_context,
-                    aoi_machine_coords if aoi_report else detail.get("aoi_machine_coords"),
-                    ng_details, image_results_data,
-                    rotate_180=bool(getattr(side_white_context["config"], "inference_rotate_180_enabled", False)),
-                )
-            if side_white_context is not None:
-                from capi_side_white import inspect_side_white_folder
-                _update_status("正在重新檢測側拍與產生 OMIT 組合圖...")
-                side_config = side_white_context["config"]
-                base_dir = heatmap_info.get("dir") or (
-                    str(getattr(getattr(cls, "heatmap_manager", None), "base_dir", "") or cls.heatmap_base_dir or "")
-                )
-                if not base_dir:
-                    raise RuntimeError("側拍結果儲存目錄未設定")
-                output_dir = Path(base_dir) / f"side_white_{record_id}"
-                side_payload = inspect_side_white_folder(
-                    panel_dir, output_dir,
-                    rotate_180=bool(getattr(side_config, "inference_rotate_180_enabled", False)),
-                    params=getattr(side_config, "side_white_detection_params", None),
-                    context=side_white_context,
-                )
+            if side_parsed.get("_side_white_payload") is not None:
                 cls.db.save_side_white_result(
-                    record_id, side_payload,
-                    heatmap_dir=str(output_dir.resolve()) if side_payload.get("artifacts") else "",
+                    record_id, side_parsed["_side_white_payload"],
+                    heatmap_dir=side_parsed.get("_side_white_output_dir", ""),
                 )
-                if side_payload["status"] in {"ERROR", "NO_IMAGE"}:
-                    completion_message = f"正拍完成；側拍：{side_payload.get('reason', side_payload['status'])}"
 
             with cls._rerun_lock:
                 cls._rerun_tasks[record_id] = {"status": "done", "message": completion_message}

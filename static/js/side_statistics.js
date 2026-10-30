@@ -4,9 +4,9 @@ window.sideStatistics = (() => {
     const form = document.getElementById('ss-filters');
     const message = document.getElementById('ss-message');
     const rows = document.getElementById('ss-rows');
-    const state = {loaded: false, loading: false, group: 'with_csjbl', offset: 0, limit: 10, total: 0, filters: {}, summary: {}, conversionSummary: null};
+    const state = {loaded: false, loading: false, group: 'with_csjbl', offset: 0, limit: 10, total: 0, filters: {}, summary: {}, conversionSummary: null, timeScope: null};
     const groups = {with_csjbl: 'AOI 有 CSJBL'};
-    const fields = ['start_date', 'end_date', 'machine_no', 'model_id', 'glass_id', 'status', 'conversion', 'tolerance'];
+    const fields = ['start_date', 'end_date', 'shift', 'machine_no', 'model_id', 'glass_id', 'status', 'conversion', 'tolerance'];
     const number = value => Number(value) || 0;
 
     const advancedFields = ['model_id', 'status', 'conversion', 'tolerance'];
@@ -37,7 +37,10 @@ window.sideStatistics = (() => {
             <span>已完成檢測<b>${sum('candidates') + sum('clear')}</b></span>
             <span>未完成檢測<b class="c-pending">${sum('unavailable')}</b></span>`;
         const f = state.filters;
-        const scope = [f.start_date === f.end_date ? f.start_date : `${f.start_date}～${f.end_date}`,
+        const time = state.timeScope;
+        const range = time ? `${time.mode === 'current' ? '當班 · ' : ''}${time.shift_name} ${time.time_range}`
+            : (f.start_date === f.end_date ? f.start_date : `${f.start_date}～${f.end_date}`);
+        const scope = [range,
             f.machine_no || '全部機台', f.model_id || '全部機種', '僅 AOI 有 CSJBL'];
         if (f.glass_id) scope.push(`玻璃 ID 含「${f.glass_id}」`);
         document.getElementById('ss-scope').textContent = state.loaded ? `總覽範圍：${scope.join(' · ')}` : '';
@@ -65,6 +68,8 @@ window.sideStatistics = (() => {
         target.hidden = !s;
         if (!s) { target.innerHTML = ''; return; }
         const pct = value => value == null ? '—' : `${number(value).toFixed(2)}%`;
+        const rate = (value, denominator) => number(denominator) > 0
+            ? `${((number(value) / number(denominator)) * 100).toLocaleString('zh-TW', {minimumFractionDigits: 1, maximumFractionDigits: 1})}%` : '—';
         const pp = value => value == null ? '—' : `${number(value).toFixed(2)} 個百分點`;
         const filterChip = (label, value, count) => chip('with_csjbl', {
             label, field: 'conversion', value, count: () => count, cls: 'c-info',
@@ -73,28 +78,30 @@ window.sideStatistics = (() => {
         const subset = s.csjbl;
         const scenarios = [
             ['mark', '只轉 MARK', 'eligible_mark'], ['omit', '只轉貼紙／表面異物', 'eligible_omit'],
-            ['tape', '只轉易撕貼', 'eligible_tape'], ['combined', '三類全部轉 OK（含混合）', 'eligible'],
+            ['tape', '只轉易撕貼', 'eligible_tape'], ['clear', '只轉 AOI 位置無異常', 'eligible_clear'],
+            ['combined', '四類全部轉 OK（含混合）', 'eligible'],
         ];
-        target.innerHTML = `<div class="ss-card-head"><strong>MARK／貼紙／易撕貼轉 OK 試算</strong><span>側拍建議 · 正式判定不變</span></div>
+        target.innerHTML = `<div class="ss-card-head"><strong>側拍轉 OK 統計與試算</strong><span>已正式轉 OK-s ${number(s.converted_records)} 筆；歷史紀錄另列試算</span></div>
             <div class="ss-lines">
                 <div class="ss-line">${filterChip('MARK 可轉 OK', 'mark', s.mark.records)}<span>筆 · ${number(s.mark.points)} 點</span>
                     ${filterChip('貼紙／表面異物可轉 OK', 'omit', s.omit.records)}<span>筆 · ${number(s.omit.points)} 點</span>
                     ${filterChip('易撕貼可轉 OK', 'tape', s.tape.records)}<span>筆 · ${number(s.tape.points)} 點</span>
+                    ${filterChip('AOI 位置無異常', 'clear', s.clear.records)}<span>筆 · ${number(s.clear.points)} 點</span>
                     ${filterChip('含多類', 'mixed', s.mixed_records)} 筆</div>
-                <div class="ss-line">${filterChip('三類合併可整筆轉 OK', 'eligible', s.eligible_records)}
+                <div class="ss-line">${filterChip('四類合併可整筆轉 OK', 'eligible', s.eligible_records)}
                     筆 ${filterChip('仍需保留', 'blocked', s.blocked_records)}<span>筆 · 原本已 OK ${number(s.already_ok_records)} 筆</span></div>
             </div>
-            <p class="ss-rate">整體排片率 <strong>${pct(scope.before_pct)}</strong> → <strong class="c-ok">${pct(combined.after_pct)}</strong>
+            <p class="ss-rate">整體排片率 <strong>${rate(scope.ng, scope.denominator)}</strong> → <strong class="c-ok">${rate(combined.remaining_ng, scope.denominator)}</strong>
                 <span>下降 ${pp(combined.drop_pp)} · 排片筆數相對減少 ${pct(combined.relative_drop_pct)}</span></p>
             <div class="sw-scroll"><table class="sw-table"><thead><tr><th>假設情境</th><th>可減少排片</th><th>試算後排片率</th><th>下降幅度</th><th>排片筆數相對減少</th></tr></thead><tbody>
                 ${scenarios.map(([key, label, filter]) => { const r = scope.scenarios[key]; return `<tr>
-                    <td>${label}</td><td>${filterChip('查看明細', filter, r.converted)} 筆</td><td>${pct(r.after_pct)}</td>
+                    <td>${label}</td><td>${filterChip('查看明細', filter, r.converted)} 筆</td><td>${rate(r.remaining_ng, scope.denominator)}</td>
                     <td>${pp(r.drop_pp)}</td><td>${pct(r.relative_drop_pct)}</td></tr>`; }).join('')}
             </tbody></table></div>
-            <p class="sw-note">分母：同日期／機台／機種／玻璃 ID 範圍的有效正式判定 ${number(scope.denominator)} 筆（OK ${number(scope.ok)}、NG ${number(scope.ng)}）；異常或未完成 ${number(scope.other)} 筆不列入。
-                排片率＝NG ÷ 有效判定；三類全轉後 NG＝${number(scope.ng)} − ${number(combined.converted)}＝${number(combined.remaining_ng)}。</p>
-            <p class="sw-note">僅 CSJBL 範圍：${pct(subset.before_pct)} → ${pct(subset.scenarios.combined.after_pct)}，下降 ${pp(subset.scenarios.combined.drop_pp)}（分母 ${number(subset.denominator)} 筆）。</p>
-            <details><summary>試算與計數方式</summary><p class="sw-note">三類筆數可能重疊，合併依檢測紀錄去重；同玻璃重送視為另次檢測。
+            <p class="sw-note">分母：同班別／機台／機種／玻璃 ID 範圍的總投入 ${number(scope.denominator)} 筆（OK ${number(scope.ok)}、NG ${number(scope.ng)}、ERR ${number(scope.err)}、其他 ${number(scope.other) - number(scope.err)}）。
+                排片率＝NG ÷ 總投入（含 ERR），與中控總覽相同；四類全轉後 NG＝${number(scope.ng)} − ${number(combined.converted)}＝${number(combined.remaining_ng)}。</p>
+            <p class="sw-note">僅 CSJBL 範圍：${rate(subset.ng, subset.denominator)} → ${rate(subset.scenarios.combined.remaining_ng, subset.denominator)}，下降 ${pp(subset.scenarios.combined.drop_pp)}（分母 ${number(subset.denominator)} 筆，含 ERR）。</p>
+            <details><summary>試算與計數方式</summary><p class="sw-note">四類筆數可能重疊，合併依檢測紀錄去重；同玻璃重送視為另次檢測。
                 只有整筆正式 NG 的全部 CSJBL 點及 NG 原因均已涵蓋，才計入排片減少。混合類型 ${number(s.eligible.mixed)} 筆需同時轉 OK，僅列入合併情境。
                 已是 OK、仍有其他 NG、明細不足或已有缺陷／定位疑慮紀錄者不計入減少；OMIT 僅標示模式不算已可轉 OK。
                 分母使用現存推論紀錄，包含其他 AOI 種類；明細維持僅顯示 CSJBL。明細篩選與換頁不改變試算範圍。</p></details>`;
@@ -114,6 +121,11 @@ window.sideStatistics = (() => {
 
     function currentFilters() {
         return Object.fromEntries(fields.map(key => [key, form.elements[key].value.trim()]));
+    }
+
+    function syncShiftControls() {
+        const current = form.elements.shift.value === 'current';
+        for (const key of ['start_date', 'end_date']) form.elements[key].disabled = current;
     }
 
     function applyQuickFilter(group, field, value) {
@@ -154,8 +166,16 @@ window.sideStatistics = (() => {
         renderSummary(); pagination();
         try {
             const data = await getData(filters, group, offset);
-            Object.assign(state, {loaded: true, group, offset, filters: {...filters}, total: data.total, summary: data.summary,
-                conversionSummary: data.conversion_summary || null});
+            const appliedFilters = {...filters};
+            if (data.time_scope) {
+                appliedFilters.start_date = data.time_scope.start_date;
+                appliedFilters.end_date = data.time_scope.end_date;
+                if (filters.shift === 'current' && form.elements.shift.value === 'current') {
+                    for (const key of ['start_date', 'end_date']) form.elements[key].value = appliedFilters[key];
+                }
+            }
+            Object.assign(state, {loaded: true, group, offset, filters: appliedFilters, total: data.total, summary: data.summary,
+                conversionSummary: data.conversion_summary || null, timeScope: data.time_scope || null});
             for (const key of ['status', 'conversion']) form.elements[key].value = state.filters[key] || '';
             syncAdvanced();
             rows.innerHTML = data.rows_html || '<div class="sw-empty">目前條件下沒有 AOI 有 CSJBL 的資料，請調整日期或篩選條件。</div>';
@@ -174,7 +194,7 @@ window.sideStatistics = (() => {
         event.preventDefault();
         if (form.reportValidity()) load(state.group, 0, currentFilters());
     });
-    form.addEventListener('change', () => syncAdvanced());
+    form.addEventListener('change', () => { syncShiftControls(); syncAdvanced(); });
     document.getElementById('ss-more').addEventListener('click', () => {
         const advanced = document.getElementById('ss-advanced');
         advanced.hidden = !advanced.hidden;
@@ -206,8 +226,9 @@ window.sideStatistics = (() => {
         const now = new Date();
         const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
         form.elements.start_date.value = today; form.elements.end_date.value = today;
+        form.elements.shift.value = 'current';
         state.filters = currentFilters();
-        syncAdvanced();
+        syncShiftControls(); syncAdvanced();
         load();
     }
     return {init};

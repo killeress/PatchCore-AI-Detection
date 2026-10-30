@@ -2249,7 +2249,7 @@
         }
 
         function normalizeAIForStats(ai) {
-            return ai === 'OK-i' ? 'OK' : ai;
+            return ai === 'OK-i' || ai === 'OK-s' ? 'OK' : ai;
         }
 
         function getEffectiveAI(rec) {

@@ -181,6 +181,7 @@
         <select name="ai_judgment">
             <option value="">全部狀態</option>
             <option value="OK" {% if ai_judgment=="OK" %}selected{% endif %}>正常 OK</option>
+            <option value="OK-s" {% if ai_judgment=="OK-s" %}selected{% endif %}>側拍轉 OK（OK-s）</option>
             <option value="NG" {% if ai_judgment=="NG" %}selected{% endif %}>異常 NG</option>
             <option value="ERR" {% if ai_judgment=="ERR" %}selected{% endif %}>錯誤 ERR</option>
         </select>
@@ -247,7 +248,7 @@
                 <td>{{ r.glass_id }}</td>
                 <td>{{ r.machine_no }}</td>
                 {% if cross_filter %}<td><span class="badge {% if r.machine_judgment and r.machine_judgment != 'OK' %}badge-ng{% else %}badge-ok{% endif %}">{{ r.machine_judgment or 'OK' }}</span></td>{% endif %}
-                <td><span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span></td>
+                <td>{% if r.ai_judgment == 'OK-s' %}<a href="/record/{{ r.id }}#side-white-result" title="側拍轉 OK：查看各 AOI 點放行原因與距離容錯"><span class="badge badge-ok-s">OK-s</span></a>{% else %}<span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span>{% endif %}</td>
                 <td>{{ r.processing_seconds | round(1) }}s</td>
                 <td>{{ r.created_at }}</td>
             </tr>

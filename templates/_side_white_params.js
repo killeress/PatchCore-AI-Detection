@@ -1,5 +1,6 @@
     const sideWhiteParamFields = [
-        ['csjbl_preview_radius_product_px','CSJBL 顯示範圍',50,0,500,1,'產品 px；只影響黃框。'],
+        ['csjbl_preview_radius_product_px','CSJBL 顯示範圍',50,0,500,1,'產品 px；顯示周邊參考候選。'],
+        ['csjbl_match_tolerance_product_px','CSJBL 判定距離容錯',5,0,500,1,'產品 px；距離內仍有保留異常即維持 NG，範圍內無異常才可轉 OK。'],
         ['min_contrast_gray','最低局部反差',2.2,.1,255,.1,'灰階差；越低越敏感。'],
         ['noise_sigma_factor','雜訊門檻倍率',4.5,.1,100,.1,'倍；越高越能抑制雜訊。'],
         ['min_area_px','最小候選面積',20,1,1000000,1,'側拍像素數；過濾小碎點。'],

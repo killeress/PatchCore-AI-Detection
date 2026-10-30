@@ -1,4 +1,4 @@
-"""Read-only AOI/side-camera comparison for human validation, never a verdict."""
+"""AOI/side-camera evidence shared by live decisions and historical reports."""
 
 import json
 from pathlib import Path
@@ -21,12 +21,12 @@ OMIT_COMPARISON_STATES = {
 
 # Shared by generated previews, historical previews and the HTML legend.
 SIDE_ANNOTATION_LEGEND = [
-    {"key": "aoi", "color": "#F43F5E", "tag": "+ A1", "label": "AOI 報點",
-     "hint": "中空十字標示 AOI TXT 映射位置，中心保留原始像素；A1 對應下方完整座標。"},
+    {"key": "aoi", "color": "#F43F5E", "tag": "□ A1", "label": "AOI 報點",
+     "hint": "64×64 原圖 px 細框以 AOI TXT 映射位置為中心，不填色；A1 對應下方完整座標。"},
     {"key": "candidate", "color": "#FACC15", "tag": "#1", "label": "保留檢查候選",
-     "hint": "黃色只表示 AOI 報點實際命中且仍需保留檢查的候選，編號沿用原始明細。"},
+     "hint": "黃色表示 AOI 判定距離容錯內仍需保留檢查的候選，編號沿用原始明細。"},
     {"key": "reference", "color": "#94A3B8", "tag": "#", "label": "參考候選",
-     "hint": "灰色候選未涵蓋 AOI 報點，僅供影像對照，不影響該點轉 OK。"},
+     "hint": "灰色候選位於 AOI 判定距離容錯外，僅供影像對照，不影響該點轉 OK。"},
     {"key": "mark", "color": "#22D3EE", "tag": "MARK / PRINT", "label": "MARK／印字屏蔽",
      "hint": "MARK 為定位標記，PRINT 為角落印字；框線表示屏蔽範圍。"},
     {"key": "zone", "color": "#A78BFA", "tag": "ZONE", "label": "設定不檢測區",
@@ -66,9 +66,11 @@ def omit_sticker_candidate(payload, candidate):
 CONVERSION_FILTERS = {
     "mark": "含 MARK 可轉 OK 點", "omit": "含貼紙／表面異物可轉 OK 點", "tape": "含易撕貼可轉 OK 點",
     "both": "同時含 MARK 與貼紙可轉 OK 點", "mixed": "含多類可轉 OK 點",
-    "either": "含任一類可轉 OK 點", "eligible": "三類合併可整筆轉 OK",
+    "clear": "含無異常可轉 OK 點",
+    "either": "含任一類可轉 OK 點", "eligible": "四類合併可整筆轉 OK",
     "eligible_mark": "僅靠 MARK 可整筆轉 OK", "eligible_omit": "僅靠 OMIT 可整筆轉 OK",
     "eligible_tape": "僅靠易撕貼可整筆轉 OK",
+    "eligible_clear": "僅靠無異常可整筆轉 OK",
     "blocked": "有可轉 OK 點，但整筆仍需保留",
 }
 
@@ -95,20 +97,21 @@ def record_conversion(row, comparison):
     mark = sum(p["status"] == "mark_suppressed" for p in points)
     omit = sum(p["status"] == "omit_suppressed" for p in points)
     tape = sum(p["status"] == "tape_suppressed" for p in points)
-    kinds = [kind for kind, count in (("mark", mark), ("omit", omit), ("tape", tape)) if count]
-    result = {"mark_points": mark, "omit_points": omit, "tape_points": tape, "eligible": False,
+    clear = sum(p["status"] == "no_anomaly" for p in points)
+    kinds = [kind for kind, count in (("mark", mark), ("omit", omit), ("tape", tape), ("clear", clear)) if count]
+    result = {"mark_points": mark, "omit_points": omit, "tape_points": tape, "clear_points": clear, "eligible": False,
               "category": "mixed" if len(kinds) > 1 else kinds[0] if kinds else "none",
-              "state": "none", "reason": "沒有 MARK／貼紙／易撕貼可轉 OK 點"}
+              "state": "none", "reason": "沒有 MARK／貼紙／易撕貼／無異常可轉 OK 點"}
     if not kinds:
         return result
     judgment = str(row.get("ai_judgment") or "")
     result["state"] = "blocked"
-    if judgment in {"OK", "OK-i"}:
+    if judgment in {"OK", "OK-i", "OK-s"}:
         result.update(state="already_ok", reason="正式結果已是 OK，不重複計算排片減少")
     elif not judgment.startswith("NG"):
         result["reason"] = "正式結果不是有效 NG，不納入排片減少"
-    elif mark + omit + tape != len(points):
-        result["reason"] = "仍有 CSJBL 點未符合 MARK／貼紙／易撕貼轉 OK 條件"
+    elif mark + omit + tape + clear != len(points):
+        result["reason"] = "仍有 CSJBL 點未符合 MARK／貼紙／易撕貼／無異常轉 OK 條件"
     elif row.get("review_decision") in {"confirmed", "missed", "mapping_error", "uncertain"}:
         result["reason"] = "既有紀錄仍有缺陷、定位疑慮或尚無法確認，暫不計入整筆轉 OK"
     else:
@@ -116,10 +119,29 @@ def record_conversion(row, comparison):
         covered = isinstance(details, list) and bool(details) and all(
             _covered_csjbl_ng(defect, points) for defect in details)
         if covered:
-            result.update(eligible=True, state="eligible", reason="全部 CSJBL 點及正式 NG 原因均由 MARK／貼紙／易撕貼涵蓋")
+            result.update(eligible=True, state="eligible", reason="全部 CSJBL 點及正式 NG 原因均由 MARK／貼紙／易撕貼／無異常涵蓋")
         else:
             result["reason"] = "另有正式 NG 原因，或 NG 明細不足以確認全部已涵蓋"
     return result
+
+
+def side_inference_decision(row):
+    """Keep the original NG evidence and explain the final side conversion."""
+    payload = row.get("payload") or {}
+    comparison = compare_side_record(row, payload.get("parameters", {}).get("csjbl_preview_radius_product_px", 50))
+    conversion = record_conversion(row, comparison)
+    converted = conversion["eligible"]
+    original = str(row.get("ai_judgment") or "")
+    points = [{key: point[key] for key in ("id", "image_prefix", "status", "reason", "retained_candidate_ids",
+                                          "product_xy", "nearest_retained_distance_product_px") if key in point}
+              for point in comparison["points"]]
+    reason = conversion["reason"]
+    if converted:
+        reason = "側拍轉 OK：" + "；".join(f"A{p['id']} {p['reason']}" for p in points)
+    return {"converted": converted, "original_judgment": original,
+            "final_judgment": "OK-s" if converted else original, "reason": reason,
+            "match_tolerance_product_px": comparison["match_tolerance"], "points": points,
+            "conversion": conversion}
 
 
 def panel_projection(row, comparison, conversion):
@@ -128,9 +150,12 @@ def panel_projection(row, comparison, conversion):
     formal = str(row.get("ai_judgment") or "")
     panel = {"formal": formal, "projected": None, "state": "unavailable", "tone": "muted",
              "text": "無法試算", "reason": "尚無有效正式判定", "remaining_sources": []}
-    if formal in {"OK", "OK-i"}:
+    if formal in {"OK", "OK-i", "OK-s"}:
         panel.update(projected=formal, state="already_ok", tone="ok", text=f"原本已 {formal}",
                      reason="沿用同次檢測的整片正式結果")
+        if formal == "OK-s":
+            panel.update(text="OK-s · 側拍轉 OK", reason=(row.get("payload") or {}).get(
+                "inference_decision", {}).get("reason", "全部正式 NG 原因已由側拍確認可放行"))
     elif formal.startswith("NG"):
         panel.update(projected="NG", state="retained", tone="warn", text="整片仍為 NG",
                      reason=conversion["reason"])
@@ -159,21 +184,24 @@ def matches_conversion_filter(result, value):
     return not value or {
         "mark": result["mark_points"] > 0, "omit": result["omit_points"] > 0,
         "tape": result["tape_points"] > 0,
+        "clear": result["clear_points"] > 0,
         "both": result["mark_points"] > 0 and result["omit_points"] > 0,
         "mixed": result["category"] == "mixed", "either": result["category"] != "none",
         "eligible": result["eligible"], "eligible_mark": result["eligible"] and result["category"] == "mark",
         "eligible_omit": result["eligible"] and result["category"] == "omit", "blocked": result["state"] == "blocked",
         "eligible_tape": result["eligible"] and result["category"] == "tape",
+        "eligible_clear": result["eligible"] and result["category"] == "clear",
     }.get(value, False)
 
 
 def conversion_rate_projection(counts, eligible):
-    """Fixed denominator; records covered by multiple treatments are removed once."""
-    denominator = counts["ok"] + counts["ng"]
+    """Dashboard denominator includes every input; remove each converted NG once."""
+    denominator = counts["total"]
     percentage = lambda value: round(100 * value / denominator, 6) if denominator else None
     scenarios = {}
     for key, removed in (("mark", eligible["mark"]), ("omit", eligible["omit"]),
                          ("tape", eligible.get("tape", 0)),
+                         ("clear", eligible.get("clear", 0)),
                          ("combined", sum(eligible.values()))):
         scenarios[key] = {"converted": removed, "remaining_ng": counts["ng"] - removed,
                           "after_pct": percentage(counts["ng"] - removed), "drop_pp": percentage(removed),
@@ -420,8 +448,8 @@ def peel_tape_regions(payload):
 def compare_side_record(row, tolerance=50):
     """Map front product coordinates to the saved side-camera detection orientation.
 
-    Proximity selects reference candidates only. Only remaining contours containing
-    the actual AOI point can block it. Filtered and bomb candidates stay distinct.
+    Reference radius is separate from the configured decision distance tolerance.
+    Remaining contours within that distance block release. Bombs stay distinct.
     A MARK inside the point's ROI removes only candidates covered by its exact mask.
     """
     row = _side_record_source(row)
@@ -430,7 +458,11 @@ def compare_side_record(row, tolerance=50):
         raise ValueError("比對容許誤差須為 0～500 產品 px")
     points, source = csjbl_points(row.get("aoi_machine_coords"), row.get("ng_details"))
     payload = row.get("payload") or {}
+    match_tolerance = float(payload.get("parameters", {}).get("csjbl_match_tolerance_product_px", 5))
+    if not np.isfinite(match_tolerance) or not 0 <= match_tolerance <= 500:
+        raise ValueError("CSJBL 判定距離容錯須為 0～500 產品 px")
     result = {"has_csjbl": bool(points), "source": source, "points": [],
+              "match_tolerance": match_tolerance, "no_anomaly": 0,
               "tolerance": tolerance, "matched": 0, "mapped": 0, "mark_suppressed": 0, "omit_suppressed": 0,
               "tape_suppressed": 0,
               "incomplete": bool(payload.get("truncated")), "reason": ""}
@@ -494,6 +526,9 @@ def compare_side_record(row, tolerance=50):
                     or np.any(product_xy > [width, height])):
                 raise ValueError("AOI 座標超出產品範圍或未保存")
             front_xy, side_xy = _transform([product_xy], to_front)[0], _transform([product_xy], to_side)[0]
+            for kind, xy in (("front", front_xy), ("side", side_xy)):
+                if (not np.isfinite(xy).all() or np.any(xy < 0) or np.any(xy >= payload[kind + "_size"])):
+                    raise ValueError("AOI 映射位置超出影像範圍")
             item.update(product_xy=product_xy.tolist(), front_xy=front_xy.tolist(), side_xy=side_xy.tolist())
             for kind, xy in (("front", front_xy), ("side", side_xy)):
                 item[kind + "_raw_xy"] = ((np.array(payload[kind + "_size"]) - 1 - xy)
@@ -502,6 +537,7 @@ def compare_side_record(row, tolerance=50):
             circle = product_xy + np.column_stack((np.cos(angles), np.sin(angles))) * tolerance
             item["side_roi"] = _transform(circle, to_side).tolist()
             item["front_roi"] = _transform(circle, to_front).tolist()
+            item["crop_size"] = _point_crop_size(item)
             # Pixel bounds are half-open, matching the formal inference mask.
             point_marks = []
             for mark in marks:
@@ -518,13 +554,13 @@ def compare_side_record(row, tolerance=50):
             for candidate in payload.get("candidates", []):
                 contour = candidate.get("side_contour")
                 if not contour or len(contour) < 3:
-                    continue
+                    raise ValueError("候選輪廓資料不完整，保留檢查")
                 product_contour = _transform(contour, to_product)
                 distance = cv2.pointPolygonTest(product_contour, tuple(map(float, product_xy)), True)
-                if distance < -tolerance:
+                if distance < -max(tolerance, match_tolerance):
                     continue
                 item["candidate_ids"].append(candidate["id"])
-                if distance >= 0:
+                if distance >= -match_tolerance:
                     item["aoi_candidate_ids"].append(candidate["id"])
                 nearby.append(candidate)
                 sticker = omit_sticker_candidate(payload, candidate)
@@ -560,13 +596,17 @@ def compare_side_record(row, tolerance=50):
                         if remaining and not outside_tape:
                             item["tape_candidate_ids"].append(candidate["id"])
                         remaining = outside_tape
-                    if any(len(c) >= 3 and cv2.pointPolygonTest(_transform(c, to_product),
-                           tuple(map(float, product_xy)), False) >= 0 for c in remaining):
+                    distances = [max(0., -cv2.pointPolygonTest(_transform(c, to_product),
+                                 tuple(map(float, product_xy)), True)) for c in remaining if len(c) >= 3]
+                    if distances:
+                        item["nearest_retained_distance_product_px"] = min(
+                            item.get("nearest_retained_distance_product_px", float("inf")), min(distances))
+                    if any(d <= match_tolerance for d in distances):
                         item["retained_candidate_ids"].append(candidate["id"])
             item["status"] = ("matched" if item["retained_candidate_ids"] else
                               "filtered" if item["aoi_candidate_ids"] else "unmatched")
-            item["reason"] = ("AOI 報點未命中候選；周邊候選僅供參考，不影響此點判斷。"
-                              if item["candidate_ids"] and not item["aoi_candidate_ids"] else "")
+            item["reason"] = (f"AOI 位置 {match_tolerance:g} 產品 px 容錯內仍有異常候選，保留 NG"
+                              if item["retained_candidate_ids"] else "")
             item["omit"] = _point_omit_evidence(payload, [c for c in nearby
                 if c["id"] in item["aoi_candidate_ids"] and c["id"] not in item["mark_candidate_ids"]])
             item["omit"]["label"] = OMIT_COMPARISON_STATES[item["omit"]["status"]]
@@ -607,6 +647,15 @@ def compare_side_record(row, tolerance=50):
                         item["status"] = "unverified"
                     item["reason"] = ("AOI ROI 內有 MARK，但涉及炸彈驗證範圍，保留檢查" if bomb_overlap else
                                       "AOI ROI 內的 MARK 已屏蔽，但報點仍命中 MARK 範圍外的保留候選，保留檢查")
+            if item["status"] == "unmatched":
+                item.update(status="no_anomaly", reason=f"AOI 位置 {match_tolerance:g} 產品 px 容錯內未發現異常，該點可轉 OK")
+            # Bombs are verification evidence even if the detector found nothing.
+            bomb_nearby = any(c.get("bomb_ids") for c in nearby if c["id"] in item["aoi_candidate_ids"]) or any(
+                len(b.get("side_tolerance_polygon", [])) >= 3 and cv2.pointPolygonTest(
+                    _transform(b["side_tolerance_polygon"], to_product), tuple(map(float, product_xy)), True)
+                    >= -match_tolerance for b in payload.get("bombs", []))
+            if bomb_nearby:
+                item.update(status="unverified", reason="AOI 容錯範圍涉及炸彈驗證，保留檢查")
             if row.get("status") not in {"CANDIDATES", "NO_CANDIDATES", "FILTERED"} or payload.get("truncated"):
                 item["status"] = "unverified"
                 item["reason"] = "檢測未完成或候選資料曾截斷，僅供位置對照"
@@ -615,7 +664,9 @@ def compare_side_record(row, tolerance=50):
             result["mark_suppressed"] += item["status"] == "mark_suppressed"
             result["omit_suppressed"] += item["status"] == "omit_suppressed"
             result["tape_suppressed"] += item["status"] == "tape_suppressed"
+            result["no_anomaly"] += item["status"] == "no_anomaly"
         except (ValueError, TypeError, KeyError, cv2.error, np.linalg.LinAlgError) as exc:
+            item["status"] = "unavailable"
             item["reason"] = str(exc)
     return result
 
@@ -654,7 +705,7 @@ def side_white_view(row, detail=None):
     mark_ids = {i for point in points for i in point.get("mark_candidate_ids", [])}
     nearby = [c for c in candidates if c["id"] in aoi_ids] if points else []
     omit = _point_omit_evidence(payload, [c for c in nearby if c["id"] not in mark_ids])
-    closed = comparison["mark_suppressed"] + comparison["omit_suppressed"] + comparison["tape_suppressed"]
+    closed = comparison["mark_suppressed"] + comparison["omit_suppressed"] + comparison["tape_suppressed"] + comparison["no_anomaly"]
     statuses = {"CANDIDATES": "保留可疑區域", "FILTERED": "候選已排除", "NO_CANDIDATES": "未發現候選",
                 "NO_IMAGE": "無側拍白畫面", "ERROR": "檢測失敗", "NOT_RUN": "尚未檢測"}
     headline, tone = statuses.get(source.get("status"), "尚無結論"), "neutral"
@@ -665,6 +716,12 @@ def side_white_view(row, detail=None):
             headline, tone = f"已排除 {closed}／{len(points)} 個 AOI 點", "warn"
         else:
             headline, tone = "AOI 仍有候選需確認" if comparison["matched"] else "AOI 尚無可轉 OK 結論", "warn"
+    if payload.get("inference_decision", {}).get("converted"):
+        headline, tone = "OK-s · 側拍轉 OK", "ok"
+
+    clear = {"title": "AOI 位置無異常", "tone": "ok" if comparison["no_anomaly"] else "neutral",
+             "text": f"{comparison['no_anomaly']} 點可轉 OK" if comparison["no_anomaly"] else "無可放行點",
+             "reason": f"判定距離容錯 {comparison['match_tolerance']:g} 產品 px；範圍內沒有保留異常。"}
 
     sticker = {"title": "貼紙／表面異物", "tone": "neutral", "text": "無相關候選", "reason": ""}
     if comparison["omit_suppressed"]:
@@ -740,7 +797,7 @@ def side_white_view(row, detail=None):
     missing_bounds = bool(payload.get("artifacts", {}).get("side")
                           and not payload.get("preview_bounds", {}).get("side"))
     conversion = source.get("conversion") or record_conversion(source, comparison)
-    return {"headline": headline, "tone": tone, "sticker": sticker, "mark": mark, "tape": tape,
+    return {"headline": headline, "tone": tone, "sticker": sticker, "mark": mark, "tape": tape, "clear": clear,
             "legend": SIDE_ANNOTATION_LEGEND, "legacy_preview": legacy_preview,
             "missing_preview_bounds": missing_bounds,
             "comparison": comparison, "candidates": candidate_rows,
@@ -778,7 +835,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         cv2.polylines(image, [points], True, color, max(2, thickness) if key == "candidate" else thickness, cv2.LINE_AA)
         if label:
             anchor = np.clip(points.min(axis=0), [0, 0], [width - 1, height - 1])
-            labels.append((anchor, label, color))
+            labels.append((anchor, label, color, None))
 
     def box_points(box):
         x, y, w, h = box
@@ -826,30 +883,47 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
     for point in comparison["points"]:
         if point["status"] == "unavailable" or coordinate_kind + "_xy" not in point:
             continue
-        xy = preview_points([point[coordinate_kind + "_xy"]])[0]
+        source_xy = np.asarray(point[coordinate_kind + "_xy"])
+        xy = preview_points([source_xy])[0]
         if np.any(xy < 0) or np.any(xy >= [width, height]):
             continue
         color = annotation_color("aoi")
         # Detailed coordinates and region names belong outside the image.
-        labels.insert(0, (xy, f"A{point['id']}", color))
-        markers.append(xy)
+        corners = preview_points([source_xy - 32, source_xy + 32])
+        labels.insert(0, (xy, f"A{point['id']}", color, corners))
+        markers.append(corners)
 
     occupied = []
     radius = max(3, round(5 * unit))
-    protected = [(int(x - radius), int(y - radius), int(x + radius + 1), int(y + radius + 1))
-                 for x, y in markers]
+    protected = [(int(low[0]), int(low[1]), int(high[0] + 1), int(high[1] + 1))
+                 for low, high in markers]
 
     def overlaps(rect, others):
         return any(rect[0] < r[2] and rect[2] > r[0] and rect[1] < r[3] and rect[3] > r[1]
                    for r in others)
 
-    for anchor, text, color in labels:
+    for anchor, text, color, frame in labels:
         (text_w, text_h), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness + 1)
         box_w, box_h = text_w + 2, text_h + baseline + 2
         gap = radius + 3
         x, y = map(int, anchor)
         choices = [(x + gap, y - box_h - gap), (x - box_w - gap, y - box_h - gap),
                    (x + gap, y + gap), (x - box_w - gap, y + gap)]
+        if frame is not None:
+            low, high = frame
+            choices = [(int(low[0]), int(low[1]) - box_h - 3),
+                       (int(high[0]) - box_w, int(low[1]) - box_h - 3),
+                       (int(high[0]) + 3, y - box_h // 2),
+                       (int(low[0]) - box_w - 3, y - box_h // 2),
+                       (int(low[0]), int(high[1]) + 3)]
+        else:
+            # Nearby IDs can lie inside an AOI frame. Keep their short labels
+            # just outside it so both the defect and candidate IDs remain clear.
+            for left, top, right, bottom in protected:
+                if left - box_w <= x <= right + box_w and top - box_h <= y <= bottom + box_h:
+                    choices.extend([(x, top - box_h - 3), (x, bottom + 3),
+                                    (left - box_w - 3, y - box_h // 2),
+                                    (right + 3, y - box_h // 2)])
         # Never move a label across the picture or cover an AOI centre to fit it.
         for left, top in choices:
             rect = (left, top, left + box_w, top + box_h)
@@ -864,14 +938,36 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (24, 24, 24), thickness + 1, cv2.LINE_AA)
         cv2.putText(image, text, (rect[0] + 1, rect[1] + 1 + text_h),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
-    for xy in markers:
-        color = annotation_color("aoi")
-        gap = max(2, round(1.5 * unit))
-        for axis in (np.array([1, 0]), np.array([0, 1])):
-            for sign in (-1, 1):
-                cv2.line(image, tuple(xy + axis * sign * gap), tuple(xy + axis * sign * radius),
-                         color, thickness)
+    for low, high in markers:
+        cv2.rectangle(image, tuple(low), tuple(high), annotation_color("aoi"), 1)
     return image
+
+
+def _point_crop_size(point):
+    """Use one native-pixel square for all cameras, including the comparison ROI."""
+    half = 48.
+    for kind in ("front", "side"):
+        roi = np.asarray(point[kind + "_roi"], np.float64)
+        xy = np.asarray(point[kind + "_xy"], np.float64)
+        half = max(half, float(np.max(np.abs(roi - xy))) + 20)
+    return int(np.ceil(half)) * 2
+
+
+def _padded_crop(image, low, size):
+    """Pad outside the source with black; never move the AOI or resize its pixels."""
+    low = np.asarray(low, dtype=int)
+    high = low + size
+    source_low = np.maximum(0, low)
+    source_high = np.minimum(image.shape[1::-1], high)
+    if np.any(source_high <= source_low):
+        raise FileNotFoundError("AOI 局部圖不在影像範圍")
+    pixels = image[source_low[1]:source_high[1], source_low[0]:source_high[0]]
+    if np.array_equal(source_low, low) and np.array_equal(source_high, high):
+        return pixels.copy()
+    result = np.zeros((size, size) + image.shape[2:], dtype=image.dtype)
+    offset = source_low - low
+    result[offset[1]:offset[1] + pixels.shape[0], offset[0]:offset[0] + pixels.shape[1]] = pixels
+    return result
 
 
 def render_comparison_image(row, comparison, root, kind="side", point_id=None):
@@ -913,13 +1009,17 @@ def render_comparison_image(row, comparison, root, kind="side", point_id=None):
                                      full=clean and kind != "omit")
     if point_id is not None:
         point = points[0]
-        roi = (np.array(point[coordinate_kind + "_roi"]) - origin) * scale
         xy = (np.array(point[coordinate_kind + "_xy"]) - origin) * scale
         if np.any(xy < 0) or np.any(xy >= image.shape[1::-1]):
             raise FileNotFoundError("AOI 映射位置不在保存的預覽範圍")
-        low = np.maximum(0, np.floor(np.minimum(roi.min(axis=0) - 20, xy - 48))).astype(int)
-        high = np.minimum(image.shape[1::-1], np.ceil(np.maximum(roi.max(axis=0) + 20, xy + 48))).astype(int)
-        image = image[low[1]:high[1], low[0]:high[0]]
+        size = _point_crop_size(point)
+        # Saved previews have already been reduced uniformly. Fit their square
+        # crop uniformly back to the common canvas only when the original is gone.
+        preview_size = max(1, int(round(size * min(scale))))
+        low = np.rint(xy).astype(int) - preview_size // 2
+        image = _padded_crop(image, low, preview_size)
+        if preview_size != size:
+            image = cv2.resize(image, (size, size), interpolation=cv2.INTER_LINEAR)
     return image
 
 
@@ -953,14 +1053,13 @@ def crop_original_image(row, comparison, folder, kind="side", point_id=None):
     if not points or points[0]["status"] == "unavailable":
         raise FileNotFoundError("此 AOI 點沒有可用映射")
     point = points[0]
-    # Same crop rule as the preview crop, in detection (possibly rotated) pixels.
-    roi = np.array(point[coordinate_kind + "_roi"], np.float64)
+    # Keep a common square and AOI centre even at the source image's boundary.
+    crop_size = _point_crop_size(point)
     xy = np.array(point[coordinate_kind + "_xy"], np.float64)
     if np.any(xy < 0) or xy[0] >= width or xy[1] >= height:
         raise FileNotFoundError("AOI 映射位置不在原始圖範圍")
-    low = np.maximum(0, np.floor(np.minimum(roi.min(axis=0) - 20, xy - 48))).astype(int)
-    high = np.minimum([width, height], np.ceil(np.maximum(roi.max(axis=0) + 20, xy + 48))).astype(int)
     if payload.get("rotation_applied"):
-        # Detection pixels were rotated 180 degrees; map the box back to file pixels.
-        low, high = np.array([width, height]) - high, np.array([width, height]) - low
-    return image[low[1]:high[1], low[0]:high[0]].copy()
+        # Locate the AOI in file pixels, preserving the file's original orientation.
+        xy = np.array([width, height]) - 1 - xy
+    low = np.rint(xy).astype(int) - crop_size // 2
+    return _padded_crop(image, low, crop_size)

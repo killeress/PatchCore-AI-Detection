@@ -1,6 +1,7 @@
 """Record-level counterfactual rejection rates never add point counts as panels."""
 import copy
 import json
+from datetime import datetime
 
 import pytest
 
@@ -35,19 +36,24 @@ def sample(kinds=("mark",), *, mode="suppress"):
             "ng_details": [{**point, "image": "W0F00000", "type": "aoi_passthrough"} for point in points]}
 
 
-def save(db, row=None, *, judgment="NG", when="2026-10-22 12:00:00", machine="CAPI1", model="MODEL"):
+def save(db, row=None, *, judgment="NG", when="2026-10-22 12:00:00", machine="CAPI1", model="MODEL", created_at=None):
     record_id = db.save_inference_record(
         glass_id="REPEATED", model_id=model, machine_no=machine, resolution=(500, 300),
         machine_judgment="NG", ai_judgment=judgment, image_dir="samples", total_images=1,
         ng_images=int(judgment.startswith("NG")), ng_details=json.dumps(row["ng_details"] if row else []),
         request_time=when, response_time=when, processing_seconds=.1, client_response_text="unchanged",
         aoi_machine_coords=json.dumps(row["aoi_machine_coords"] if row else {}))
+    conn = db._get_conn()
+    conn.execute("UPDATE inference_records SET created_at=? WHERE id=?", (created_at or when, record_id))
+    conn.commit()
+    conn.close()
     if row:
         return record_id, db.save_side_white_result(record_id, row["payload"])
     return record_id, None
 
 
 def query(db, **kwargs):
+    kwargs.setdefault("shift", "day")
     return db.get_side_statistics(start_date="2026-10-22", end_date="2026-10-22", **kwargs)
 
 
@@ -73,20 +79,22 @@ def test_rates_cover_whole_scope_and_mixed_records_are_counted_once(db):
     assert s["mark"] == {"points": 7, "records": 6}
     assert s["omit"] == {"points": 2, "records": 2}
     assert s["both_records"] == 1 and s["any_records"] == 7
-    assert s["eligible"] == {"mark": 1, "omit": 1, "tape": 0, "mixed": 1}
-    assert s["eligible_records"] == 3 and s["blocked_records"] == 3 and s["already_ok_records"] == 1
-    assert s["scope"]["denominator"] == 11 and s["scope"]["total"] == 13 and s["scope"]["other"] == 2
-    assert s["scope"]["before_pct"] == pytest.approx(800 / 11)
+    assert s["clear"] == {"points": 1, "records": 1}
+    assert s["eligible"] == {"mark": 1, "omit": 1, "tape": 0, "clear": 0, "mixed": 2}
+    assert s["eligible_records"] == 4 and s["blocked_records"] == 2 and s["already_ok_records"] == 1
+    assert s["scope"]["denominator"] == s["scope"]["total"] == 13 and s["scope"]["other"] == 2
+    assert s["scope"]["err"] == 1
+    assert s["scope"]["before_pct"] == pytest.approx(800 / 13)
     combined = s["scope"]["scenarios"]["combined"]
-    assert combined["converted"] == 3 and combined["remaining_ng"] == 5
-    assert combined["after_pct"] == pytest.approx(500 / 11)
-    assert combined["drop_pp"] == pytest.approx(300 / 11) and combined["relative_drop_pct"] == 37.5
+    assert combined["converted"] == 4 and combined["remaining_ng"] == 4
+    assert combined["after_pct"] == pytest.approx(400 / 13)
+    assert combined["drop_pp"] == pytest.approx(400 / 13) and combined["relative_drop_pct"] == 50
     assert s["scope"]["scenarios"]["mark"]["converted"] == s["scope"]["scenarios"]["omit"]["converted"] == 1
-    assert s["csjbl"]["denominator"] == 8 and s["csjbl"]["scenarios"]["combined"]["after_pct"] == 50
+    assert s["csjbl"]["denominator"] == 8 and s["csjbl"]["scenarios"]["combined"]["after_pct"] == 37.5
     for filters, expected in (({"conversion": "mark"}, 6), ({"conversion": "omit"}, 2),
-                              ({"conversion": "both"}, 1), ({"conversion": "eligible"}, 3),
+                              ({"conversion": "both"}, 1), ({"conversion": "eligible"}, 4),
                               ({"conversion": "eligible_mark"}, 1), ({"conversion": "eligible_omit"}, 1),
-                              ({"conversion": "blocked"}, 3), ({"review": "confirmed"}, 0),
+                              ({"conversion": "blocked"}, 2), ({"review": "confirmed"}, 0),
                               ({"status": "NOT_RUN"}, 0)):
         filtered = query(db, **filters, offset=1, limit=1, include_rows=False)
         assert filtered["total"] == expected and filtered["rows"] == []
@@ -121,26 +129,86 @@ def test_uncertain_or_other_ng_is_not_counted_as_whole_record_conversion(issue):
     assert row == before
 
 
-def test_scope_dates_machine_model_and_zero_denominator(db):
+def test_scope_dates_machine_model_and_err_denominator(db):
     save(db, sample(), when="2026-10-21 23:59:59")
     save(db, sample(), when="2026-10-23 00:00:00")
     save(db, sample(), machine="OTHER")
     save(db, sample(), model="OTHER")
     save(db, judgment="ERR:FAIL")
     s = query(db, machine_no="CAPI1", model_id="MODEL")["conversion_summary"]
-    assert s["scope"]["total"] == 1 and s["scope"]["denominator"] == 0
-    assert s["scope"]["before_pct"] is None
-    assert s["scope"]["scenarios"]["combined"]["drop_pp"] is None
+    assert s["scope"]["total"] == s["scope"]["denominator"] == s["scope"]["err"] == 1
+    assert s["scope"]["before_pct"] == 0
+    assert s["scope"]["scenarios"]["combined"]["drop_pp"] == 0
     assert query(db, glass_id="NO_MATCH")["conversion_summary"]["scope"]["total"] == 0
+    assert query(db, glass_id="NO_MATCH")["conversion_summary"]["scope"]["before_pct"] is None
     with pytest.raises(ValueError, match="轉 OK 分類"):
         query(db, conversion="unknown")
+    with pytest.raises(ValueError, match="班別"):
+        query(db, shift="invalid")
 
 
-def test_invalid_formal_judgment_cannot_remove_ng_from_an_empty_denominator(db):
+@pytest.mark.parametrize("clock", [
+    "2026-10-22 07:29:59", "2026-10-22 07:30:00", "2026-10-22 19:29:59",
+    "2026-10-22 19:30:00", "2026-10-22 23:50:00", "2026-10-23 06:00:00",
+    "2026-10-23 07:30:00",
+])
+def test_current_shift_matches_dashboard_with_err_and_different_request_times(db, clock):
+    records = [
+        ("2026-10-21 19:30:00", "OK"), ("2026-10-22 07:29:59", "NG"),
+        ("2026-10-22 07:30:00", "NG"), ("2026-10-22 08:00:00", "OK-i"),
+        ("2026-10-22 12:00:00", "NG:CSJBL"), ("2026-10-22 19:29:59", "ERR:timeout"),
+        ("2026-10-22 19:30:00", "NG"), ("2026-10-22 23:00:00", "OK"),
+        ("2026-10-23 00:10:00", "ERR:NO_IMAGE"), ("2026-10-23 07:29:59", "NG"),
+        ("2026-10-23 07:30:00", "OK"), ("2026-10-23 19:30:00", "NG"),
+    ]
+    ids = [save(db, sample(), judgment=judgment, when="2025-01-01 00:00:00", created_at=created)[0]
+           for created, judgment in records]
+    # A matching request_time must not pull an out-of-shift input into the report.
+    save(db, sample(), when=clock, created_at="2025-01-01 00:00:00")
+    now = datetime.fromisoformat(clock)
+    dashboard = db.get_shift_statistics(now)
+    # No shift parameter: default follows the server's current shift, even when
+    # an old tab still sends yesterday's dates. request_time is outside the scope.
+    result = db.get_side_statistics(start_date="2020-01-02", end_date="2020-01-01", now=now, limit=20)
+    scope = result["conversion_summary"]["scope"]
+    assert scope["denominator"] == scope["total"] == dashboard["total"]
+    assert scope["ng"] == dashboard["ng_count"] and scope["ok"] == dashboard["ok_count"]
+    assert scope["err"] == dashboard["err_count"]
+    assert scope["before_pct"] == pytest.approx(100 * dashboard["ng_count"] / dashboard["total"])
+    time = result["time_scope"]
+    assert time["mode"] == "current" and time["shift_name"] == dashboard["shift_name"]
+    assert time["start_date"] == time["end_date"] == time["start"][:10]
+    expected = {record_id for record_id, (created, _) in zip(ids, records) if time["start"] <= created < time["end"]}
+    assert {row["record_id"] for row in result["rows"]} == expected
+    assert all(time["start"] <= row["inference_created_at"] < time["end"] for row in result["rows"])
+    assert result["summary"]["with_csjbl"]["total"] == len(expected)
+    combined = scope["scenarios"]["combined"]
+    assert combined["converted"] == scope["ng"] and combined["after_pct"] == 0
+
+
+@pytest.mark.parametrize("shift", ["day", "night"])
+def test_historical_date_range_includes_only_selected_shifts(db, shift):
+    for day in ("2026-10-22", "2026-10-23", "2026-10-24"):
+        for time, judgment in (("00:00:00", "ERR:timeout"), ("07:29:59", "NG"),
+                               ("07:30:00", "OK"), ("19:29:59", "NG"), ("19:30:00", "NG")):
+            save(db, sample(), judgment=judgment, when=f"{day} {time}")
+    result = db.get_side_statistics(start_date="2026-10-22", end_date="2026-10-23", shift=shift, limit=20)
+    scope = result["conversion_summary"]["scope"]
+    shifts = [db.get_shift_statistics_for(day, shift) for day in ("2026-10-22", "2026-10-23")]
+    assert scope["total"] == scope["denominator"] == sum(row["total"] for row in shifts)
+    assert scope["ng"] == sum(row["ng_count"] for row in shifts)
+    assert scope["err"] == sum(row["err_count"] for row in shifts)
+    assert result["total"] == scope["total"]
+    assert scope["scenarios"]["combined"]["converted"] == scope["ng"]
+    assert result["time_scope"]["end_date"] == "2026-10-23"
+    assert result["time_scope"]["end"] == shifts[-1]["end"]
+
+
+def test_invalid_formal_judgment_counts_as_input_but_cannot_remove_ng(db):
     save(db, sample(), judgment=" NG")
     s = query(db)["conversion_summary"]
     assert s["mark"]["records"] == 1 and s["eligible_records"] == 0
-    assert s["scope"]["denominator"] == 0
+    assert s["scope"]["denominator"] == 1
     assert s["scope"]["scenarios"]["combined"]["remaining_ng"] == 0
 
 

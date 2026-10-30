@@ -200,8 +200,10 @@ def test_config_default_persistence_and_hot_reload(tmp_path):
     assert config.side_white_detection_enabled is False
     assert config.side_white_detection_params == normalize_side_white_params()
     assert config.side_white_detection_params["dust_mode"] == "suppress"
+    assert config.side_white_detection_params["csjbl_match_tolerance_product_px"] == 5
     custom = normalize_side_white_params({"min_contrast_gray": 3.1, "noise_sigma_factor": 6.0,
-        "min_area_px": 30, "edge_margin_px": 25, "csjbl_preview_radius_product_px": 75})
+        "min_area_px": 30, "edge_margin_px": 25, "csjbl_preview_radius_product_px": 75,
+        "csjbl_match_tolerance_product_px": 8})
     config.apply_db_overrides([{"param_name":"side_white_detection_params", "decoded_value":custom}])
     assert config.side_white_detection_params == custom
     custom["min_area_px"] = 999

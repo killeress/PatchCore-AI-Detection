@@ -301,7 +301,7 @@ def classify_aapi_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dic
 
 def _normalize_ai_judgment(value: str) -> Optional[str]:
     text = str(value or "").strip().upper()
-    if text in {"OK", "OK-I"}:
+    if text in {"OK", "OK-I", "OK-S"}:
         return "OK"
     if text.startswith("NG"):
         return "NG"

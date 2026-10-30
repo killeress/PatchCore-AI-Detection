@@ -18,12 +18,13 @@ from capi_image_naming import canonical_image_prefix
 
 
 def normalize_side_white_params(value=None) -> Dict[str, Any]:
-    """Validate observation-only inspection controls and fill older config defaults."""
+    """Validate side inspection controls and fill older config defaults."""
     defaults = {"min_contrast_gray": 2.2, "noise_sigma_factor": 4.5,
                 "min_area_px": 20, "edge_margin_px": 16,
                 "apply_exclusions": True, "dust_mode": "suppress", "dust_overlap_ratio": .8,
                 "mapping_margin_px": 3, "crop_padding_px": 32,
                 "csjbl_preview_radius_product_px": 50,
+                "csjbl_match_tolerance_product_px": 5,
                 "bomb_check_enabled": True, "bomb_tolerance_product_px": 50,
                 "bomb_force_detection_enabled": False}
     if value is None:
@@ -40,6 +41,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
         ("mapping_margin_px", "灰塵比對外擴", 0, 32, True),
         ("crop_padding_px", "組合圖周邊範圍", 0, 512, True),
         ("csjbl_preview_radius_product_px", "CSJBL 顯示範圍", 0, 500, True),
+        ("csjbl_match_tolerance_product_px", "CSJBL 判定距離容錯", 0, 500, True),
         ("bomb_tolerance_product_px", "炸彈容許誤差", 0, 500, True),
     ):
         number = result[key]
@@ -255,7 +257,7 @@ class CAPIConfig:
     anomaly_threshold: float = 0.5
     model_path: str = ""  # 預設模型路徑 (fallback，當 model_mapping 無對應時使用)
     inference_rotate_180_enabled: bool = False  # 推論來源影像統一旋轉 180°
-    side_white_detection_enabled: bool = False  # 側拍白畫面只記錄結果
+    side_white_detection_enabled: bool = False  # 側拍確認全部 CSJBL 可放行時，正式轉 OK-s
     side_white_detection_params: Dict[str, Any] = field(default_factory=normalize_side_white_params)
     
     # 多模型映射 {image_prefix: model_path} — 依圖片前綴自動選用對應模型

@@ -13,6 +13,14 @@ test('final conversion takes precedence over intermediate NG, including producti
     const result = parseLog('[WITHIN_SPEC_INFERENCE] 原始 AI=NG，已執行規格內檢查，結果=not_within_spec\n[WITHIN_SPEC_INFERENCE] 原始 AI=NG，符合規格內，最終判定 OK-i');
     assert.match(result.decision, /^OK-i/);
 });
+
+test('side conversion identifies OK-s and retains the per-point release reason', () => {
+    const line = '[SIDE_WHITE_INFERENCE] 原始 AI=NG，最終判定 OK-s；側拍轉 OK：A1 AOI 位置 5 產品 px 容錯內未發現異常';
+    const result = parseLog(line);
+    assert.equal(result.decision, 'OK-s · 側拍轉 OK，已轉為放行');
+    assert.match(result.events[0].message, /A1.*5 產品 px/);
+    assert.equal(result.events[0].raw, line);
+});
 test('repeated warnings aggregate but retain original timestamps and lines', () => {
     const line = '[2026-09-14 14:57:43] WARNING [capi.preprocess] [boundary] reject non-linear vertical edge: residual_p95=23.2px > 15.5px (54 samples)';
     const result = parseLog(line+'\r\n'+line.replace('14:57:43','14:58:02'));

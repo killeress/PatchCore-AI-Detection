@@ -589,11 +589,52 @@ def build_response(
     return f"AOI@{glass_id};{model_id};{machine_no};{machine_judgment};{ai_judgment}"
 
 
+def apply_side_white_inference(parsed, results, ai_judgment, ng_details, aoi_report, config,
+                               output_dir, context=None, *, coords=None):
+    """Inspect once before replying; background persistence reuses this exact evidence."""
+    from capi_side_white import inspect_side_white_folder, prepare_aoi_context, snapshot_context
+    from capi_side_report import csjbl_points, side_inference_decision
+
+    if not getattr(config, "side_white_detection_enabled", False):
+        return ai_judgment
+    coords = _serialize_aoi_machine_coords(aoi_report) if coords is None else coords
+    if not csjbl_points(coords, ng_details)[0]:
+        return ai_judgment
+    rotate = bool(getattr(config, "inference_rotate_180_enabled", False))
+    try:
+        context = prepare_aoi_context(
+            context if context is not None else snapshot_context(config, None, parsed),
+            coords, ng_details, results_to_db_data(results, {}), rotate_180=rotate, formal_results=results,
+        )
+        payload = inspect_side_white_folder(
+            Path(parsed["image_dir"]), output_dir, rotate_180=rotate,
+            params=getattr(config, "side_white_detection_params", None), context=context,
+        )
+        decision = side_inference_decision({"payload": payload, "status": payload["status"],
+                                            "ai_judgment": ai_judgment, "ng_details": ng_details,
+                                            "aoi_machine_coords": coords})
+    except Exception as exc:
+        logger.warning("[SIDE_WHITE_INFERENCE] 側拍檢查失敗，保留原判定 %s: %s", ai_judgment, exc, exc_info=True)
+        payload = {"status": "ERROR", "candidates": [], "artifacts": {}, "reason": str(exc)}
+        decision = {"converted": False, "original_judgment": ai_judgment,
+                    "final_judgment": ai_judgment, "reason": f"側拍檢查失敗，保留原判定：{exc}", "points": []}
+    payload["shadow_only"] = False
+    payload["inference_decision"] = decision
+    parsed["_side_white_payload"] = payload
+    parsed["_side_white_output_dir"] = str(Path(output_dir).resolve()) if payload.get("artifacts") else ""
+    if decision["converted"]:
+        # Remove only the AOI passthrough records proven covered by this decision.
+        parsed["aoi_passthrough_records"] = []
+    logger.info("[SIDE_WHITE_INFERENCE] Glass=%s 原始 AI=%s，最終判定 %s；%s",
+                parsed.get("glass_id", ""), ai_judgment, decision["final_judgment"], decision["reason"])
+    return decision["final_judgment"]
+
+
 def build_legacy_response(
     parsed: Optional[Dict[str, Any]],
     ai_judgment: str,
 ) -> str:
-    response_ai_judgment = "OK" if ai_judgment == "OK-i" else (ai_judgment or "ERR:UNKNOWN")
+    response_ai_judgment = "OK" if ai_judgment in ("OK-i", "OK-s") else (ai_judgment or "ERR:UNKNOWN")
     if not parsed:
         return f"AOI@;;;;{response_ai_judgment}"
     return build_response(
@@ -1329,7 +1370,7 @@ def build_qjpg_response(
         results or [],
         product_resolution,
         config,
-        bomb_only=ai_judgment in ("OK", "OK-i"),
+        bomb_only=ai_judgment in ("OK", "OK-i", "OK-s"),
     )
     if not ai_judgment.startswith("ERR:"):
         records.extend((parsed or {}).get("aoi_passthrough_records", []))
@@ -1351,7 +1392,7 @@ def build_qjpg_response(
         )
     elif records:
         defect_field = "NG" + "".join(records)
-    elif ai_judgment == "OK-i":
+    elif ai_judgment in ("OK-i", "OK-s"):
         defect_field = "OK"
     elif ai_judgment == "OK":
         defect_field = "OK"
@@ -3282,7 +3323,7 @@ class CAPIServer:
                         )
                         continue
 
-                    # 執行推論（不含 Heatmap 儲存，快速回覆）
+                    # 執行推論與側拍放行判定；主推論 Heatmap 於回覆後儲存。
                     start_time = time.time()
                     InferenceLogCapture.start_capture()
                     ai_judgment, ng_details, inference_results, is_duplicate, omit_image_raw, aoi_report, omit_overexposed, omit_overexposure_info, within_spec_info = self._process_request(parsed)
@@ -3309,7 +3350,7 @@ class CAPIServer:
                     logger.info(f"[{client_addr}] >> {_response_log_text(response)} ({processing_seconds:.2f}s){dup_tag} [{request_context}]")
                     
                     # 更新全域狀態 - 判定結果與推論結束
-                    j_simple = "OK" if ai_judgment in ("OK", "OK-i") else ("NG" if ai_judgment.startswith("NG") else "ERR")
+                    j_simple = "OK" if ai_judgment in ("OK", "OK-i", "OK-s") else ("NG" if ai_judgment.startswith("NG") else "ERR")
                     with server_status.lock:
                         server_status.active_inferences = max(0, server_status.active_inferences - 1)
                         server_status.last_inference_time = response_time
@@ -3322,7 +3363,7 @@ class CAPIServer:
                             "model_id": parsed["model_id"],
                             "machine_no": parsed["machine_no"],
                             "judgment": j_simple,
-                            "detail": ai_judgment if ai_judgment == "OK-i" or j_simple != "OK" else "OK",
+                            "detail": ai_judgment if ai_judgment in ("OK-i", "OK-s") or j_simple != "OK" else "OK",
                             "time": datetime.now().strftime("%H:%M:%S"),
                             "duration": f"{processing_seconds:.2f}s"
                         }
@@ -3598,13 +3639,15 @@ class CAPIServer:
         parsed: Dict,
     ) -> Tuple[str, str, List, bool, Any, Dict, bool, str, Optional[Dict[str, Any]]]:
         """
-        處理推論請求（僅推論，不含 Heatmap 儲存）
+        處理推論與側拍放行判定（主推論 Heatmap 於背景儲存）
 
         Returns:
             (ai_judgment, ng_details_json, inference_results, ..., within_spec_info)
             - inference_results: List[ImageResult] 供背景儲存使用
         """
         # 依 model_id 取得對應推論器（per-machine dispatcher）
+        parsed.pop("_side_white_payload", None)
+        parsed.pop("_side_white_output_dir", None)
         model_id = parsed.get("model_id", "")
         inferencer = self._get_or_create_inferencer(model_id)
 
@@ -3810,8 +3853,8 @@ class CAPIServer:
                     } for d in passthrough_defects)
                     ng_details = json.dumps(details, ensure_ascii=False)
                     logger.info(
-                        "[AOI_PASSTHROUGH] Glass=%s records=%s; forwarded without "
-                        "inference; bypass within-spec OK-i conversion",
+                        "[AOI_PASSTHROUGH] Glass=%s records=%s; pending side decision; "
+                        "bypass within-spec OK-i conversion",
                         parsed.get("glass_id", ""),
                         ",".join(parsed["aoi_passthrough_records"]),
                     )
@@ -3837,6 +3880,14 @@ class CAPIServer:
                             within_spec_info.get("status", "unknown"),
                             within_spec_info.get("reason", ""),
                         )
+
+                if getattr(inferencer.config, "side_white_detection_enabled", False):
+                    output_dir = (Path(getattr(getattr(self, "heatmap_manager", None), "base_dir", "heatmaps"))
+                                  / datetime.now().strftime("%Y%m%d") / f"side_white_{uuid.uuid4().hex}")
+                    ai_judgment = apply_side_white_inference(
+                        parsed, results, ai_judgment, ng_details, aoi_report, inferencer.config,
+                        output_dir, self._snapshot_side_white_context(parsed, inferencer.config),
+                    )
 
                 # All score/judgment computation is complete. Keep the GPU lock
                 # until optional cache maintenance finishes; never reacquire it.
@@ -4043,7 +4094,12 @@ class CAPIServer:
                     source="inference",
                 )
 
-            if side_white_enabled:
+            if parsed.get("_side_white_payload") is not None:
+                self.db.save_side_white_result(
+                    record_id, parsed["_side_white_payload"],
+                    heatmap_dir=parsed.get("_side_white_output_dir", ""),
+                )
+            elif side_white_enabled:
                 from capi_side_white import prepare_aoi_context
                 side_context = prepare_aoi_context(
                     side_white_context, aoi_machine_coords_str, ng_details, image_results_data,

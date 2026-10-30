@@ -1,6 +1,6 @@
 const RETENTION_PARAM = 'data_retention_policy';
 const RETENTION_FIELDS = [
-    ['ok_retain_days', 'OK／OK-i 判定紀錄', '包含 AOI NG → AI OK 的「AI 救回」。到期後，玻璃 ID 與判定紀錄將無法搜尋。'],
+    ['ok_retain_days', 'OK／OK-i／OK-s 判定紀錄', '包含 AOI NG → AI OK 的「AI 救回」。到期後，玻璃 ID 與判定紀錄將無法搜尋。'],
     ['ng_retain_days', 'NG／錯誤等其他判定紀錄', '包含 NG、ERR 等判定。到期後刪除主紀錄及相關影像結果。'],
     ['tile_retain_days', 'Tile 切塊明細', '切塊分數、座標、判定與相關刮痕覆核。到期後仍可查尚未到期的主紀錄。'],
     ['heatmap_retain_days', '熱圖與相關檢查圖片', '包含已產生的熱圖、規格內複判圖及 MARK 檢查圖；0 表示不自動清理這些圖片。'],

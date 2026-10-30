@@ -82,10 +82,10 @@ def test_formal_ok_and_invalid_results_are_distinguished(formal):
         assert panel["text"] == "無法試算"
 
 
-def test_remaining_aoi_points_keep_the_panel_ng_even_without_other_screens():
+def test_aoi_points_without_side_anomalies_can_complete_whole_panel_release():
     row = report_row(("mark", "unknown"))
     panel = side_white_view(row)["panel"]
-    assert panel["projected"] == "NG" and "CSJBL 點未符合" in panel["reason"]
+    assert panel["projected"] == "OK" and panel["state"] == "eligible"
 
 
 def test_repeated_glass_ids_keep_separate_whole_panel_results():

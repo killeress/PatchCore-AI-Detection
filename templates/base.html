@@ -7,6 +7,7 @@
     <title>{% if host_identity %}[{{ host_identity|e }}] {% endif %}{% block title %}{{ station_name }} AI 推論伺服器{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link href="/static/css/fonts.css" rel="stylesheet">
+    <script src="/static/js/side_image_viewer.js" defer></script>
     <script src="/static/js/tailwindcss.js"></script>
     <script>
         tailwind.config = {
@@ -251,6 +252,13 @@
             background: rgba(34, 197, 94, 0.15);
             color: var(--ok);
             border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+
+        .badge-ok-s {
+            background: rgba(168, 85, 247, 0.15);
+            color: #C084FC;
+            border: 1px solid rgba(168, 85, 247, 0.35);
+            text-transform: none;
         }
 
         .badge-ok-i {
@@ -685,6 +693,7 @@
                         <span><strong class="text-green-400">OK</strong> 無有效缺陷</span>
                         <span><strong class="text-red-400">NG</strong> 真實缺陷</span>
                         <span><strong class="text-cyan-300">OK-i</strong> 規格內轉 OK</span>
+                        <span><strong style="color:#C084FC">OK-s</strong> 側拍轉 OK</span>
                         <span><strong class="text-yellow-500">DUST</strong> 表面污染濾除</span>
                         <span><strong class="text-slate-300">EXCLUDED</strong> 不檢測區</span>
                         <span><strong class="text-fuchsia-300">BOMB</strong> 模擬缺陷</span>

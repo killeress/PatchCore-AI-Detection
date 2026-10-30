@@ -110,9 +110,13 @@ def test_statistics_count_the_sticker_record_once_and_preserve_formal_record(tmp
         ng_images=1, ng_details=json.dumps(row["ng_details"]), request_time="2026-10-28 12:00:00",
         response_time="2026-10-28 12:00:01", processing_seconds=1, client_response_text="original",
         aoi_machine_coords=json.dumps(row["aoi_machine_coords"]))
+    conn = db._get_conn()
+    conn.execute("UPDATE inference_records SET created_at='2026-10-28 12:00:00' WHERE id=?", (record_id,))
+    conn.commit()
+    conn.close()
     db.save_side_white_result(record_id, row["payload"])
     before = db.get_record_detail(record_id)
-    result = db.get_side_statistics(start_date="2026-10-28", end_date="2026-10-28")
+    result = db.get_side_statistics(start_date="2026-10-28", end_date="2026-10-28", shift="day")
     assert result["conversion_summary"]["omit"] == {"points": 3, "records": 1}
     assert result["conversion_summary"]["eligible_records"] == 1
     assert db.get_record_detail(record_id) == before
@@ -154,8 +158,8 @@ def test_treatment_conclusions_are_visible_without_nested_evidence_disclosures(s
     parser = DisclosureParser()
     parser.feed(html)
     assert '<div class="sw-conclusion sw-tone-muted" data-sw-treatment="mark">' in html
-    assert parser.treatments == [("sticker", int(statistics)), ("mark", int(statistics)), ("tape", int(statistics))]
+    assert parser.treatments == [(key, int(statistics)) for key in ("sticker", "mark", "tape", "clear")]
     assert parser.details == 2 + int(statistics)  # Legend help and detection details.
     assert parser.maximum == 1 + int(statistics)
-    assert html.count('<figure>') == 3
+    assert html.count('<figure>') == 3 + 3 * len(row["aoi_machine_coords"]["W0F00000"])
     assert '正式結果：NG' in html and 'AOI 3 點可轉 OK' in html

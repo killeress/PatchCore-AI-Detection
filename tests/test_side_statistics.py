@@ -1,6 +1,7 @@
 """AOI-to-side geometry, report denominators, and observation-only review storage."""
 import json
 import threading
+from datetime import datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -43,6 +44,10 @@ def record(db, *, coords="", ng_details="[]", status=None, when="2026-10-22 12:0
         machine_judgment="NG", ai_judgment="NG", image_dir="samples", total_images=1, ng_images=1,
         ng_details=ng_details, request_time=when, response_time=when, processing_seconds=.1,
         client_response_text="NG;CSJBL0040000200W0F00000,", aoi_machine_coords=coords)
+    conn = db._get_conn()
+    conn.execute("UPDATE inference_records SET created_at=? WHERE id=?", (when, record_id))
+    conn.commit()
+    conn.close()
     result_id = None
     if status:
         result_id = db.save_side_white_result(record_id, payload or {"status": status, "algorithm": "test", "candidates": []})
@@ -55,6 +60,7 @@ def db(tmp_path):
 
 
 def query(db, **kwargs):
+    kwargs.setdefault("shift", "day")
     return db.get_side_statistics(start_date="2026-10-22", end_date="2026-10-22", **kwargs)
 
 
@@ -87,12 +93,12 @@ def test_product_coordinates_map_through_front_plane_and_keep_raw_orientation(ro
 def test_distance_selects_references_without_matching_the_aoi_point():
     row = mapped_row()
     row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(440, 200), coordinate(800, 400)]})
-    assert compare_side_record(row, 31)["points"][0]["status"] == "unmatched"
+    assert compare_side_record(row, 31)["points"][0]["status"] == "no_anomaly"
     assert compare_side_record(row, 31)["points"][0]["candidate_ids"] == [1]
     assert compare_side_record(row, 31)["points"][0]["retained_candidate_ids"] == []
-    assert compare_side_record(row, 29)["points"][0]["status"] == "unmatched"
+    assert compare_side_record(row, 29)["points"][0]["status"] == "no_anomaly"
     result = compare_side_record(row, 31)
-    assert result["points"][1]["status"] == "unmatched" and result["mapped"] == 2
+    assert result["points"][1]["status"] == "no_anomaly" and result["mapped"] == 2
     assert result["points"][1]["side_xy"]  # a missed point still has a location and crop
 
 
@@ -101,7 +107,7 @@ def test_excluded_dust_and_bombs_are_not_counted_as_retained_matches(disposition
     row = mapped_row()
     row["payload"]["candidates"][0].update(disposition=disposition, bomb_ids=bombs)
     point = compare_side_record(row)["points"][0]
-    assert point["status"] == "filtered" and point["candidate_ids"] == [1]
+    assert point["status"] == ("unverified" if bombs else "filtered") and point["candidate_ids"] == [1]
     assert point["retained_candidate_ids"] == []
 
 
@@ -130,7 +136,7 @@ def test_mark_point_can_clear_without_clearing_other_aoi_points(rotated):
     assert result["mark_suppressed"] == 1 and result["matched"] == 0
     assert result["points"][0]["status"] == "mark_suppressed"
     assert result["points"][0]["retained_candidate_ids"] == []
-    assert result["points"][1]["status"] == "unmatched"
+    assert result["points"][1]["status"] == "no_anomaly"
     view = side_white_view(dict(row, comparison=result))
     assert view["mark"]["tone"] == "ok"
     assert view["mark"]["text"] == "已屏蔽 · 1 點可轉 OK"
@@ -260,7 +266,7 @@ def test_previews_apply_saved_crop_and_resize_and_reject_external_paths(tmp_path
     image = render_comparison_image(row, comparison, root)
     xy = np.rint((np.array(comparison["points"][0]["side_xy"]) - [100, 150]) * .5).astype(int)
     assert np.array_equal(image[xy[1], xy[0]], [90, 90, 90])
-    assert np.array_equal(image[xy[1], xy[0] + 3], annotation_color("aoi"))
+    assert np.array_equal(image[xy[1], xy[0] + 16], annotation_color("aoi"))
     crop = render_comparison_image(row, comparison, root, point_id=1)
     assert 90 <= crop.shape[0] < 300 and 90 <= crop.shape[1] < 500
     assert np.all(crop == 90)  # local evidence is not covered by the AOI marker
@@ -272,7 +278,7 @@ def test_previews_apply_saved_crop_and_resize_and_reject_external_paths(tmp_path
     assert np.all(render_comparison_image(row, comparison, root, point_id=1) == 40)
     overview = render_comparison_image(row, comparison, root)
     assert np.array_equal(overview[xy[1], xy[0]], [225, 225, 225])
-    assert np.array_equal(overview[xy[1], xy[0] + 3], annotation_color("aoi"))
+    assert np.array_equal(overview[xy[1], xy[0] + 16], annotation_color("aoi"))
     del row["payload"]["artifacts"]["side_clean"]
     with pytest.raises(FileNotFoundError):
         render_comparison_image(row, comparison, root / "different")
@@ -286,7 +292,7 @@ def test_previews_apply_saved_crop_and_resize_and_reject_external_paths(tmp_path
 def test_groups_and_summary_are_independent_of_pagination_and_include_not_run(db):
     coords = json.dumps({"W0F00000": [coordinate()]})
     record(db, coords=coords, status="CANDIDATES", glass="A_1")
-    _, reviewed = record(db, coords=coords, status="NO_CANDIDATES", when="2026-10-22 23:59:59")
+    _, reviewed = record(db, coords=coords, status="NO_CANDIDATES", when="2026-10-22 19:29:59")
     pending_id, _ = record(db, coords=coords)  # inspection disabled or queued
     record(db, status="CANDIDATES")
     record(db, status="NO_IMAGE")
@@ -409,7 +415,7 @@ def test_report_row_escapes_identity_and_shows_no_match_crops_without_review_con
     html = env.get_template("_side_statistics_row.html").render(row=row, comparison=compare_side_record(row))
     assert '<script>bad()</script>' not in html and '&lt;script&gt;bad()&lt;/script&gt;' in html
     assert '<img src=x onerror=bad()>' not in html
-    assert 'AOI 報點未命中候選' in html and '&amp;point=1' in html
+    assert 'AOI 位置無異常 → OK' in html and '&amp;point=1' in html
     assert '查看明細' in html and '<form' not in html
     for label in ('人工驗證', '待驗證', '驗證人', '儲存驗證結果', 'data-review-'):
         assert label not in html
@@ -426,13 +432,14 @@ def test_mark_suggestion_is_shown_per_point_and_keeps_formal_ng_label():
     html = env.get_template("_side_statistics_row.html").render(
         row=row, comparison=compare_side_record(row), review_decisions=REVIEW_DECISIONS)
     assert "已屏蔽 · 1 點可轉 OK" in html
-    assert "正式結果：NG" in html and "AOI 報點未命中候選" in html
+    assert "正式結果：NG" in html and "AOI 位置無異常 → OK" in html
 
 
 def test_side_report_dependencies_are_in_codeonly_release_inputs():
     from scripts.build_deploy_zip import CODE_FILES, _is_codeonly_excluded_file
     for path in ("capi_side_report.py", "templates/_side_statistics.html",
-                 "templates/_side_statistics_row.html", "static/js/side_statistics.js"):
+                 "templates/_side_statistics_row.html", "static/js/side_statistics.js",
+                 "static/js/side_image_viewer.js"):
         assert path in CODE_FILES
         assert not _is_codeonly_excluded_file(path)
 
@@ -464,9 +471,68 @@ def test_original_crop_keeps_file_pixels_depth_and_orientation(tmp_path, rotated
         crop_original_image(row, comparison, tmp_path, "side", 1)
 
 
-def test_http_report_images_and_review_roundtrip(db, tmp_path):
+@pytest.mark.parametrize("rotated", [False, True])
+@pytest.mark.parametrize("product_xy", [(400, 200), (0, 0), (1000, 500)])
+def test_three_original_crops_share_size_and_keep_native_pixels_at_edges(tmp_path, rotated, product_xy):
+    from capi_side_report import crop_original_image
+
+    row = mapped_row(rotated)
+    row["aoi_machine_coords"] = json.dumps({"W0F00000": [coordinate(*product_xy)]})
+    payload = row["payload"]
+    payload.update(front_size=[1600, 900], front_image="front.tif", side_image="side.tif")
+    front = np.array([[0, 0], [1599, 0], [1599, 899], [0, 899]], np.float32)
+    side = np.array([[0, 0], [1199, 0], [1199, 799], [0, 799]], np.float32)
+    payload["mapping"].update(front_polygon=front.tolist(), matrix=cv2.getPerspectiveTransform(side, front).tolist())
+    payload["omit"] = {"image": "omit.tif", "coordinate_space": "side_detection_pixels", "size": [1200, 800]}
+    comparison = compare_side_record(row)
+    point = comparison["points"][0]
+    size = point["crop_size"]
+    shapes = []
+    for kind in ("front", "side", "omit"):
+        coordinate_kind = "side" if kind == "omit" else kind
+        width, height = payload[coordinate_kind + "_size"]
+        yy, xx = np.mgrid[:height, :width]
+        original = np.dstack([yy, xx, np.full_like(yy, 40000)]).astype(np.uint16)
+        assert cv2.imwrite(str(tmp_path / (kind + ".tif")), original)
+        crop = crop_original_image(row, comparison, tmp_path, kind, 1)
+        shapes.append(crop.shape)
+        xy = np.rint(point[coordinate_kind + "_raw_xy"]).astype(int)
+        assert np.array_equal(crop[size // 2, size // 2], original[xy[1], xy[0]])
+        left, top = xy - size // 2
+        x1, y1, x2, y2 = max(0, left), max(0, top), min(width, left + size), min(height, top + size)
+        expected = np.zeros_like(crop)
+        expected[y1 - top:y2 - top, x1 - left:x2 - left] = original[y1:y2, x1:x2]
+        assert np.array_equal(crop, expected)  # no interpolation, rotation, annotation or colour changes
+    assert shapes == [(size, size, 3)] * 3
+
+
+def test_three_preview_fallbacks_share_square_size_and_preserve_aspect(tmp_path):
+    row = mapped_row()
+    payload = row["payload"]
+    # Different saved resolutions still use the common crop canvas.
+    for kind, scale in (("front", .25), ("side", .5), ("omit", .75)):
+        payload["preview_bounds"][kind] = [0, 0, 1200, 800]
+        image = np.full((round(800 * scale), round(1200 * scale), 3), 90, np.uint8)
+        path = tmp_path / (kind + ".jpg")
+        assert cv2.imwrite(str(path), image)
+        payload["artifacts"][kind] = str(path)
+    comparison = compare_side_record(row)
+    size = comparison["points"][0]["crop_size"]
+    for kind in ("front", "side", "omit"):
+        crop = render_comparison_image(row, comparison, tmp_path, kind, 1)
+        assert crop.shape == (size, size, 3)
+        assert np.all(crop == 90)
+
+
+def test_http_report_images_and_review_roundtrip(db, tmp_path, monkeypatch):
     from capi_web import CAPIWebHandler
 
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 10, 22, 12)
+
+    monkeypatch.setattr("capi_database.datetime", FixedDateTime)
     payload = mapped_row()["payload"]
     payload["status"] = "NO_CANDIDATES"
     payload["candidates"] = []
@@ -510,11 +576,20 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
 
     try:
         assert 'id="ss-summary"' in get("/ric?tab=side-statistics").decode("utf-8")
-        query_url = "/api/ric/side-stats?start_date=2026-10-22&end_date=2026-10-22"
+        query_url = "/api/ric/side-stats?start_date=2026-10-22&end_date=2026-10-22&shift=day"
         data = json.loads(get(query_url))
-        assert data["total"] == 1 and "AOI 報點未命中候選" in data["rows_html"]
+        assert data["total"] == 1 and "AOI 位置無異常 → OK" in data["rows_html"]
         assert data["conversion_summary"]["scope"]["denominator"] == 1
         assert data["conversion_summary"]["scope"]["before_pct"] == 100
+        current = json.loads(get("/api/ric/side-stats"))
+        assert current["time_scope"]["mode"] == "current"
+        assert current["time_scope"]["start"] == "2026-10-22 07:30:00"
+        assert current["conversion_summary"] == data["conversion_summary"]
+        night = json.loads(get(query_url.replace("shift=day", "shift=night")))
+        assert night["total"] == 0 and night["conversion_summary"]["scope"]["denominator"] == 0
+        with pytest.raises(HTTPError) as error:
+            get(query_url.replace("shift=day", "shift=invalid"))
+        assert error.value.code == 400
         eligible = json.loads(get(query_url + "&conversion=eligible"))
         assert eligible["total"] == 0 and eligible["conversion_summary"] == data["conversion_summary"]
         with pytest.raises(HTTPError) as error:
@@ -525,7 +600,7 @@ def test_http_report_images_and_review_roundtrip(db, tmp_path):
         comparison = compare_side_record(db.get_side_statistics_record(result_id))
         x, y = np.rint((np.array(comparison["points"][0]["side_xy"]) - [100, 150]) * .5).astype(int)
         assert np.array_equal(overview[y, x], [225, 225, 225])
-        assert np.array_equal(overview[y, x + 3], annotation_color("aoi"))
+        assert np.array_equal(overview[y, x + 16], annotation_color("aoi"))
         clean_preview = cv2.imdecode(np.frombuffer(get(f"/api/side-white/image?id={result_id}&kind=side_clean"), np.uint8), cv2.IMREAD_COLOR)
         assert np.all(clean_preview == 90)
         assert "貼紙／表面異物" in data["rows_html"] and "kind=omit" in data["rows_html"]

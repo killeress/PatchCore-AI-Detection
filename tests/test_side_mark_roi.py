@@ -77,7 +77,7 @@ def test_roi_mark_never_hides_other_defects_or_incomplete_evidence(issue):
     before = copy.deepcopy(row)
     comparison = compare_side_record(row, tolerance=50)
     assert comparison["mark_suppressed"] == 0
-    assert not record_conversion(row, comparison)["eligible"]
+    assert record_conversion(row, comparison)["eligible"] == (issue != "outside_roi" and bool(comparison["no_anomaly"]))
     view = side_white_view(dict(row, comparison=comparison))
     assert view["mark"]["tone"] != "ok"
     if issue in {"other_candidate", "partial_mark"}:
@@ -111,7 +111,7 @@ def test_unrelated_or_invalid_local_masks_cannot_create_mark_evidence(issue):
         exclusion["bbox"][2] = 0
     comparison = compare_side_record(row, tolerance=50)
     assert comparison["mark_suppressed"] == 0
-    assert not record_conversion(row, comparison)["eligible"]
+    assert record_conversion(row, comparison)["eligible"] == bool(comparison["no_anomaly"])
 
 
 @pytest.mark.parametrize("other_ng", [False, True])
@@ -119,7 +119,7 @@ def test_roi_mark_updates_projection_only_when_all_formal_ng_is_covered(tmp_path
     db = CAPIDatabase(str(tmp_path / "roi.db"))
     row = roi_row()
     row["payload"]["candidates"].extend([
-        {"id": 7, "disposition": "retained", "side_contour": [[145, 95], [155, 95], [155, 105], [145, 105]]},
+        {"id": 7, "disposition": "retained", "side_contour": [[146, 95], [156, 95], [156, 105], [146, 105]]},
         {"id": 10, "disposition": "retained", "side_contour": [[125, 70], [135, 70], [135, 80], [125, 80]]},
     ])
     if other_ng:
@@ -146,7 +146,7 @@ def test_an_omit_point_keeps_its_category_when_a_mark_is_only_nearby():
 def test_candidates_7_and_10_nearby_do_not_block_mark_when_neither_hits_aoi(rotated, with_bombs):
     row = roi_row(rotated=rotated)
     payload = row["payload"]
-    for candidate_id, contour in [(7, [[145, 95], [155, 95], [155, 105], [145, 105]]),
+    for candidate_id, contour in [(7, [[146, 95], [156, 95], [156, 105], [146, 105]]),
                                   (10, [[125, 70], [135, 70], [135, 80], [125, 80]])]:
         payload["candidates"].append({"id": candidate_id, "disposition": "retained",
             "bomb_ids": [1] if with_bombs else [], "side_contour": contour})

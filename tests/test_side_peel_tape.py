@@ -73,7 +73,9 @@ def test_position_or_incomplete_evidence_never_creates_a_tape_ok(issue):
         row["status"] = "ERROR"
     comparison = compare_side_record(row, tolerance=500)
     assert comparison["tape_suppressed"] == 0
-    assert not record_conversion(row, comparison)["eligible"]
+    # No tape classification is created; a clear location can independently pass.
+    assert record_conversion(row, comparison)["eligible"] == (
+        issue != "wrong_corner" and comparison["no_anomaly"] == len(comparison["points"]))
 
 
 @pytest.mark.parametrize("xy", [(364.9, 228), (393, 228), (375, 221.9), (375, 234)])
@@ -161,16 +163,20 @@ def test_three_classes_count_points_separately_and_records_once(tmp_path):
             ng_images=1, ng_details=json.dumps(row["ng_details"]), request_time="2026-10-28 12:00:00",
             response_time="2026-10-28 12:00:01", processing_seconds=1, client_response_text="original",
             aoi_machine_coords=json.dumps(row["aoi_machine_coords"]))
+        conn = db._get_conn()
+        conn.execute("UPDATE inference_records SET created_at='2026-10-28 12:00:00' WHERE id=?", (record_id,))
+        conn.commit()
+        conn.close()
         db.save_side_white_result(record_id, row["payload"])
         record_ids.append(record_id)
     before = [db.get_record_detail(i) for i in record_ids]
-    query = lambda **kw: db.get_side_statistics(start_date="2026-10-28", end_date="2026-10-28", **kw)
+    query = lambda **kw: db.get_side_statistics(start_date="2026-10-28", end_date="2026-10-28", shift="day", **kw)
     result = query()
     s = result["conversion_summary"]
     assert s["tape"] == {"points": 6, "records": 3}
     assert s["mark"] == {"points": 1, "records": 1} and s["omit"] == {"points": 3, "records": 1}
     assert s["mixed_records"] == s["both_records"] == 1
-    assert s["eligible"] == {"mark": 0, "omit": 0, "tape": 1, "mixed": 1}
+    assert s["eligible"] == {"mark": 0, "omit": 0, "tape": 1, "clear": 0, "mixed": 1}
     assert s["eligible_records"] == 2 and s["blocked_records"] == 1
     assert s["scope"]["scenarios"]["tape"]["converted"] == 1
     assert s["scope"]["scenarios"]["combined"]["remaining_ng"] == 1

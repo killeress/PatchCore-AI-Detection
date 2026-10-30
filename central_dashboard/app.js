@@ -1855,6 +1855,9 @@
         if (judgment === "OK-I") {
             return "OK-i";
         }
+        if (judgment === "OK-S") {
+            return "OK-s";
+        }
         if (judgment.startsWith("OK")) {
             return "OK";
         }
@@ -1868,7 +1871,7 @@
         const badge = card.querySelector('[data-field="latest-judgment"]');
         badge.classList.remove("is-ok", "is-ng", "is-err");
         const judgment = displayJudgment(value);
-        if (judgment === "OK" || judgment === "OK-i") {
+        if (judgment === "OK" || judgment === "OK-i" || judgment === "OK-s") {
             badge.classList.add("is-ok");
         } else if (judgment === "NG") {
             badge.classList.add("is-ng");
