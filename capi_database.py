@@ -2617,6 +2617,7 @@ class CAPIDatabase:
                           THEN 'day' ELSE 'night' END AS shift,
                      COUNT(*) as total,
                      SUM(CASE WHEN ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END) as ok_count,
+                     SUM(CASE WHEN ai_judgment = 'OK-s' THEN 1 ELSE 0 END) as ok_s_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count
@@ -2653,6 +2654,7 @@ class CAPIDatabase:
                         "end": shift_end.strftime("%Y-%m-%d %H:%M:%S"),
                         "total": int(row["total"]) if row else 0,
                         "ok_count": int(row["ok_count"] or 0) if row else 0,
+                        "ok_s_count": int(row["ok_s_count"] or 0) if row else 0,
                         "ng_count": int(row["ng_count"] or 0) if row else 0,
                         "aoi_ng_count": int(row["aoi_ng_count"] or 0) if row else 0,
                         "err_count": int(row["err_count"] or 0) if row else 0,
@@ -2679,6 +2681,7 @@ class CAPIDatabase:
                 """SELECT
                      COUNT(*) as total,
                      SUM(CASE WHEN ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END) as ok_count,
+                     COALESCE(SUM(CASE WHEN ai_judgment = 'OK-s' THEN 1 ELSE 0 END), 0) as ok_s_count,
                      SUM(CASE WHEN ai_judgment = 'NG' OR ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END) as ng_count,
                      SUM(CASE WHEN machine_judgment != '' AND machine_judgment != 'OK' THEN 1 ELSE 0 END) as aoi_ng_count,
                      SUM(CASE WHEN ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END) as err_count,

@@ -373,6 +373,38 @@ def test_central_dashboard_all_api_keeps_both_factories(tmp_path):
     assert "networkPrefix" not in payload
 
 
+def test_ok_s_dashboard_config_keeps_all_lines_but_only_readonly_fields(tmp_path):
+    db = CAPIDatabase(tmp_path / "dashboard.db")
+    config = db.get_central_dashboard_config()
+    config["lines"][0].update(line="AAPI01", enabled=False)
+    db.save_central_dashboard_config(config)
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = db
+    handler._detect_central_dashboard_webserver_ip = lambda: "10.172.99.10"
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append((status, data))
+
+    handler._handle_api_central_dashboard_ok_s_config()
+
+    status, payload = responses[-1]
+    assert status == 200
+    assert len(payload["lines"]) == 10
+    assert {line["factory"] for line in payload["lines"]} == {"MOD1", "MOD2"}
+    assert payload["lines"][0]["line"] == "AAPI01"
+    assert payload["lines"][0]["enabled"] is False
+    assert set(payload["lines"][0]) == {"id", "factory", "line", "pcName", "apiUrl", "enabled"}
+    assert set(payload) == {"title", "refreshIntervalSeconds", "requestTimeoutSeconds", "lines"}
+
+
+def test_ok_s_dashboard_config_reports_database_failure():
+    handler = object.__new__(CAPIWebHandler)
+    handler.db = None
+    responses = []
+    handler._send_json = lambda data, status=200, headers=None: responses.append((status, data))
+    handler._handle_api_central_dashboard_ok_s_config()
+    assert responses[-1][0] == 500
+
+
 def test_central_dashboard_pages_use_sqlite_config_and_settings_route():
     root = Path(__file__).resolve().parent.parent
     index_html = (root / "central_dashboard" / "index.html").read_text(

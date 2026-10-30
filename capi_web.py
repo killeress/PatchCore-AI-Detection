@@ -4026,6 +4026,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     self._handle_api_central_dashboard_config_all()
             elif path == "/api/central-dashboard/config":
                 self._handle_api_central_dashboard_config()
+            elif path == "/api/central-dashboard/ok-s-config":
+                self._handle_api_central_dashboard_ok_s_config()
             elif path == "/settings/login":
                 self._handle_settings_login_page(path)
             elif path == "/settings/logout":
@@ -6305,6 +6307,24 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 {"error": "無法讀取中控看板設定"},
                 status=500,
             )
+
+    def _handle_api_central_dashboard_ok_s_config(self):
+        """OK-s 效益看板：全部線體的唯讀清單，不按廠區／製程／啟用狀態過濾。"""
+        try:
+            config = self.db.get_central_dashboard_config(
+                self._load_central_dashboard_file_config()
+            )
+            fields = ("id", "factory", "line", "pcName", "apiUrl", "enabled")
+            self._send_json({
+                "title": config["title"],
+                "refreshIntervalSeconds": config["refreshIntervalSeconds"],
+                "requestTimeoutSeconds": config["requestTimeoutSeconds"],
+                "lines": [{key: line.get(key) for key in fields}
+                          for line in config.get("lines", [])],
+            })
+        except Exception as exc:
+            logger.error("Failed to load OK-s dashboard config: %s", exc)
+            self._send_json({"error": "無法讀取 OK-s 看板線體清單"}, status=500)
 
     def _handle_api_central_dashboard_config_all(self):
         """設定頁使用：回傳所有廠區設備，不套用 Web Server 網段過濾。"""

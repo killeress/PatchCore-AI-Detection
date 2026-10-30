@@ -144,12 +144,55 @@ def side_inference_decision(row):
             "conversion": conversion}
 
 
+def _remaining_ng_rows(details, points):
+    """Describe saved rejections without guessing report codes or coordinate spaces."""
+    from capi_image_naming import canonical_image_prefix
+
+    def number(value):
+        try:
+            value = float(value)
+            return value if np.isfinite(value) else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    rows = []
+    for defect in details:
+        if _covered_csjbl_ng(defect, points):
+            continue
+        defect = defect if isinstance(defect, dict) else {}
+        image = str(defect.get("image") or "").replace("\\", "/").rsplit("/", 1)[-1]
+        kind = str(defect.get("type") or "")
+        labels = {"ai_defect": "AI 檢出異常", "aoi_passthrough": "AOI 透傳 NG",
+                  "white_frame_aoi_gap": "白框 AOI 缺口", "white_frame_gap": "白框缺口",
+                  "white_frame_ng": "白框異常"}
+        if kind.startswith("cv_edge_") or defect.get("is_cv_edge"):
+            label = "CV 邊緣異常"
+        else:
+            label = labels.get(kind, f"正式 NG（{kind}）" if kind else
+                               "AI 檢出異常" if "tile_id" in defect or "score" in defect else "正式 NG 明細不足")
+        coordinates, coordinate_label = "未保存座標", ""
+        for x_key, y_key, label_text in (("product_x", "product_y", "產品座標"),
+                                        ("peak_x", "peak_y", "推論影像座標"),
+                                        ("x", "y", "影像框左上")):
+            x, y = number(defect.get(x_key)), number(defect.get(y_key))
+            if x is not None and y is not None:
+                coordinates = f"({x:g}, {y:g})"
+                coordinate_label = label_text
+                break
+        score = number(defect.get("score"))
+        rows.append({"image": image or "未保存來源", "image_prefix": canonical_image_prefix(image).upper(),
+                     "label": label, "defect_code": str(defect.get("defect_code") or ""),
+                     "coordinates": coordinates, "coordinate_label": coordinate_label,
+                     "score": f"{score:g}" if score is not None else "未保存",
+                     "score_label": "最大灰階差" if label == "CV 邊緣異常" else "分數"})
+    return rows
+
+
 def panel_projection(row, comparison, conversion):
     """Explain the same record-wide projection used by rejection-rate statistics."""
-    from capi_image_naming import canonical_image_prefix
     formal = str(row.get("ai_judgment") or "")
     panel = {"formal": formal, "projected": None, "state": "unavailable", "tone": "muted",
-             "text": "無法試算", "reason": "尚無有效正式判定", "remaining_sources": []}
+             "text": "無法試算", "reason": "尚無有效正式判定", "remaining_sources": [], "remaining_ng": []}
     if formal in {"OK", "OK-i", "OK-s"}:
         panel.update(projected=formal, state="already_ok", tone="ok", text=f"原本已 {formal}",
                      reason="沿用同次檢測的整片正式結果")
@@ -164,15 +207,13 @@ def panel_projection(row, comparison, conversion):
                          reason="各畫面的全部正式 NG 原因均已由側拍處理涵蓋")
         else:
             details = _json(row.get("ng_details"), None)
-            sources = []
-            for defect in details if isinstance(details, list) else []:
-                if isinstance(defect, dict) and not _covered_csjbl_ng(defect, comparison["points"]):
-                    prefix = canonical_image_prefix(str(defect.get("image") or "")).upper()
-                    if prefix and prefix not in sources:
-                        sources.append(prefix)
+            remaining = _remaining_ng_rows(details, comparison["points"]) if isinstance(details, list) else []
+            sources = list(dict.fromkeys(item["image_prefix"] for item in remaining if item["image_prefix"]))
+            panel["remaining_ng"] = remaining
             panel["remaining_sources"] = sources
-            if sources:
-                panel["reason"] = "仍有正式 NG：" + "、".join(sources)
+            if remaining:
+                labels = dict.fromkeys(item["image_prefix"] or "未保存來源" for item in remaining)
+                panel["reason"] = f"仍有 {len(remaining)} 筆正式 NG：" + "、".join(labels)
             elif not isinstance(details, list) or not details:
                 panel["reason"] = "正式 NG 明細不足，無法確認整片可轉 OK"
     elif formal:
@@ -797,6 +838,10 @@ def side_white_view(row, detail=None):
     missing_bounds = bool(payload.get("artifacts", {}).get("side")
                           and not payload.get("preview_bounds", {}).get("side"))
     conversion = source.get("conversion") or record_conversion(source, comparison)
+    panel = panel_projection(source, comparison, conversion)
+    if panel["state"] == "retained" and closed:
+        count = str(closed) if closed == len(points) else f"{closed}／{len(points)}"
+        headline, tone = f"側拍 {count} 點可轉 OK；整片仍為 NG", "warn"
     return {"headline": headline, "tone": tone, "sticker": sticker, "mark": mark, "tape": tape, "clear": clear,
             "legend": SIDE_ANNOTATION_LEGEND, "legacy_preview": legacy_preview,
             "missing_preview_bounds": missing_bounds,
@@ -804,7 +849,7 @@ def side_white_view(row, detail=None):
             "yellow_candidates": {"nearby": len(yellow_ids & yellow_nearby_ids), "total": len(yellow_ids)},
             "reference_candidates": {"nearby": len((retained_ids - yellow_ids) & nearby_ids),
                                      "total": len(retained_ids - yellow_ids)},
-            "conversion": conversion, "panel": panel_projection(source, comparison, conversion)}
+            "release_count": closed, "conversion": conversion, "panel": panel}
 
 
 def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference_marks=(),

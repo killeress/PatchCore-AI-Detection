@@ -1,0 +1,77 @@
+.oks-dashboard main { max-width: 1800px; margin: 0 auto; }
+.oks-dashboard .topbar { gap: 20px; }
+.oks-subtitle { margin: 10px 0 0; color: var(--muted); font-size: .9rem; }
+.oks-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.oks-dashboard button { cursor: pointer; }
+.oks-dashboard button, .oks-dashboard input, .oks-dashboard select {
+    color: var(--text); background: var(--surface); border: 1px solid var(--line-strong);
+    border-radius: 8px; padding: 10px 12px; font: inherit; min-height: 42px;
+}
+.oks-dashboard :is(button, a, input, select, summary, [tabindex]):focus-visible {
+    outline: 3px solid var(--cyan); outline-offset: 3px;
+}
+.oks-dashboard .oks-primary { color: var(--surface); background: var(--primary-dark); border-color: var(--primary-dark); font-weight: 700; }
+.oks-dashboard .oks-primary[aria-pressed="false"] { color: var(--primary); background: var(--surface); border-color: var(--primary); }
+.oks-query { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 18px 22px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 28px; }
+.oks-query form { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+.oks-query label { display: flex; flex-direction: column; gap: 6px; font-size: .8rem; color: var(--muted); }
+.oks-query-status { display: grid; gap: 8px; text-align: right; font-size: .88rem; }
+#oks-updated { color: var(--muted); }
+.oks-section-heading { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 16px; }
+.oks-section-heading p { margin-bottom: 0; }
+.oks-section-heading .eyebrow { margin-bottom: 6px; }
+#oks-coverage { color: var(--muted); font-size: .9rem; }
+#oks-coverage[data-partial="true"] { color: var(--amber); }
+.oks-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin-bottom: 32px; }
+.oks-metric { display: flex; flex-direction: column; gap: 14px; padding: 22px 20px; border: 1px solid var(--line);
+    border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.oks-metric > span { font-size: .88rem; font-weight: 700; color: var(--muted); }
+.oks-metric strong { font-size: clamp(1.55rem, 2.25vw, 2.5rem); line-height: 1.1; letter-spacing: -.035em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.oks-metric small { margin-top: auto; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+.oks-highlight { border-color: var(--green); background: var(--surface-blue); }
+.oks-highlight strong, .oks-positive { color: var(--green); }
+.oks-sort { display: flex; gap: 8px; align-items: center; font-size: .82rem; color: var(--muted); }
+.oks-table-wrap { overflow-x: auto; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); }
+.oks-table { width: 100%; border-collapse: collapse; text-align: right; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.oks-table :is(th, td) { padding: 17px 18px; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.oks-table th { font-size: .78rem; color: var(--muted); background: var(--surface-soft); white-space: normal; line-height: 1.5; }
+.oks-table :is(th, td):first-child, .oks-table :is(th, td):last-child { text-align: left; }
+.oks-table tbody tr:last-child td { border-bottom: 0; }
+.oks-table tbody tr:hover { background: var(--surface-soft); }
+.oks-line-info { display: block; max-width: 250px; margin-top: 6px; font-size: .75rem; color: var(--muted); white-space: normal; line-height: 1.6; }
+.oks-line-name { font-size: .95rem; }
+.oks-table .oks-empty { padding: 32px; text-align: center; color: var(--muted); white-space: normal; }
+.oks-table td.oks-drop-cell { min-width: 140px; color: var(--green); font-weight: 700; }
+.oks-bar { height: 4px; border-radius: 3px; background: var(--line); margin-top: 9px; overflow: hidden; }
+.oks-bar span { display: block; height: 100%; background: var(--green); }
+.oks-table td:last-child { white-space: normal; }
+.oks-badge { display: inline-block; max-width: 180px; padding: 5px 9px; border-radius: 6px; background: var(--surface-soft); font-size: .75rem; color: var(--muted); line-height: 1.6; }
+.oks-badge[data-state="ok"] { color: var(--green); }
+.oks-badge[data-state="unsupported"] { color: var(--amber); }
+.oks-badge[data-state="offline"], .oks-badge[data-state="error"] { color: var(--red); }
+.oks-error { color: var(--red); background: var(--surface); border: 1px solid var(--red); padding: 16px; border-radius: 8px; }
+.oks-error[hidden] { display: none; }
+.oks-method { margin-top: 24px; color: var(--muted); font-size: .85rem; line-height: 1.9; }
+.oks-method summary { cursor: pointer; color: var(--primary); font-weight: 700; }
+.oks-method ul { padding-left: 24px; max-width: 1100px; }
+.oks-method li + li { margin-top: 8px; }
+@media (max-width: 1100px) {
+    .oks-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .oks-highlight { grid-column: span 2; }
+    .oks-query { align-items: start; flex-direction: column; }
+    .oks-query-status { text-align: left; }
+    .oks-table :is(th, td) { padding: 14px 10px; }
+    .oks-line-info { max-width: 180px; }
+    .oks-table td.oks-drop-cell { min-width: 110px; }
+}
+@media (max-width: 650px) {
+    .oks-dashboard .topbar { align-items: start; flex-direction: column; padding: 22px 18px; }
+    .oks-dashboard main { padding: 20px 14px; }
+    .oks-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .oks-highlight { grid-column: 1 / -1; }
+    .oks-metric { padding: 18px 14px; }
+    .oks-section-heading { align-items: start; flex-direction: column; }
+    .oks-query { padding: 16px; }
+    .oks-query-status { line-height: 1.7; }
+}

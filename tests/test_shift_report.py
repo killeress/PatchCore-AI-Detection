@@ -95,6 +95,45 @@ def test_shift_report_empty_shift_returns_zeros(tmp_path):
     assert (stats["ok_count"] or 0) == 0
     assert (stats["ng_count"] or 0) == 0
     assert stats["shift_name"] == "白班"
+    assert stats["ok_s_count"] == 0
+
+
+def test_shift_report_counts_only_formal_ok_s_per_inference(tmp_path):
+    """側拍改善按檢測次數計數，OK/OK-i 不重複計改善，ERR 仍在分母。"""
+    db_path = tmp_path / "line.db"
+    db = CAPIDatabase(db_path)
+    for index, judgment in enumerate(["OK", "OK-i", "OK-s", "OK-s", "NG:CSJBL", "ERR:timeout"]):
+        _insert_record(db_path, "SAME_GLASS", judgment, f"2026-01-20 10:00:0{index}")
+    _insert_record(db_path, "OUTSIDE", "OK-s", "2026-01-20 19:30:00")
+
+    stats = db.get_shift_statistics_for("2026-01-20", "day")
+    assert stats["total"] == 6
+    assert stats["ok_count"] == 4
+    assert stats["ok_s_count"] == 2
+    assert stats["ng_count"] == 1
+    assert stats["err_count"] == 1
+    assert db.get_shift_statistics(datetime(2026, 1, 20, 11))["ok_s_count"] == 2
+
+    responses = []
+    _make_handler(db, responses)._handle_api_shift_report({"date": ["2026-01-20"], "shift": ["day"]})
+    status, payload, headers = responses[-1]
+    assert status == 200
+    assert payload["ok_s_count"] == 2
+    assert headers["Access-Control-Allow-Origin"] == "*"
+
+
+def test_ok_s_series_and_single_shift_agree_across_midnight(tmp_path):
+    db_path = tmp_path / "line.db"
+    db = CAPIDatabase(db_path)
+    for index, timestamp in enumerate(["2026-01-20 19:29:59", "2026-01-20 19:30:00",
+                                       "2026-01-21 02:00:00", "2026-01-21 07:29:59",
+                                       "2026-01-21 07:30:00"]):
+        _insert_record(db_path, f"S{index}", "OK-s", timestamp)
+    series = db.get_shift_series("2026-01-20", "2026-01-21")
+    assert [item["ok_s_count"] for item in series] == [1, 3, 1, 0]
+    for item in series:
+        single = db.get_shift_statistics_for(item["date"], item["shift"])
+        assert item["ok_s_count"] == single["ok_s_count"]
 
 
 def test_shift_report_rejects_invalid_shift(tmp_path):

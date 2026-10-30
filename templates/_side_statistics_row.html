@@ -6,7 +6,8 @@
         <span class="ss-record-title"><strong>{{ row.glass_id }}</strong><small class="ss-record-meta"><span>{{ row.machine_no }} · {{ row.model_id }}</span><span>入庫 {{ row.inference_created_at or '—' }}</span></small></span>
         <span class="ss-record-status ss-panel-result" data-panel-state="{{ view.panel.state }}">
             <small title="結合同一次檢測各畫面的正式 NG 原因">整片試算</small><strong class="sw-tone-{{ view.panel.tone }}">{{ view.panel.text }}</strong>
-            <span class="ss-panel-note" title="{{ view.panel.reason }}">{% if view.panel.formal == 'OK-s' %}已因側拍轉 OK{% elif view.comparison.no_anomaly %}AOI 位置無異常 {{ view.comparison.no_anomaly }} 點{% elif view.panel.state == 'eligible' %}全部 NG 原因已涵蓋{% elif view.panel.remaining_sources %}NG 來源：{{ view.panel.remaining_sources|join('、') }}{% elif view.panel.state == 'already_ok' %}沿用正式判定{% else %}{{ view.panel.reason }}{% endif %}</span>
+            <span class="ss-panel-note" title="{{ view.panel.reason }}">{% if view.panel.formal == 'OK-s' %}已因側拍轉 OK{% elif view.panel.state == 'retained' %}{{ view.panel.reason }}{% elif view.panel.state == 'eligible' %}全部 NG 原因已涵蓋{% elif view.panel.state == 'already_ok' %}沿用正式判定{% else %}{{ view.panel.reason }}{% endif %}</span>
+            {% if view.release_count %}<span class="ss-panel-note">側拍 {{ view.release_count }}／{{ view.comparison.points|length }} 點可轉 OK{% if view.comparison.no_anomaly %}（無異常 {{ view.comparison.no_anomaly }} 點）{% endif %}</span>{% endif %}
         </span>
         <span class="ss-record-breakdown">
             <span class="ss-record-status"><small>貼紙／表面異物</small><span class="sw-tone-{{ view.sticker.tone }}">{{ view.sticker.text }}</span></span>

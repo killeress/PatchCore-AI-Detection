@@ -11,19 +11,26 @@
     <div class="sw-head"><h3>側拍處理結果</h3><span class="sw-badge">{{ 'DEBUG 結果 · 僅本次測試' if debug_result else '正式側拍判定' if p.get('inference_decision') else '歷史側拍試算' }}</span></div>
     <div class="sw-verdict sw-tone-{{ view.tone }}" data-sw-conclusion>{{ view.headline }}</div>
     {% if p.get('inference_decision') %}{% set decision = p.inference_decision %}
-    <p class="sw-note" data-side-inference-decision>原始 AI={{ decision.original_judgment }} → 最終 {{ decision.final_judgment }} · {{ decision.reason }}</p>
+    <p class="sw-note" data-side-inference-decision>原始 AI={{ decision.original_judgment }} → 最終 {{ decision.final_judgment }} · {{ view.panel.reason if view.panel.state == 'retained' else decision.reason }}</p>
     {% endif %}
     <p class="sw-note">判定距離容錯：{{ view.comparison.match_tolerance }} 產品 px。容錯範圍內仍有保留異常時維持 NG；全部 CSJBL 點及正式 NG 原因均可放行時，正式轉 OK-s，testing 回覆 OK。</p>
     <div class="sw-conclusions">
-        {% for key, card in [('sticker', view.sticker), ('mark', view.mark), ('tape', view.tape), ('clear', view.clear)] %}<div class="sw-conclusion sw-tone-{{ card.tone }}" data-sw-treatment="{{ key }}">
+        {% for key, card in [('sticker', view.sticker), ('mark', view.mark), ('tape', view.tape), ('clear', view['clear'])] %}<div class="sw-conclusion sw-tone-{{ card.tone }}" data-sw-treatment="{{ key }}">
             <span class="sw-conclusion-title">{{ card.title }}</span><strong>{{ card.text }}</strong>{% if card.reason %}<p>{{ card.reason }}</p>{% endif %}
         </div>{% endfor %}
     </div>
-    {% if detail.get('ai_judgment') or sw.get('ai_judgment') %}<p class="sw-note">正式結果：{{ detail.get('ai_judgment') or sw.get('ai_judgment') }}{% if view.conversion.category != 'none' %} · <span data-conversion-state>{{ '全部 NG 原因已涵蓋，可整筆轉 OK' if view.conversion.eligible else view.conversion.reason }}</span>{% endif %}</p>{% endif %}
+    {% if detail.get('ai_judgment') or sw.get('ai_judgment') %}<p class="sw-note">正式結果：{{ detail.get('ai_judgment') or sw.get('ai_judgment') }}{% if view.conversion.category != 'none' %} · <span data-conversion-state>{{ '全部 NG 原因已涵蓋，可整筆轉 OK' if view.conversion.eligible else view.panel.reason }}</span>{% endif %}</p>{% endif %}
     {% if view.panel.formal %}<div class="sw-panel-projection" data-panel-state="{{ view.panel.state }}">
         <strong class="sw-tone-{{ view.panel.tone }}">整片試算：{{ view.panel.text }}</strong>
         <span>正式 {{ view.panel.formal }}{% if view.panel.projected %} → 試算 {{ view.panel.projected }}{% endif %}</span>
         <p class="sw-note">{{ view.panel.reason }}。{% if p.get('inference_decision') %}正式側拍判定已保存；重新推論只更新本次結果與回覆預覽，原始通訊紀錄保留。{% else %}此為歷史紀錄試算，原始正式結果及已送出的 AOI 回覆保留。{% endif %}</p>
+        {% if view.panel.remaining_ng %}<div class="sw-ng-blockers" data-sw-ng-blockers>
+            <h4>阻擋整片轉 OK-s 的 NG 明細 · {{ view.panel.remaining_ng|length }} 筆</h4>
+            <p class="sw-note">側拍可轉 OK 的 CSJBL 點不會消除下列正式 NG；座標沿用本次推論保存的資料。</p>
+            <div class="sw-scroll"><table class="sw-table"><thead><tr><th>畫面來源</th><th>NG 原因</th><th>座標（px）</th><th>分數／灰階差</th></tr></thead><tbody>
+                {% for ng in view.panel.remaining_ng %}<tr><td><code>{{ ng.image }}</code></td><td class="sw-wrap">{{ ng.label }}{% if ng.defect_code %}<br><code>{{ ng.defect_code }}</code>{% endif %}</td><td>{% if ng.coordinate_label %}<small>{{ ng.coordinate_label }}</small><br>{% endif %}<code>{{ ng.coordinates }}</code></td><td>{{ ng.score_label }} {{ ng.score }}</td></tr>{% endfor %}
+            </tbody></table></div>
+        </div>{% endif %}
     </div>{% endif %}
     {% if p.get('reason') %}<p class="sw-note">{{ p.reason }}</p>{% endif %}
     <div class="sw-legend" aria-label="圖片標記圖例">
@@ -71,6 +78,7 @@
     </div>
     {% else %}<p class="sw-note">此筆沒有已保存的 AOI CSJBL 座標，無法標出 AOI 報點。</p>{% endif %}
     <details class="sw-technical"><summary>檢測明細 · {{ p.get('candidates',[])|length }} 個原始候選</summary>
+        {% if p.get('inference_decision') and view.panel.state == 'retained' and p.inference_decision.reason != view.panel.reason %}<p class="sw-note">判定時保存原因：{{ p.inference_decision.reason }}</p>{% endif %}
         {% if view.candidates %}<div class="sw-scroll"><table class="sw-table"><thead><tr><th>候選</th><th>處理結論</th><th>OMIT 本體覆蓋</th><th>證據</th></tr></thead><tbody>
         {% for c in view.candidates %}<tr><td>#{{ c.id }}{% if c.aoi_hit %} · AOI 命中{% elif c.nearby %} · 附近參考{% endif %}</td><td>{{ c.label }}</td><td>{{ (c.core_overlap_ratio * 100)|round(1)|string + '%' if c.core_overlap_ratio is not none else '—' }}</td><td>{% if c.composite_key %}<a href="{{ sw_image_url(c.composite_key) }}" target="_blank" rel="noopener">同區域對照圖 ↗</a>{% else %}未保存對照圖{% endif %}</td></tr>{% endfor %}
         </tbody></table></div>{% endif %}
