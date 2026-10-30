@@ -49,16 +49,38 @@ test('zero production, zero conversions and missing support are distinct', () =>
     ]) assert.throws(() => dashboard.parseCounts(payload));
 });
 
-test('configuration preserves disabled lines and both factory networks/processes', () => {
+test('factory selection isolates summaries and keeps disabled lines in the selected factory', () => {
     const lines = [
-        {id: 'capi', apiUrl: 'http://10.172.1.1/api/status', line: 'CAPI01', enabled: true},
-        {id: 'aapi', apiUrl: 'http://10.174.1.1/api/status', line: 'AAPI02', enabled: false},
+        {id: 'mod1-capi', factory: 'MOD1', apiUrl: 'http://10.172.1.1/api/status', line: 'CAPI01', enabled: true},
+        {id: 'mod2-aapi', factory: 'MOD2', apiUrl: 'http://10.174.1.1/api/status', line: 'AAPI02', enabled: true},
+        {id: 'mod1-aapi', factory: 'MOD1', apiUrl: 'http://10.172.1.2/api/status', line: 'AAPI03', enabled: false},
     ];
     const config = dashboard.normalizeConfig({lines});
     assert.deepEqual(config.lines, lines);
+    assert.deepEqual(config.factories, ['MOD1', 'MOD2']);
+    const counts = {
+        'mod1-capi': {total: 100, ng: 10, converted: 10},
+        'mod2-aapi': {total: 900, ng: 90, converted: 0},
+        'mod1-aapi': {total: 100, ng: 30, converted: 10},
+    };
+    const selected = dashboard.factoryLines(config.lines, 'MOD1');
+    assert.deepEqual(selected.map(line => line.id), ['mod1-capi', 'mod1-aapi']);
+    const summary = dashboard.summarize(selected.map(line => ({state: 'ok', counts: counts[line.id]})));
+    assert.deepEqual(summary, {total: 200, ng: 40, converted: 20, before: 30, after: 20, drop: 10, covered: 2});
+    assert.deepEqual(dashboard.factoryLines(config.lines, 'MOD2').map(line => line.id), ['mod2-aapi']);
+    assert.deepEqual(dashboard.factoryLines(config.lines, 'MOD3'), []);
     assert.equal(config.refreshSeconds, 30);
     assert.equal(config.timeoutMs, 8000);
     assert.throws(() => dashboard.normalizeConfig({}));
+});
+
+test('missing factory labels stay in a separate selectable group and empty scope stays empty', () => {
+    const lines = [{id: 'unknown'}, {id: 'mod1', factory: ' MOD1 '}, {id: 'blank', factory: ' '}];
+    assert.deepEqual(dashboard.normalizeConfig({lines}).factories, ['未設定廠別', 'MOD1']);
+    assert.deepEqual(dashboard.factoryLines(lines, '未設定廠別').map(line => line.id), ['unknown', 'blank']);
+    assert.deepEqual(dashboard.factoryLines(lines, 'MOD1').map(line => line.id), ['mod1']);
+    assert.deepEqual(dashboard.normalizeConfig({lines: []}).factories, []);
+    assert.equal(dashboard.summarize(dashboard.factoryLines(lines, 'MOD2')), null);
 });
 
 const line = {apiUrl: 'http://line.test:8080/proxy/api/status'};

@@ -75,36 +75,44 @@ window.sideStatistics = (() => {
             label, field: 'conversion', value, count: () => count, cls: 'c-info',
         }, s);
         const scope = s.scope, combined = scope.scenarios.combined;
-        const subset = s.csjbl;
+        const formal = scope.formal_impact;
+        const subset = s.csjbl, subsetFormal = subset.formal_impact;
         const scenarios = [
             ['mark', '只轉 MARK', 'eligible_mark'], ['omit', '只轉貼紙／表面異物', 'eligible_omit'],
             ['tape', '只轉易撕貼', 'eligible_tape'], ['clear', '只轉 AOI 位置無異常', 'eligible_clear'],
             ['combined', '四類全部轉 OK（含混合）', 'eligible'],
         ];
-        target.innerHTML = `<div class="ss-card-head"><strong>側拍轉 OK 統計與試算</strong><span>已正式轉 OK-s ${number(s.converted_records)} 筆；歷史紀錄另列試算</span></div>
+        target.innerHTML = `<div class="ss-card-head"><strong>側拍正式放行成效</strong><span>查詢範圍已正式轉 OK-s ${number(formal.converted)} 筆</span></div>
+            <p class="ss-rate">整體排片率 <span>未套用側拍放行</span><strong>${rate(formal.before_ng, scope.denominator)}</strong> → <span>目前正式</span><strong class="c-ok">${rate(formal.after_ng, scope.denominator)}</strong>
+                <span>下降 ${pp(formal.drop_pp)} · 排片筆數相對減少 ${pct(formal.relative_drop_pct)}</span></p>
+            <p class="sw-note">未套用側拍放行的 NG＝目前 NG ${number(scope.ng)} + 正式 OK-s ${number(formal.converted)}＝${number(formal.before_ng)}；已減少排片 ${number(formal.converted)} 筆。</p>
+            <p class="sw-note">分母：同班別／機台／機種／玻璃 ID 範圍的總投入 ${number(scope.denominator)} 筆（OK ${number(scope.ok)}、NG ${number(scope.ng)}、ERR ${number(scope.err)}、其他 ${number(scope.other) - number(scope.err)}）。
+                OK 已包含 OK-s；目前正式排片率＝NG ÷ 總投入（含 ERR），與中控總覽相同。</p>
+            <p class="sw-note">僅 CSJBL 範圍（未套用側拍放行 → 目前正式）：${rate(subsetFormal.before_ng, subset.denominator)} → ${rate(subsetFormal.after_ng, subset.denominator)}，下降 ${pp(subsetFormal.drop_pp)}（正式 OK-s ${number(subsetFormal.converted)} 筆，分母 ${number(subset.denominator)} 筆，含 ERR）。</p>
             <div class="ss-lines">
+                <div class="ss-line"><em>CSJBL 點位分類（含已正式放行與歷史紀錄）</em></div>
                 <div class="ss-line">${filterChip('MARK 可轉 OK', 'mark', s.mark.records)}<span>筆 · ${number(s.mark.points)} 點</span>
                     ${filterChip('貼紙／表面異物可轉 OK', 'omit', s.omit.records)}<span>筆 · ${number(s.omit.points)} 點</span>
                     ${filterChip('易撕貼可轉 OK', 'tape', s.tape.records)}<span>筆 · ${number(s.tape.points)} 點</span>
                     ${filterChip('AOI 位置無異常', 'clear', s.clear.records)}<span>筆 · ${number(s.clear.points)} 點</span>
                     ${filterChip('含多類', 'mixed', s.mixed_records)} 筆</div>
-                <div class="ss-line">${filterChip('四類合併可整筆轉 OK', 'eligible', s.eligible_records)}
-                    筆 ${filterChip('仍需保留', 'blocked', s.blocked_records)}<span>筆 · 原本已 OK ${number(s.already_ok_records)} 筆</span></div>
+                <div class="ss-line">${filterChip('歷史 NG 可再整筆轉 OK', 'eligible', s.eligible_records)}
+                    筆 ${filterChip('仍需保留', 'blocked', s.blocked_records)}<span>筆 · 正式已 OK（含 OK-s）${number(s.already_ok_records)} 筆</span></div>
             </div>
-            <p class="ss-rate">整體排片率 <strong>${rate(scope.ng, scope.denominator)}</strong> → <strong class="c-ok">${rate(combined.remaining_ng, scope.denominator)}</strong>
-                <span>下降 ${pp(combined.drop_pp)} · 排片筆數相對減少 ${pct(combined.relative_drop_pct)}</span></p>
-            <div class="sw-scroll"><table class="sw-table"><thead><tr><th>假設情境</th><th>可減少排片</th><th>試算後排片率</th><th>下降幅度</th><th>排片筆數相對減少</th></tr></thead><tbody>
-                ${scenarios.map(([key, label, filter]) => { const r = scope.scenarios[key]; return `<tr>
-                    <td>${label}</td><td>${filterChip('查看明細', filter, r.converted)} 筆</td><td>${rate(r.remaining_ng, scope.denominator)}</td>
-                    <td>${pp(r.drop_pp)}</td><td>${pct(r.relative_drop_pct)}</td></tr>`; }).join('')}
-            </tbody></table></div>
-            <p class="sw-note">分母：同班別／機台／機種／玻璃 ID 範圍的總投入 ${number(scope.denominator)} 筆（OK ${number(scope.ok)}、NG ${number(scope.ng)}、ERR ${number(scope.err)}、其他 ${number(scope.other) - number(scope.err)}）。
-                排片率＝NG ÷ 總投入（含 ERR），與中控總覽相同；四類全轉後 NG＝${number(scope.ng)} − ${number(combined.converted)}＝${number(combined.remaining_ng)}。</p>
-            <p class="sw-note">僅 CSJBL 範圍：${rate(subset.ng, subset.denominator)} → ${rate(subset.scenarios.combined.remaining_ng, subset.denominator)}，下降 ${pp(subset.scenarios.combined.drop_pp)}（分母 ${number(subset.denominator)} 筆，含 ERR）。</p>
-            <details><summary>試算與計數方式</summary><p class="sw-note">四類筆數可能重疊，合併依檢測紀錄去重；同玻璃重送視為另次檢測。
-                只有整筆正式 NG 的全部 CSJBL 點及 NG 原因均已涵蓋，才計入排片減少。混合類型 ${number(s.eligible.mixed)} 筆需同時轉 OK，僅列入合併情境。
-                已是 OK、仍有其他 NG、明細不足或已有缺陷／定位疑慮紀錄者不計入減少；OMIT 僅標示模式不算已可轉 OK。
-                分母使用現存推論紀錄，包含其他 AOI 種類；明細維持僅顯示 CSJBL。明細篩選與換頁不改變試算範圍。</p></details>`;
+            ${number(combined.converted) > 0 ? `<h4>歷史 NG 額外試算（尚未正式放行）</h4>
+                <p class="sw-note">目前正式 ${rate(scope.ng, scope.denominator)} → 試算後 ${rate(combined.remaining_ng, scope.denominator)}；另可減少排片 ${number(combined.converted)} 筆，下降 ${pp(combined.drop_pp)} · 排片筆數相對減少 ${pct(combined.relative_drop_pct)}。</p>
+                <div class="sw-scroll"><table class="sw-table"><thead><tr><th>假設情境</th><th>另可減少排片</th><th>試算後排片率</th><th>額外下降幅度</th><th>排片筆數相對減少</th></tr></thead><tbody>
+                    ${scenarios.map(([key, label, filter]) => { const r = scope.scenarios[key]; return `<tr>
+                        <td>${label}</td><td>${filterChip('查看明細', filter, r.converted)} 筆</td><td>${rate(r.remaining_ng, scope.denominator)}</td>
+                        <td>${pp(r.drop_pp)}</td><td>${pct(r.relative_drop_pct)}</td></tr>`; }).join('')}
+                </tbody></table></div>
+                <p class="sw-note">四類全轉後 NG＝${number(scope.ng)} − ${number(combined.converted)}＝${number(combined.remaining_ng)}；僅 CSJBL 範圍試算：${rate(subset.ng, subset.denominator)} → ${rate(subset.scenarios.combined.remaining_ng, subset.denominator)}，下降 ${pp(subset.scenarios.combined.drop_pp)}。</p>`
+                : '<p class="sw-note">歷史 NG 額外試算：目前沒有可再整筆轉 OK 的 NG 紀錄。</p>'}
+            <details><summary>統計與試算方式</summary><p class="sw-note">正式成效依已保存的 OK-s 判定計算，未套用側拍放行的排片率＝（目前 NG + 正式 OK-s）÷ 總投入；相對減少＝正式 OK-s ÷（目前 NG + 正式 OK-s）。
+                歷史試算只計尚為 NG 的紀錄，OK-s 不會再扣一次。只有整筆正式 NG 的全部 CSJBL 點及 NG 原因均已涵蓋，才計入額外減少。
+                四類筆數可能重疊，合併依檢測紀錄去重；同玻璃重送視為另次檢測。混合類型 ${number(s.eligible.mixed)} 筆需同時轉 OK，僅列入合併情境。
+                已是 OK、仍有其他 NG、明細不足或已有缺陷／定位疑慮紀錄者不計入額外減少；OMIT 僅標示模式不算已可轉 OK。
+                分母使用現存推論紀錄，包含其他 AOI 種類；明細維持僅顯示 CSJBL。明細篩選與換頁不改變統計與試算範圍。</p></details>`;
     }
 
     function syncAdvanced(forceOpen = false) {

@@ -6280,27 +6280,29 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         else:
             self._send_404()
 
+    def _central_dashboard_config_for_webserver(self):
+        """主看板與 OK-s 看板共用目前 Web Server 的廠區範圍。"""
+        config = dict(self.db.get_central_dashboard_config(
+            self._load_central_dashboard_file_config()
+        ))
+        webserver_ip = self._detect_central_dashboard_webserver_ip()
+        prefix = self._central_dashboard_network_prefix(webserver_ip)
+        configured_count = len(config.get("lines") or [])
+        if prefix:
+            config["lines"] = [
+                line for line in config.get("lines") or []
+                if self._central_dashboard_line_network_prefix(line) == prefix
+            ]
+        config["webServerIp"] = webserver_ip
+        config["networkPrefix"] = prefix
+        config["networkFilterApplied"] = bool(prefix)
+        config["configuredLineCount"] = configured_count
+        return config
+
     def _handle_api_central_dashboard_config(self):
         """公開提供與目前 Web Server 同廠區網段的中控看板設定。"""
         try:
-            config = self.db.get_central_dashboard_config(
-                self._load_central_dashboard_file_config()
-            )
-            webserver_ip = self._detect_central_dashboard_webserver_ip()
-            prefix = self._central_dashboard_network_prefix(webserver_ip)
-            configured_count = len(config.get("lines") or [])
-            if prefix:
-                config = dict(config)
-                config["lines"] = [
-                    line
-                    for line in config.get("lines") or []
-                    if self._central_dashboard_line_network_prefix(line) == prefix
-                ]
-            config["webServerIp"] = webserver_ip
-            config["networkPrefix"] = prefix
-            config["networkFilterApplied"] = bool(prefix)
-            config["configuredLineCount"] = configured_count
-            self._send_json(config)
+            self._send_json(self._central_dashboard_config_for_webserver())
         except Exception as exc:
             logger.error("Failed to load central dashboard config: %s", exc)
             self._send_json(
@@ -6309,16 +6311,18 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             )
 
     def _handle_api_central_dashboard_ok_s_config(self):
-        """OK-s 效益看板：全部線體的唯讀清單，不按廠區／製程／啟用狀態過濾。"""
+        """OK-s 效益看板：同廠區的唯讀清單，包含各製程與停用線體。"""
         try:
-            config = self.db.get_central_dashboard_config(
-                self._load_central_dashboard_file_config()
-            )
+            config = self._central_dashboard_config_for_webserver()
             fields = ("id", "factory", "line", "pcName", "apiUrl", "enabled")
             self._send_json({
                 "title": config["title"],
                 "refreshIntervalSeconds": config["refreshIntervalSeconds"],
                 "requestTimeoutSeconds": config["requestTimeoutSeconds"],
+                "webServerIp": config["webServerIp"],
+                "networkPrefix": config["networkPrefix"],
+                "networkFilterApplied": config["networkFilterApplied"],
+                "configuredLineCount": config["configuredLineCount"],
                 "lines": [{key: line.get(key) for key in fields}
                           for line in config.get("lines", [])],
             })

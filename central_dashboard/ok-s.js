@@ -12,6 +12,7 @@
     let controller = null;
     let refreshTimer = null;
     let config = null;
+    let selectedFactory = "";
 
     function factoryDate(now = new Date()) {
         return new Date(now.getTime() + OFFSET_MS).toISOString().slice(0, 10);
@@ -44,8 +45,17 @@
         if (!raw || !Array.isArray(raw.lines)) throw new Error("線體設定格式不正確");
         const positive = (value, fallback) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
         const refreshSeconds = Math.max(30, positive(raw.refreshIntervalSeconds, 30));
-        // Deliberately retain disabled lines and every factory/process zone.
-        return {lines: raw.lines, refreshSeconds, timeoutMs: Math.min(30, positive(raw.requestTimeoutSeconds, 8)) * 1000};
+        // The API applies the dashboard network scope; retain disabled lines and all processes within it.
+        return {lines: raw.lines, factories: [...new Set(raw.lines.map(factoryName))], refreshSeconds,
+            timeoutMs: Math.min(30, positive(raw.requestTimeoutSeconds, 8)) * 1000};
+    }
+
+    function factoryName(line) {
+        return String(line.factory || "").trim() || "未設定廠別";
+    }
+
+    function factoryLines(lines, factory) {
+        return lines.filter(line => factoryName(line) === factory);
     }
 
     function parseCounts(payload) {
@@ -129,7 +139,7 @@
     const $ = id => document.getElementById(id);
     const number = value => value.toLocaleString("zh-TW");
     const percent = value => value == null ? "—" : `${value.toFixed(2)}%`;
-    const points = value => value == null ? "—" : `${value.toFixed(2)} pp`;
+    const points = value => value == null ? "—" : `${value.toFixed(2)} 百分點`;
 
     function element(tag, text, className) {
         const node = document.createElement(tag);
@@ -139,18 +149,24 @@
     }
 
     function lineLabel(line) {
-        return `${line.factory || "未設定廠區"} / ${line.line || line.id || "未命名線體"}`;
+        return `${factoryName(line)} / ${line.line || line.id || "未命名線體"}`;
     }
 
     function render() {
+        const factory = selectedFactory || "廠別";
+        $("oks-summary-title").textContent = `${factory} 改善成效`;
+        $("oks-lines-title").textContent = `${factory} 線體統計`;
+        $("oks-summary").setAttribute("aria-label", `${factory} 加權統計`);
+        $("oks-scope").textContent = selectedFactory ? `${selectedFactory}・全部製程・包含停用線體` : "依廠別查看排片改善成效";
         const summary = summarize(rows);
         $("oks-total").textContent = summary ? number(summary.total) : "—";
         $("oks-converted").textContent = summary ? number(summary.converted) : "—";
         $("oks-before").textContent = percent(summary?.before);
         $("oks-after").textContent = percent(summary?.after);
-        $("oks-drop").textContent = points(summary?.drop);
+        $("oks-drop").textContent = summary?.drop == null ? "—" : summary.drop.toFixed(2);
+        if (summary?.drop != null) $("oks-drop").append(element("span", "百分點", "oks-unit"));
         const beforeNg = summary ? summary.ng + summary.converted : 0;
-        $("oks-relative").textContent = beforeNg ? `相對減少 ${(summary.converted / beforeNg * 100).toFixed(2)}% 的排片` : "百分點（pp）・依投入量加權";
+        $("oks-relative").textContent = beforeNg ? `相對減少 ${(summary.converted / beforeNg * 100).toFixed(2)}% 的排片` : "依本廠投入量加權";
         const pending = rows.filter(row => row.state === "pending").length;
         const covered = summary?.covered || 0;
         $("oks-coverage").textContent = rows.length ? `已納入 ${covered} / ${rows.length} 線${pending ? `・${pending} 線查詢中` : covered < rows.length ? "・部分資料，未取得者不計入合計" : "・全部資料已取得"}` : "尚無線體資料";
@@ -243,15 +259,23 @@
         }
         const window = shiftWindow(selection.date, selection.shift);
         $("oks-range").textContent = `${localTimestamp(window.start)} ～ ${localTimestamp(window.end)} (UTC+8)`;
-        $("oks-updated").textContent = "讀取全部線體清單…";
+        $("oks-updated").textContent = "讀取廠別線體清單…";
         try {
             const directFile = location.protocol === "file:";
             const loadedConfig = normalizeConfig(directFile ? globalThis.CAPI_DASHBOARD_CONFIG :
                 await fetchJSON("/api/central-dashboard/ok-s-config", 8000, signal));
             if (token !== generation) return;
             config = loadedConfig;
-            $("oks-scope").textContent = directFile ? "config.js 全部線體・含停用線體（直接開檔模式）" : "全部廠區・全部製程・包含停用線體";
-            rows = config.lines.map(line => ({line, state: "pending"}));
+            if (!config.factories.includes(selectedFactory)) selectedFactory = config.factories[0] || "";
+            const factorySelect = $("oks-factory");
+            factorySelect.replaceChildren(...config.factories.map(factory => {
+                const option = element("option", factory);
+                option.value = factory;
+                return option;
+            }));
+            factorySelect.value = selectedFactory;
+            factorySelect.disabled = !config.factories.length;
+            rows = factoryLines(config.lines, selectedFactory).map(line => ({line, state: "pending"}));
             render();
             $("oks-updated").textContent = "查詢各線班報中…";
             await Promise.all(rows.map(async row => {
@@ -265,7 +289,7 @@
             $("oks-updated").textContent = `更新於 ${updated}${followCurrent ? `・每 ${config.refreshSeconds} 秒更新` : "・指定班別"}`;
         } catch (error) {
             if (token !== generation) return;
-            $("oks-error").textContent = `無法取得完整線體清單：${error.message || error}。請確認中控主機已更新，再重新查詢。`;
+            $("oks-error").textContent = `無法取得廠別線體清單：${error.message || error}。請確認中控主機已更新，再重新查詢。`;
             $("oks-error").hidden = false;
             $("oks-updated").textContent = "查詢失敗";
         } finally {
@@ -288,6 +312,7 @@
             syncTheme();
         });
         $("oks-query-form").addEventListener("submit", event => { event.preventDefault(); refresh(); });
+        $("oks-factory").addEventListener("change", () => { selectedFactory = $("oks-factory").value; refresh(); });
         for (const id of ["oks-date", "oks-shift"]) {
             $(id).addEventListener("change", () => { followCurrent = false; refresh(); });
         }
@@ -297,7 +322,7 @@
     }
 
     if (typeof module !== "undefined" && module.exports) {
-        module.exports = {currentShift, shiftWindow, validateSelection, normalizeConfig, parseCounts, rates, summarize, requestLine};
+        module.exports = {currentShift, shiftWindow, validateSelection, normalizeConfig, factoryLines, parseCounts, rates, summarize, requestLine};
     }
     if (typeof document !== "undefined") document.addEventListener("DOMContentLoaded", initialize);
 })();

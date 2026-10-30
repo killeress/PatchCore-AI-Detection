@@ -2238,11 +2238,12 @@ class CAPIDatabase:
             scope_counts = dict(conn.execute(
                 "SELECT COUNT(*) AS total, "
                 "COALESCE(SUM(CASE WHEN r.ai_judgment IN ('OK', 'OK-i', 'OK-s') THEN 1 ELSE 0 END),0) AS ok, "
+                "COALESCE(SUM(CASE WHEN r.ai_judgment = 'OK-s' THEN 1 ELSE 0 END),0) AS ok_s, "
                 "COALESCE(SUM(CASE WHEN r.ai_judgment LIKE 'NG%' THEN 1 ELSE 0 END),0) AS ng, "
                 "COALESCE(SUM(CASE WHEN r.ai_judgment LIKE 'ERR%' THEN 1 ELSE 0 END),0) AS err "
                 "FROM inference_records r" + scope_where, summary_params).fetchone())
             scope_counts["other"] = scope_counts["total"] - scope_counts["ok"] - scope_counts["ng"]
-            csjbl_counts = {key: 0 for key in ("total", "ok", "ng", "err", "other")}
+            csjbl_counts = {key: 0 for key in ("total", "ok", "ok_s", "ng", "err", "other")}
             conversions = {"mark": {"points": 0, "records": 0}, "omit": {"points": 0, "records": 0},
                            "tape": {"points": 0, "records": 0},
                            "clear": {"points": 0, "records": 0}, "converted_records": 0,
@@ -2278,6 +2279,7 @@ class CAPIDatabase:
                     csjbl_counts["ok" if judgment in {"OK", "OK-i", "OK-s"} else
                                  "ng" if judgment.startswith("NG") else "other"] += 1
                     csjbl_counts["err"] += judgment.startswith("ERR")
+                    csjbl_counts["ok_s"] += judgment == "OK-s"
                     conversions["converted_records"] += judgment == "OK-s"
                     for kind in ("mark", "omit", "tape", "clear"):
                         count = converted[kind + "_points"]

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <meta name="description" content="全部線體因側拍轉 OK-s 而降低排片率的實際統計">
+    <meta name="description" content="依廠別查看各線體因側拍轉 OK-s 而降低排片率的實際統計">
     <title>OK-s 排片改善看板</title>
     <script>
         (function () {
@@ -20,12 +20,12 @@
     <script defer src="./ok-s.js"></script>
 </head>
 <body class="oks-dashboard">
-    <a class="skip-link" href="#oks-lines">跳至全部線體統計</a>
+    <a class="skip-link" href="#oks-lines">跳至廠別線體統計</a>
     <header class="topbar">
         <div class="brand-block">
-            <p class="eyebrow">SIDE CAMERA · ALL LINES</p>
+            <p class="eyebrow">SIDE CAMERA · BY FACTORY</p>
             <h1>OK-s 排片改善看板</h1>
-            <p id="oks-scope" class="oks-subtitle">全部廠區・全部製程・包含停用線體</p>
+            <p id="oks-scope" class="oks-subtitle">依廠別查看排片改善成效</p>
         </div>
         <div class="oks-tools">
             <a class="dashboard-settings-link" href="./index.html">返回中控看板</a>
@@ -35,6 +35,7 @@
     <main>
         <section class="oks-query" aria-label="查詢條件">
             <form id="oks-query-form">
+                <label for="oks-factory">廠別<select id="oks-factory" disabled><option value="">讀取中…</option></select></label>
                 <label for="oks-date">起班日期<input id="oks-date" type="date" required></label>
                 <label for="oks-shift">班別<select id="oks-shift"><option value="day">白班</option><option value="night">晚班</option></select></label>
                 <button id="oks-current" type="button" class="oks-primary" aria-pressed="true">當班</button>
@@ -49,26 +50,26 @@
         <p id="oks-error" class="oks-error" role="alert" hidden></p>
 
         <div class="oks-section-heading">
-            <h2>全線改善成效</h2>
+            <h2 id="oks-summary-title">廠別改善成效</h2>
             <p id="oks-coverage" role="status">尚未取得線體資料</p>
         </div>
-        <section class="oks-summary" aria-label="全部線體加權統計">
+        <section id="oks-summary" class="oks-summary" aria-label="廠別加權統計">
             <article class="oks-metric"><span>總投入</span><strong id="oks-total">—</strong><small>本次成功取得資料的線體</small></article>
             <article class="oks-metric"><span>側拍轉 OK-s</span><strong id="oks-converted" class="oks-positive">—</strong><small>實際減少排出的片數</small></article>
             <article class="oks-metric"><span>轉換前排片率</span><strong id="oks-before">—</strong><small>（目前 NG ＋ OK-s）÷ 投入</small></article>
             <article class="oks-metric"><span>轉換後排片率</span><strong id="oks-after">—</strong><small>目前 NG ÷ 投入</small></article>
-            <article class="oks-metric oks-highlight"><span>排片率下降</span><strong id="oks-drop">—</strong><small id="oks-relative">百分點（pp）・依投入量加權</small></article>
+            <article class="oks-metric oks-highlight"><span>排片率下降</span><strong id="oks-drop">—</strong><small id="oks-relative">依本廠投入量加權</small></article>
         </section>
 
         <section aria-labelledby="oks-lines-title">
             <div class="oks-section-heading">
-                <div><p class="eyebrow">LINE COMPARISON</p><h2 id="oks-lines-title">全部線體統計</h2></div>
+                <div><p class="eyebrow">LINE COMPARISON</p><h2 id="oks-lines-title">廠別線體統計</h2></div>
                 <div class="oks-sort"><label for="oks-sort">排序</label><select id="oks-sort"><option value="drop">排片率下降最多</option><option value="converted">OK-s 片數最多</option><option value="line">廠區／線體</option></select></div>
             </div>
-            <div class="oks-table-wrap" tabindex="0" role="region" aria-label="全部線體統計表，可左右捲動">
+            <div class="oks-table-wrap" tabindex="0" role="region" aria-label="目前廠別線體統計表，可左右捲動">
                 <table class="oks-table">
                     <thead><tr><th scope="col">線體</th><th scope="col">總投入</th><th scope="col">OK-s 片數</th><th scope="col">轉換前排片率</th><th scope="col">轉換後排片率</th><th scope="col">下降百分點</th><th scope="col">資料狀態</th></tr></thead>
-                    <tbody id="oks-lines"><tr><td colspan="7" class="oks-empty">準備查詢全部線體…</td></tr></tbody>
+                    <tbody id="oks-lines"><tr><td colspan="7" class="oks-empty">準備查詢廠別線體…</td></tr></tbody>
                 </table>
             </div>
         </section>
@@ -78,9 +79,10 @@
             <ul>
                 <li>OK-s 為原 NG 經側拍確認後正式放行。只計已保存的正式 OK-s；原本 OK、OK-i、未放行的 NG 與歷史試算不列入改善片數。</li>
                 <li>轉換前排片率還原側拍放行前的 NG 數：<b>（目前 NG ＋ OK-s）÷ 總投入</b>；轉換後為 <b>目前 NG ÷ 總投入</b>。兩者差值為 <b>OK-s ÷ 總投入 × 100 百分點</b>，不是相對下降百分比。</li>
-                <li>全線合計先加總投入、NG 與 OK-s 再計算比率。同一玻璃 ID 的不同次檢測各計一次；ERR 與其他紀錄亦列入投入，投入為 0 時比率顯示「—」。</li>
+                <li>百分點是兩個百分比的差，例如排片率從 10% 降至 8%，就是下降 2 個百分點，相對減少 20% 的排片。</li>
+                <li>合計只計算目前廠別，先加總投入、NG 與 OK-s 再計算比率。同一玻璃 ID 的不同次檢測各計一次；ERR 與其他紀錄亦列入投入，投入為 0 時比率顯示「—」。</li>
                 <li>白班 07:30～19:30，晚班 19:30～隔日 07:30，均為 UTC+8、歸屬起班日。當班定期更新；歷史班別可查最近 29 天，受各線資料保留期限影響，OK 紀錄需保留至少 30 天。</li>
-                <li>跨廠區、CAPI／AAPI 及設定為停用的線體均列入查詢。無法取得資料的線體不納入合計，資料狀態列出原因。新增或刪除線體後，重新查詢即可套用。</li>
+                <li>廠別範圍與主中控看板相同；有多個廠別時可切換查看。只查詢所選廠別的 CAPI／AAPI 及停用線體；無法取得資料的線體不納入合計，資料狀態列出原因。新增或刪除線體後，重新查詢即可套用。</li>
             </ul>
         </details>
     </main>

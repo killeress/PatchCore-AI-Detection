@@ -373,14 +373,26 @@ def test_central_dashboard_all_api_keeps_both_factories(tmp_path):
     assert "networkPrefix" not in payload
 
 
-def test_ok_s_dashboard_config_keeps_all_lines_but_only_readonly_fields(tmp_path):
+@pytest.mark.parametrize(
+    ("webserver_ip", "expected_factories", "expected_count"),
+    [
+        ("10.172.99.10", {"MOD1"}, 2),
+        ("10.174.99.10", {"MOD2"}, 8),
+        ("10.175.99.10", set(), 0),
+        ("", {"MOD1", "MOD2"}, 10),
+    ],
+)
+def test_ok_s_dashboard_config_uses_dashboard_factory_scope_and_readonly_fields(
+    tmp_path, webserver_ip, expected_factories, expected_count,
+):
     db = CAPIDatabase(tmp_path / "dashboard.db")
     config = db.get_central_dashboard_config()
-    config["lines"][0].update(line="AAPI01", enabled=False)
+    disabled_line = next(line for line in config["lines"] if line["factory"] == "MOD1")
+    disabled_line.update(line="AAPI01", enabled=False)
     db.save_central_dashboard_config(config)
     handler = object.__new__(CAPIWebHandler)
     handler.db = db
-    handler._detect_central_dashboard_webserver_ip = lambda: "10.172.99.10"
+    handler._detect_central_dashboard_webserver_ip = lambda: webserver_ip
     responses = []
     handler._send_json = lambda data, status=200, headers=None: responses.append((status, data))
 
@@ -388,12 +400,24 @@ def test_ok_s_dashboard_config_keeps_all_lines_but_only_readonly_fields(tmp_path
 
     status, payload = responses[-1]
     assert status == 200
-    assert len(payload["lines"]) == 10
-    assert {line["factory"] for line in payload["lines"]} == {"MOD1", "MOD2"}
-    assert payload["lines"][0]["line"] == "AAPI01"
-    assert payload["lines"][0]["enabled"] is False
-    assert set(payload["lines"][0]) == {"id", "factory", "line", "pcName", "apiUrl", "enabled"}
-    assert set(payload) == {"title", "refreshIntervalSeconds", "requestTimeoutSeconds", "lines"}
+    assert len(payload["lines"]) == expected_count
+    assert {line["factory"] for line in payload["lines"]} == expected_factories
+    if "MOD1" in expected_factories:
+        retained_line = next(line for line in payload["lines"] if line["id"] == disabled_line["id"])
+        assert retained_line["line"] == "AAPI01"
+        assert retained_line["enabled"] is False
+    for line in payload["lines"]:
+        assert set(line) == {"id", "factory", "line", "pcName", "apiUrl", "enabled"}
+    assert set(payload) == {"title", "refreshIntervalSeconds", "requestTimeoutSeconds", "lines",
+                            "webServerIp", "networkPrefix", "networkFilterApplied", "configuredLineCount"}
+    assert payload["configuredLineCount"] == 10
+    assert payload["networkFilterApplied"] is bool(webserver_ip)
+
+    handler._handle_api_central_dashboard_config()
+    main_payload = responses[-1][1]
+    assert [line["id"] for line in payload["lines"]] == [line["id"] for line in main_payload["lines"]]
+    for field in ("webServerIp", "networkPrefix", "networkFilterApplied", "configuredLineCount"):
+        assert payload[field] == main_payload[field]
 
 
 def test_ok_s_dashboard_config_reports_database_failure():

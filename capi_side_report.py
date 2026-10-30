@@ -236,9 +236,17 @@ def matches_conversion_filter(result, value):
 
 
 def conversion_rate_projection(counts, eligible):
-    """Dashboard denominator includes every input; remove each converted NG once."""
+    """Separate saved OK-s impact from additional historical NG projections."""
     denominator = counts["total"]
     percentage = lambda value: round(100 * value / denominator, 6) if denominator else None
+    converted = counts.get("ok_s", 0)
+    before_ng = counts["ng"] + converted
+    formal_impact = {
+        "converted": converted, "before_ng": before_ng, "after_ng": counts["ng"],
+        "before_pct": percentage(before_ng), "after_pct": percentage(counts["ng"]),
+        "drop_pp": percentage(converted),
+        "relative_drop_pct": round(100 * converted / before_ng, 6) if before_ng else None,
+    }
     scenarios = {}
     for key, removed in (("mark", eligible["mark"]), ("omit", eligible["omit"]),
                          ("tape", eligible.get("tape", 0)),
@@ -247,7 +255,8 @@ def conversion_rate_projection(counts, eligible):
         scenarios[key] = {"converted": removed, "remaining_ng": counts["ng"] - removed,
                           "after_pct": percentage(counts["ng"] - removed), "drop_pp": percentage(removed),
                           "relative_drop_pct": round(100 * removed / counts["ng"], 6) if counts["ng"] else None}
-    return {**counts, "denominator": denominator, "before_pct": percentage(counts["ng"]), "scenarios": scenarios}
+    return {**counts, "denominator": denominator, "before_pct": percentage(counts["ng"]),
+            "formal_impact": formal_impact, "scenarios": scenarios}
 
 
 def _point_omit_evidence(payload, candidates):

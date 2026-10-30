@@ -29,6 +29,8 @@
 .oks-metric > span { font-size: .88rem; font-weight: 700; color: var(--muted); }
 .oks-metric strong { font-size: clamp(1.55rem, 2.25vw, 2.5rem); line-height: 1.1; letter-spacing: -.035em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .oks-metric small { margin-top: auto; color: var(--muted); font-size: .75rem; line-height: 1.6; }
+#oks-drop { display: flex; align-items: baseline; flex-wrap: wrap; gap: .3em; }
+.oks-unit { font-size: .5em; letter-spacing: 0; white-space: nowrap; }
 .oks-highlight { border-color: var(--green); background: var(--surface-blue); }
 .oks-highlight strong, .oks-positive { color: var(--green); }
 .oks-sort { display: flex; gap: 8px; align-items: center; font-size: .82rem; color: var(--muted); }

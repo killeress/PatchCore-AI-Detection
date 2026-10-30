@@ -6,7 +6,7 @@ from datetime import datetime
 import pytest
 
 from capi_database import CAPIDatabase
-from capi_side_report import compare_side_record, record_conversion
+from capi_side_report import compare_side_record, conversion_rate_projection, record_conversion
 
 
 @pytest.fixture
@@ -104,6 +104,62 @@ def test_rates_cover_whole_scope_and_mixed_records_are_counted_once(db):
         assert after[field] == before[field]
 
 
+def test_formal_ok_s_impact_is_separate_from_remaining_historical_ng(db):
+    record_id, _ = save(db, sample(("mark", "omit")), judgment="OK-s")
+    save(db, sample(), judgment="OK-s")
+    save(db, sample())  # One historical NG still eligible for an extra reduction.
+    for judgment in ("NG", "OK", "OK-i", "ERR:timeout", ""):
+        save(db, judgment=judgment)
+    before = db.get_record_detail(record_id)
+    s = query(db)["conversion_summary"]
+    assert s["scope"]["ok"] == 4 and s["scope"]["ok_s"] == s["converted_records"] == 2
+    assert s["scope"]["formal_impact"] == {
+        "converted": 2, "before_ng": 4, "after_ng": 2,
+        "before_pct": 50, "after_pct": 25, "drop_pp": 25, "relative_drop_pct": 50,
+    }
+    assert s["scope"]["scenarios"]["combined"]["converted"] == s["eligible_records"] == 1
+    assert s["scope"]["scenarios"]["combined"]["remaining_ng"] == 1
+    assert s["scope"]["scenarios"]["combined"]["after_pct"] == 12.5
+    subset = s["csjbl"]["formal_impact"]
+    assert s["csjbl"]["denominator"] == 3 and subset["converted"] == 2
+    assert subset["before_pct"] == 100 and subset["after_pct"] == pytest.approx(100 / 3)
+    assert subset["drop_pp"] == pytest.approx(200 / 3)
+    for filters in ({"conversion": "eligible"}, {"conversion": "mixed"}, {"status": "NOT_RUN"}):
+        assert query(db, **filters, offset=1, limit=1)["conversion_summary"] == s
+    assert db.get_record_detail(record_id) == before
+
+
+def test_formal_ok_s_impact_does_not_require_side_payload_or_csjbl_details(db):
+    record_id, _ = save(db, judgment="OK-s")
+    row = sample()
+    with db._get_conn() as conn:
+        conn.execute("UPDATE inference_records SET aoi_machine_coords=?, ng_details=? WHERE id=?",
+                     (json.dumps(row["aoi_machine_coords"]), json.dumps(row["ng_details"]), record_id))
+    save(db, judgment="OK-s")  # Formal result remains authoritative without AOI evidence.
+    s = query(db)["conversion_summary"]
+    assert s["scope"]["formal_impact"]["converted"] == 2
+    assert s["csjbl"]["formal_impact"]["converted"] == s["converted_records"] == 1
+    assert s["eligible_records"] == 0
+    for scope in (s["scope"], s["csjbl"]):
+        assert scope["formal_impact"]["before_pct"] == 100
+        assert scope["formal_impact"]["after_pct"] == 0
+        assert scope["formal_impact"]["relative_drop_pct"] == 100
+        assert scope["scenarios"]["combined"]["converted"] == 0
+
+
+@pytest.mark.parametrize("total,ng,ok_s,expected", [
+    (747, 140, 5, (19.410977, 18.741633, .669344, 3.448276)),
+    (10, 4, 0, (40, 40, 0, 0)),
+    (10, 0, 0, (0, 0, 0, None)),
+    (0, 0, 0, (None, None, None, None)),
+])
+def test_formal_impact_rates_and_empty_baselines(total, ng, ok_s, expected):
+    projection = conversion_rate_projection(
+        {"total": total, "ng": ng, "ok_s": ok_s}, {"mark": 0, "omit": 0})
+    formal = projection["formal_impact"]
+    assert tuple(formal[key] for key in ("before_pct", "after_pct", "drop_pp", "relative_drop_pct")) == expected
+
+
 @pytest.mark.parametrize("issue", ["other_ng", "wrong_point", "wrong_image", "malformed", "missing",
                                    "incomplete", "bad_mapping", "confirmed", "missed", "mapping_error", "uncertain"])
 def test_uncertain_or_other_ng_is_not_counted_as_whole_record_conversion(issue):
@@ -130,17 +186,19 @@ def test_uncertain_or_other_ng_is_not_counted_as_whole_record_conversion(issue):
 
 
 def test_scope_dates_machine_model_and_err_denominator(db):
-    save(db, sample(), when="2026-10-21 23:59:59")
-    save(db, sample(), when="2026-10-23 00:00:00")
-    save(db, sample(), machine="OTHER")
-    save(db, sample(), model="OTHER")
+    save(db, sample(), when="2026-10-21 23:59:59", judgment="OK-s")
+    save(db, sample(), when="2026-10-23 00:00:00", judgment="OK-s")
+    save(db, sample(), machine="OTHER", judgment="OK-s")
+    save(db, sample(), model="OTHER", judgment="OK-s")
     save(db, judgment="ERR:FAIL")
     s = query(db, machine_no="CAPI1", model_id="MODEL")["conversion_summary"]
     assert s["scope"]["total"] == s["scope"]["denominator"] == s["scope"]["err"] == 1
     assert s["scope"]["before_pct"] == 0
+    assert s["scope"]["formal_impact"]["converted"] == 0
     assert s["scope"]["scenarios"]["combined"]["drop_pp"] == 0
     assert query(db, glass_id="NO_MATCH")["conversion_summary"]["scope"]["total"] == 0
     assert query(db, glass_id="NO_MATCH")["conversion_summary"]["scope"]["before_pct"] is None
+    assert query(db, glass_id="NO_MATCH")["conversion_summary"]["scope"]["formal_impact"]["before_pct"] is None
     with pytest.raises(ValueError, match="轉 OK 分類"):
         query(db, conversion="unknown")
     with pytest.raises(ValueError, match="班別"):
@@ -154,10 +212,10 @@ def test_scope_dates_machine_model_and_err_denominator(db):
 ])
 def test_current_shift_matches_dashboard_with_err_and_different_request_times(db, clock):
     records = [
-        ("2026-10-21 19:30:00", "OK"), ("2026-10-22 07:29:59", "NG"),
+        ("2026-10-21 19:30:00", "OK-s"), ("2026-10-22 07:29:59", "NG"),
         ("2026-10-22 07:30:00", "NG"), ("2026-10-22 08:00:00", "OK-i"),
-        ("2026-10-22 12:00:00", "NG:CSJBL"), ("2026-10-22 19:29:59", "ERR:timeout"),
-        ("2026-10-22 19:30:00", "NG"), ("2026-10-22 23:00:00", "OK"),
+        ("2026-10-22 12:00:00", "OK-s"), ("2026-10-22 19:29:59", "ERR:timeout"),
+        ("2026-10-22 19:30:00", "NG"), ("2026-10-22 23:00:00", "OK-s"),
         ("2026-10-23 00:10:00", "ERR:NO_IMAGE"), ("2026-10-23 07:29:59", "NG"),
         ("2026-10-23 07:30:00", "OK"), ("2026-10-23 19:30:00", "NG"),
     ]
@@ -174,6 +232,7 @@ def test_current_shift_matches_dashboard_with_err_and_different_request_times(db
     assert scope["denominator"] == scope["total"] == dashboard["total"]
     assert scope["ng"] == dashboard["ng_count"] and scope["ok"] == dashboard["ok_count"]
     assert scope["err"] == dashboard["err_count"]
+    assert scope["formal_impact"]["converted"] == dashboard["ok_s_count"]
     assert scope["before_pct"] == pytest.approx(100 * dashboard["ng_count"] / dashboard["total"])
     time = result["time_scope"]
     assert time["mode"] == "current" and time["shift_name"] == dashboard["shift_name"]
@@ -190,7 +249,7 @@ def test_current_shift_matches_dashboard_with_err_and_different_request_times(db
 def test_historical_date_range_includes_only_selected_shifts(db, shift):
     for day in ("2026-10-22", "2026-10-23", "2026-10-24"):
         for time, judgment in (("00:00:00", "ERR:timeout"), ("07:29:59", "NG"),
-                               ("07:30:00", "OK"), ("19:29:59", "NG"), ("19:30:00", "NG")):
+                               ("07:30:00", "OK-s"), ("19:29:59", "NG"), ("19:30:00", "OK-s")):
             save(db, sample(), judgment=judgment, when=f"{day} {time}")
     result = db.get_side_statistics(start_date="2026-10-22", end_date="2026-10-23", shift=shift, limit=20)
     scope = result["conversion_summary"]["scope"]
@@ -198,6 +257,7 @@ def test_historical_date_range_includes_only_selected_shifts(db, shift):
     assert scope["total"] == scope["denominator"] == sum(row["total"] for row in shifts)
     assert scope["ng"] == sum(row["ng_count"] for row in shifts)
     assert scope["err"] == sum(row["err_count"] for row in shifts)
+    assert scope["formal_impact"]["converted"] == sum(row["ok_s_count"] for row in shifts)
     assert result["total"] == scope["total"]
     assert scope["scenarios"]["combined"]["converted"] == scope["ng"]
     assert result["time_scope"]["end_date"] == "2026-10-23"
