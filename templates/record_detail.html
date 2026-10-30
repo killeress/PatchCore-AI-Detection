@@ -409,7 +409,7 @@
                             {% for c in coords %}
                             {% set use_image_coord = c.get("coordinate_space", "product") == "image" and c.get("product_x", -1) < 0 %}
                             <tr>
-                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;color:var(--text-muted);">{{ loop.index }}</td>
+                                <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;color:var(--text-muted);white-space:nowrap;">{{ loop.index }}{% if c.get('defect_code', '')|upper == 'CSJBL' %}<span title="CSJBL 側拍報點" style="display:inline-block;margin-left:6px;padding:0 5px;border:1px solid #7DD3FC;border-radius:4px;background:#E0F2FE;color:#075985;font-size:10px;font-weight:600;line-height:1.6;vertical-align:middle;">側拍</span>{% endif %}</td>
                                 <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ "圖片" if use_image_coord else "產品" }}</td>
                                 <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.get("image_x", c.get("source_x", -1)) if use_image_coord else c.product_x }}</td>
                                 <td style="padding:2px 12px;border:1px solid var(--border);text-align:center;">{{ c.get("image_y", c.get("source_y", -1)) if use_image_coord else c.product_y }}</td>

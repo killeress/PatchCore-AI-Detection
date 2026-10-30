@@ -136,6 +136,7 @@ def test_save_tile_heatmap_uses_two_stage_mask_for_feature_zoom(tmp_path, monkey
         tile_size=512,
         max_panels=3,
         final_label="",
+        roi_mask=None,
     ):
         captured["dust_mask"] = dust_mask
         return []

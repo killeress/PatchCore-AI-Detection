@@ -5562,171 +5562,14 @@ class CAPIInferencer:
         aoi_roi_enabled: bool = False,
         original_image: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """
-        產生灰塵 IOU 交叉驗證的 Debug 可視化圖
-
-        顯示：
-          左上: Heatmap 疊加原圖 (紅色=異常熱區)
-          右上: 灰塵遮罩 (黃色=灰塵區域)
-          左下: 原圖＋半透明熱區遮罩 (AOI ROI 使用達門檻區域標籤)
-          右下: 逐區域判定結果 (紅色=真實缺陷, 綠色=灰塵區域, 藍色=僅灰塵遮罩)
-
-        Args:
-            tile_image: 原始 tile 圖片
-            anomaly_map: 異常熱圖 (float)
-            dust_mask: 灰塵遮罩 (uint8, 255=灰塵)
-            heatmap_binary: 二值化熱區遮罩
-            iou: 計算出的 IOU 值
-            top_percent: 使用的百分位數
-            is_dust: 最終判定是否為灰塵
-            region_details: 逐區域判定詳情 (from check_dust_per_region)
-
-        Returns:
-            Debug 可視化圖 (BGR)
-        """
-        from capi_heatmap import _blend_color_on_mask, draw_roi_threshold_label, ensure_bgr
-
-        sz = 256  # 每個子圖大小
-
-        # --- 準備基底圖 ---
-        if len(tile_image.shape) == 2:
-            base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
-        elif tile_image.shape[2] == 1:
-            base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
-        else:
-            base = tile_image.copy()
-        base = cv2.resize(base, (sz, sz))
-        mask_base = (cv2.resize(ensure_bgr(original_image), (sz, sz))
-                     if original_image is not None else base)
-
-        # --- 左上: Heatmap Overlay ---
-        if anomaly_map is not None:
-            norm = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            norm = cv2.resize(norm, (sz, sz))
-            heatmap_color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
-            panel_tl = cv2.addWeighted(base, 0.5, heatmap_color, 0.5, 0)
-        else:
-            panel_tl = base.copy()
-        cv2.putText(panel_tl, "Heatmap", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-
-        # --- 右上: 灰塵遮罩 ---
-        panel_tr = base.copy()
-        if dust_mask is not None:
-            dm = dust_mask
-            if len(dm.shape) == 3:
-                dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
-            dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            dust_overlay = np.zeros_like(panel_tr)
-            dust_overlay[dm > 0] = (0, 255, 255)  # 黃色
-            panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_overlay, 0.4, 0)
-        cv2.putText(panel_tr, "Dust Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-
-        # --- 左下: 熱區二值化 ---
-        panel_bl = mask_base.copy()
-        if heatmap_binary is not None:
-            hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            _blend_color_on_mask(panel_bl, hb, (255, 255, 255), alpha=0.35)
-        if aoi_roi_enabled:
-            draw_roi_threshold_label(panel_bl)
-        else:
-            cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
-
-        # --- 右下: 逐區域判定結果 ---
-        panel_br = mask_base.copy()
-        if region_details is not None and heatmap_binary is not None and dust_mask is not None:
-            # 使用逐區域判定結果上色 (labels 由 check_dust_per_region 傳入，避免重複計算)
-            if region_labels is not None:
-                labels = region_labels
-            else:
-                _, labels = cv2.connectedComponents(heatmap_binary.copy(), connectivity=8)
-            num_labels = int(labels.max()) + 1
-            region_dust_map = {r["label_id"]: r["is_dust"] for r in region_details}
-
-            # 縮放 labels 到 sz x sz
-            labels_resized = cv2.resize(labels.astype(np.float32), (sz, sz),
-                                        interpolation=cv2.INTER_NEAREST).astype(np.int32)
-
-            dm = dust_mask
-            if len(dm.shape) == 3:
-                dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
-            dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
-
-            # 先畫僅灰塵遮罩區域 (藍色)
-            hb_resized = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            dust_only = (dm > 0) & (hb_resized == 0)
-            _blend_color_on_mask(panel_br, dust_only, (255, 100, 0), alpha=0.35)
-
-            # 逐區域上色
-            region_peak_dust_map = {r["label_id"]: r.get("peak_in_dust", True) for r in region_details}
-            orig_h, orig_w = heatmap_binary.shape[:2]
-            scale_x = sz / orig_w
-            scale_y = sz / orig_h
-            for label_id in range(1, num_labels):
-                region_mask = labels_resized == label_id
-                if region_dust_map.get(label_id, False):
-                    _blend_color_on_mask(panel_br, region_mask, (0, 200, 0), alpha=0.35)
-                else:
-                    _blend_color_on_mask(panel_br, region_mask, (0, 0, 255), alpha=0.35)
-
-            # 在每個 region 的峰值位置畫標記
-            for r in region_details:
-                reviewed_real_peak = r.get("real_feature_peak_yx") if not r["is_dust"] else None
-                py, px = reviewed_real_peak if reviewed_real_peak is not None else r["peak_yx"]
-                sx = int(px * scale_x)
-                sy = int(py * scale_y)
-                peak_in = False if reviewed_real_peak is not None else r.get("peak_in_dust", True)
-                if peak_in:
-                    # 峰值在灰塵上 → 黃色圓點
-                    cv2.circle(panel_br, (sx, sy), 4, (0, 255, 255), -1)
-                else:
-                    # 峰值不在灰塵上 → 白色十字 (關鍵：這是被救回的真實缺陷)
-                    cv2.drawMarker(panel_br, (sx, sy), (255, 255, 255),
-                                   cv2.MARKER_CROSS, 10, 2)
-
-            real_count = sum(1 for r in region_details if not r["is_dust"])
-            dust_count = sum(1 for r in region_details if r["is_dust"])
-            verdict_text = f"R:{real_count} D:{dust_count}"
-        elif heatmap_binary is not None and dust_mask is not None:
-            # Fallback: 舊版整塊分析
-            hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            dm = dust_mask
-            if len(dm.shape) == 3:
-                dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
-            dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
-
-            heat_only = (hb > 0) & (dm == 0)
-            dust_only = (dm > 0) & (hb == 0)
-            overlap = (hb > 0) & (dm > 0)
-
-            _blend_color_on_mask(panel_br, heat_only, (0, 0, 255), alpha=0.35)
-            _blend_color_on_mask(panel_br, dust_only, (255, 100, 0), alpha=0.35)
-            _blend_color_on_mask(panel_br, overlap, (0, 255, 0), alpha=0.35)
-            verdict_text = "DUST" if is_dust else "REAL_NG"
-        else:
-            verdict_text = "DUST" if is_dust else "REAL_NG"
-
-        metric_name = "COV" if self.config.dust_heatmap_metric == "coverage" else "IOU"
-        verdict_color = (0, 200, 255) if is_dust else (0, 0, 255)
-        # 顯示 per-region max coverage（實際判定用的值）而非 overall
-        if region_details:
-            region_max_cov = max(r["coverage"] for r in region_details)
-            peak_out_count = sum(1 for r in region_details
-                                 if r["coverage"] >= self.config.dust_heatmap_iou_threshold
-                                 and not r.get("peak_in_dust", True))
-            peak_hint = f" PeakOut:{peak_out_count}" if peak_out_count > 0 else ""
-            cv2.putText(panel_br, f"Region{metric_name}:{region_max_cov:.3f} {verdict_text}{peak_hint}", (5, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
-        else:
-            cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
-
-        # --- 組合 2x2 ---
-        top_row = np.hstack([panel_tl, panel_tr])
-        bottom_row = np.hstack([panel_bl, panel_br])
-        debug_img = np.vstack([top_row, bottom_row])
-
-        return debug_img
+        from capi_heatmap import build_dust_iou_debug_image
+        return build_dust_iou_debug_image(
+            tile_image, anomaly_map, dust_mask, heatmap_binary, iou, top_percent, is_dust,
+            region_details=region_details, region_labels=region_labels,
+            aoi_roi_enabled=aoi_roi_enabled, original_image=original_image,
+            metric_name="COV" if self.config.dust_heatmap_metric == "coverage" else "IOU",
+            iou_threshold=self.config.dust_heatmap_iou_threshold,
+        )
 
     def generate_two_stage_debug_image(
         self,
@@ -5736,145 +5579,11 @@ class CAPIInferencer:
         features: list,
         is_dust: bool,
     ) -> np.ndarray:
-        """
-        產生兩階段灰塵判定的 Debug 可視化圖
-
-        顯示：
-          左上: Heatmap + Hot Zone 框
-          右上: 原圖 + Dust Mask (黃, ext=0) + 特徵點標記
-          左下: 原圖放大 (hot zone 區域)
-          右下: 特徵判定結果 (紅=REAL, 綠=DUST)
-        """
-        sz = 256
-
-        # --- base image ---
-        if len(tile_image.shape) == 2:
-            base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
-        elif tile_image.shape[2] == 1:
-            base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
-        else:
-            base = tile_image.copy()
-        tile_h, tile_w = base.shape[:2]
-        base_sm = cv2.resize(base, (sz, sz))
-
-        anomaly_f = np.asarray(anomaly_map, dtype=np.float32)
-        anomaly_f = np.maximum(anomaly_f, 0.0)
-        h_am, w_am = anomaly_f.shape
-        scale_tile = tile_w / w_am
-
-        # --- dust mask prep ---
-        dm = np.asarray(dust_mask_no_ext, dtype=np.uint8)
-        if len(dm.shape) == 3:
-            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
-        if dm.shape != (tile_h, tile_w):
-            dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
-
-        # --- hot zone detection (same as check_dust_two_stage) ---
-        pos_vals = anomaly_f[anomaly_f > 0]
-        hot_thr = np.percentile(pos_vals, 95) if len(pos_vals) > 0 else 0
-        hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-        hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
-
-        # --- 左上: Heatmap + Hot Zone ---
-        norm = cv2.normalize(anomaly_f, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        norm_rsz = cv2.resize(norm, (sz, sz))
-        hm_color = cv2.applyColorMap(norm_rsz, cv2.COLORMAP_JET)
-        panel_tl = cv2.addWeighted(base_sm, 0.5, hm_color, 0.5, 0)
-        # draw hot zone contour
-        hot_rsz = cv2.resize(hot_mask, (sz, sz), interpolation=cv2.INTER_NEAREST)
-        contours, _ = cv2.findContours(hot_rsz, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(panel_tl, contours, -1, (0, 255, 0), 1)
-        cv2.putText(panel_tl, "Heatmap+HotZone", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        # --- 右上: 原圖 + Dust Mask + 特徵標記 ---
-        panel_tr = base_sm.copy()
-        dm_sm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
-        dust_ol = np.zeros_like(panel_tr)
-        dust_ol[dm_sm > 0] = (0, 255, 255)
-        panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_ol, 0.4, 0)
-        sx, sy = sz / tile_w, sz / tile_h
-
-        def _feature_color(feat):
-            return (255, 255, 0) if feat["is_dust"] else (0, 0, 255)
-
-        def _feature_contour_small(feat):
-            contour_points = feat.get("feature_contour") or []
-            if not contour_points:
-                return None
-            pts = [
-                [int(round(float(px) * sx)), int(round(float(py) * sy))]
-                for px, py in contour_points
-            ]
-            if len(pts) < 2:
-                return None
-            return np.asarray(pts, dtype=np.int32).reshape((-1, 1, 2))
-
-        def _draw_feature(panel, feat, fill=False):
-            fx, fy = feat["abs_pos"]
-            dx, dy = int(round(float(fx) * sx)), int(round(float(fy) * sy))
-            color = _feature_color(feat)
-            contour = _feature_contour_small(feat)
-            if contour is not None:
-                if fill:
-                    overlay = panel.copy()
-                    cv2.drawContours(overlay, [contour], -1, color, -1)
-                    cv2.addWeighted(overlay, 0.65, panel, 0.35, 0, dst=panel)
-                    cv2.drawContours(panel, [contour], -1, (255, 255, 255), 1)
-                else:
-                    cv2.drawContours(panel, [contour], -1, (0, 0, 0), 3)
-                    cv2.drawContours(panel, [contour], -1, color, 2)
-            else:
-                cv2.circle(panel, (dx, dy), 5, color, -1 if fill else 2)
-                if fill:
-                    cv2.circle(panel, (dx, dy), 6, (255, 255, 255), 1)
-
-            cv2.drawMarker(panel, (dx, dy), (0, 0, 0), cv2.MARKER_CROSS, 10, 3)
-            cv2.drawMarker(panel, (dx, dy), color, cv2.MARKER_CROSS, 10, 1)
-            return dx, dy, color
-
-        for feat in features:
-            dx, dy, color = _draw_feature(panel_tr, feat, fill=False)
-            label = "D" if feat["is_dust"] else "R"
-            cv2.putText(panel_tr, label, (dx + 7, dy + 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-        cv2.putText(panel_tr, "Feature contour (R=Real C=Dust)", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
-
-        # --- 左下: 熱區二值化 (Top X%) ---
-        panel_bl = np.zeros((sz, sz, 3), dtype=np.uint8)
-        top_percent = self.config.dust_heatmap_top_percent
-        pos_vals = anomaly_f[anomaly_f > 0]
-        if len(pos_vals) > 0:
-            thr = np.percentile(pos_vals, 100 - top_percent)
-            hb = (anomaly_f >= thr).astype(np.uint8) * 255
-            hb_rsz = cv2.resize(hb, (sz, sz), interpolation=cv2.INTER_NEAREST)
-            panel_bl[hb_rsz > 0] = (255, 255, 255)
-        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
-
-        # --- 右下: 判定結果 ---
-        panel_br = np.zeros((sz, sz, 3), dtype=np.uint8)
-        # dust mask as blue background
-        panel_br[dm_sm > 0] = (180, 80, 0)
-        # feature areas
-        real_count = sum(1 for f in features if not f["is_dust"])
-        dust_count = sum(1 for f in features if f["is_dust"])
-        for feat in features:
-            _draw_feature(panel_br, feat, fill=True)
-
-        verdict_color = (0, 0, 255) if not is_dust else (0, 200, 255)
-        verdict_text = f"R:{real_count} D:{dust_count}"
-        cv2.putText(panel_br, f"TwoStage {verdict_text}", (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
-        cv2.putText(panel_br, "B=DustMask R=Real C=Dust", (5, sz - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (128, 128, 128), 1)
-
-        # --- 組合 2x2 ---
-        top_row = np.hstack([panel_tl, panel_tr])
-        bottom_row = np.hstack([panel_bl, panel_br])
-        return np.vstack([top_row, bottom_row])
+        from capi_heatmap import build_two_stage_debug_image
+        return build_two_stage_debug_image(
+            tile_image, anomaly_map, dust_mask_no_ext, features, is_dust,
+            top_percent=self.config.dust_heatmap_top_percent,
+        )
 
     _PANEL_IMAGE_EXTENSIONS = (".png", ".jpg", ".tif", ".tiff")
 
@@ -9962,6 +9671,7 @@ class CAPIInferencer:
                     "product_bounds": [x1, y1, x2, y2],
                     "tile_polygon": local_polygon.tolist(),
                     "full_tile_score": float(score), "roi_score": roi_score,
+                    "display_top_percent": float(self.config.dust_heatmap_top_percent),
                     "score_method": "binary_roi" if (tile.is_bright_spot_detection or tile.is_half_spot_detection) else "max_ratio",
                     "outside_ignored": True,
                 })

@@ -9307,6 +9307,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                             iou_threshold=dust_iou_thr_override if dust_iou_thr_override is not None else getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.01),
                             dust_metric=getattr(self.inferencer.config, 'dust_heatmap_metric', 'coverage'),
                             dust_high_cov_threshold=getattr(self.inferencer.config, 'dust_high_cov_threshold', None),
+                            dust_heatmap_top_percent=dust_top_pct_override if dust_top_pct_override is not None else getattr(self.inferencer.config, 'dust_heatmap_top_percent', 5.0),
                         )
                         tile_url = f"/debug/heatmaps/{Path(composite_path).name}"
                     except Exception as e:
@@ -11426,6 +11427,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         iou_threshold=getattr(self.inferencer.config, 'dust_heatmap_iou_threshold', 0.01),
                         dust_metric=getattr(self.inferencer.config, 'dust_heatmap_metric', 'coverage'),
                         dust_high_cov_threshold=getattr(self.inferencer.config, 'dust_high_cov_threshold', None),
+                        dust_heatmap_top_percent=getattr(self.inferencer.config, 'dust_heatmap_top_percent', 5.0),
                     )
                     composite_filename = Path(composite_path).name
                     composite_url = f"/debug/heatmaps/{composite_filename}"

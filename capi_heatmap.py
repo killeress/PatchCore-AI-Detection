@@ -53,6 +53,439 @@ def draw_roi_threshold_label(panel: np.ndarray) -> None:
     patch[:] = (patch * (1 - alpha) + np.array((0, 200, 255)) * alpha).astype(np.uint8)
 
 
+def build_aoi_roi_core_mask(
+    anomaly_map: np.ndarray,
+    heatmap_binary: np.ndarray,
+    roi_mask: np.ndarray,
+    top_percent: float,
+) -> np.ndarray:
+    """依既有 percentile 取法選出 ROI 內的 Top% 核心，僅供顯示。"""
+    percent = float(top_percent)
+    if not 0 < percent <= 100:
+        raise ValueError("top_percent 必須大於 0 且不超過 100")
+    values = np.asarray(anomaly_map, dtype=np.float32)
+    h, w = values.shape
+    allowed = cv2.resize((roi_mask > 0).astype(np.uint8), (w, h),
+                          interpolation=cv2.INTER_NEAREST) > 0
+    candidates = cv2.resize((heatmap_binary > 0).astype(np.uint8), (w, h),
+                             interpolation=cv2.INTER_NEAREST) > 0
+    valid = allowed & np.isfinite(values) & (values > 0)
+    core = np.zeros(values.shape, dtype=np.uint8)
+    if np.any(valid):
+        cutoff = np.percentile(values[valid], 100 - percent)
+        core[valid & candidates & (values >= cutoff)] = 255
+    return core
+
+
+def _aoi_roi_outline_mask(roi_mask: np.ndarray, shape, thickness: int = 1) -> np.ndarray:
+    h, w = shape[:2]
+    allowed = cv2.resize((roi_mask > 0).astype(np.uint8), (w, h),
+                         interpolation=cv2.INTER_NEAREST)
+    expanded = cv2.dilate(allowed, np.ones((2 * thickness + 1, 2 * thickness + 1), np.uint8))
+    return (expanded > 0) & (allowed == 0)
+
+
+def _draw_aoi_roi_outline(panel: np.ndarray, roi_mask: Optional[np.ndarray]) -> None:
+    if roi_mask is not None:
+        panel[_aoi_roi_outline_mask(roi_mask, panel.shape)] = (255, 255, 0)
+
+
+def build_dust_iou_debug_image(
+    tile_image: np.ndarray,
+    anomaly_map: np.ndarray,
+    dust_mask: np.ndarray,
+    heatmap_binary: np.ndarray,
+    iou: float,
+    top_percent: float,
+    is_dust: bool,
+    region_details: Optional[list] = None,
+    region_labels: Optional[np.ndarray] = None,
+    aoi_roi_enabled: bool = False,
+    original_image: Optional[np.ndarray] = None,
+    metric_name: str = "COV",
+    iou_threshold: float = 0.01,
+    roi_core_display: bool = False,
+    roi_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    產生灰塵 IOU 交叉驗證的 Debug 可視化圖
+
+    顯示：
+      左上: Heatmap 疊加原圖 (紅色=異常熱區)
+      右上: 灰塵遮罩 (黃色=灰塵區域)
+      左下: 原圖＋半透明熱區遮罩 (AOI ROI 使用達門檻區域標籤)
+      右下: 逐區域判定結果 (紅色=真實缺陷, 綠色=灰塵區域, 藍色=僅灰塵遮罩)
+
+    Args:
+        tile_image: 原始 tile 圖片
+        anomaly_map: 異常熱圖 (float)
+        dust_mask: 灰塵遮罩 (uint8, 255=灰塵)
+        heatmap_binary: 二值化熱區遮罩
+        iou: 計算出的 IOU 值
+        top_percent: 使用的百分位數
+        is_dust: 最終判定是否為灰塵
+        region_details: 逐區域判定詳情 (from check_dust_per_region)
+
+    Returns:
+        Debug 可視化圖 (BGR)
+    """
+
+    sz = 256  # 每個子圖大小
+
+    # --- 準備基底圖 ---
+    if len(tile_image.shape) == 2:
+        base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
+    elif tile_image.shape[2] == 1:
+        base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
+    else:
+        base = tile_image.copy()
+    base = cv2.resize(base, (sz, sz))
+    mask_base = (cv2.resize(ensure_bgr(original_image), (sz, sz))
+                 if original_image is not None else base)
+
+    # --- 左上: Heatmap Overlay ---
+    if anomaly_map is not None:
+        norm = cv2.normalize(anomaly_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        norm = cv2.resize(norm, (sz, sz))
+        heatmap_color = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+        panel_tl = cv2.addWeighted(base, 0.5, heatmap_color, 0.5, 0)
+    else:
+        panel_tl = base.copy()
+    cv2.putText(panel_tl, "Heatmap", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+    # --- 右上: 灰塵遮罩 ---
+    panel_tr = base.copy()
+    if dust_mask is not None:
+        dm = dust_mask
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        dust_overlay = np.zeros_like(panel_tr)
+        dust_overlay[dm > 0] = (0, 255, 255)  # 黃色
+        panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_overlay, 0.4, 0)
+    cv2.putText(panel_tr, "Dust Mask", (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
+    # --- 左下: 熱區二值化 ---
+    panel_bl = mask_base.copy()
+    if heatmap_binary is not None:
+        hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        _blend_color_on_mask(panel_bl, hb, (255, 255, 255), alpha=0.35)
+    if roi_core_display:
+        cv2.putText(panel_bl, f"Top {top_percent:g}% (ROI)", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
+    elif aoi_roi_enabled:
+        draw_roi_threshold_label(panel_bl)
+    else:
+        cv2.putText(panel_bl, f"Top {top_percent:g}%", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
+
+    # --- 右下: 逐區域判定結果 ---
+    panel_br = mask_base.copy()
+    if region_details is not None and heatmap_binary is not None and dust_mask is not None:
+        # 使用逐區域判定結果上色 (labels 由 check_dust_per_region 傳入，避免重複計算)
+        if region_labels is not None:
+            labels = region_labels
+        else:
+            _, labels = cv2.connectedComponents(heatmap_binary.copy(), connectivity=8)
+        num_labels = int(labels.max()) + 1
+        region_dust_map = {r["label_id"]: r["is_dust"] for r in region_details}
+
+        # 縮放 labels 到 sz x sz
+        labels_resized = cv2.resize(labels.astype(np.float32), (sz, sz),
+                                    interpolation=cv2.INTER_NEAREST).astype(np.int32)
+
+        dm = dust_mask
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
+
+        # 先畫僅灰塵遮罩區域 (藍色)
+        hb_resized = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        dust_only = (dm > 0) & (hb_resized == 0)
+        _blend_color_on_mask(panel_br, dust_only, (255, 100, 0), alpha=0.35)
+
+        # 逐區域上色
+        region_peak_dust_map = {r["label_id"]: r.get("peak_in_dust", True) for r in region_details}
+        orig_h, orig_w = heatmap_binary.shape[:2]
+        scale_x = sz / orig_w
+        scale_y = sz / orig_h
+        for label_id in range(1, num_labels):
+            region_mask = (labels_resized == label_id) & (hb_resized > 0)
+            if region_dust_map.get(label_id, False):
+                _blend_color_on_mask(panel_br, region_mask, (0, 200, 0), alpha=0.35)
+            else:
+                _blend_color_on_mask(panel_br, region_mask, (0, 0, 255), alpha=0.35)
+
+        # 在每個 region 的峰值位置畫標記
+        for r in region_details:
+            reviewed_real_peak = r.get("real_feature_peak_yx") if not r["is_dust"] else None
+            py, px = reviewed_real_peak if reviewed_real_peak is not None else r["peak_yx"]
+            sx = int(px * scale_x)
+            sy = int(py * scale_y)
+            peak_in = False if reviewed_real_peak is not None else r.get("peak_in_dust", True)
+            if peak_in:
+                # 峰值在灰塵上 → 黃色圓點
+                cv2.circle(panel_br, (sx, sy), 4, (0, 255, 255), -1)
+            else:
+                # 峰值不在灰塵上 → 白色十字 (關鍵：這是被救回的真實缺陷)
+                cv2.drawMarker(panel_br, (sx, sy), (255, 255, 255),
+                               cv2.MARKER_CROSS, 10, 2)
+
+        real_count = sum(1 for r in region_details if not r["is_dust"])
+        dust_count = sum(1 for r in region_details if r["is_dust"])
+        verdict_text = f"R:{real_count} D:{dust_count}"
+    elif heatmap_binary is not None and dust_mask is not None:
+        # Fallback: 舊版整塊分析
+        hb = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        dm = dust_mask
+        if len(dm.shape) == 3:
+            dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+        dm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
+
+        heat_only = (hb > 0) & (dm == 0)
+        dust_only = (dm > 0) & (hb == 0)
+        overlap = (hb > 0) & (dm > 0)
+
+        _blend_color_on_mask(panel_br, heat_only, (0, 0, 255), alpha=0.35)
+        _blend_color_on_mask(panel_br, dust_only, (255, 100, 0), alpha=0.35)
+        _blend_color_on_mask(panel_br, overlap, (0, 255, 0), alpha=0.35)
+        verdict_text = "DUST" if is_dust else "REAL_NG"
+    else:
+        verdict_text = "DUST" if is_dust else "REAL_NG"
+
+    verdict_color = (0, 200, 255) if is_dust else (0, 0, 255)
+    # 顯示 per-region max coverage（實際判定用的值）而非 overall
+    if region_details:
+        region_max_cov = max(r["coverage"] for r in region_details)
+        peak_out_count = sum(1 for r in region_details
+                             if r["coverage"] >= iou_threshold
+                             and not r.get("peak_in_dust", True))
+        peak_hint = f" PeakOut:{peak_out_count}" if peak_out_count > 0 else ""
+        cv2.putText(panel_br, f"Region{metric_name}:{region_max_cov:.3f} {verdict_text}{peak_hint}", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
+    else:
+        cv2.putText(panel_br, f"{metric_name}:{iou:.3f} {verdict_text}", (5, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, verdict_color, 1)
+
+    for panel in (panel_tl, panel_tr, panel_bl, panel_br):
+        _draw_aoi_roi_outline(panel, roi_mask)
+
+    # --- 組合 2x2 ---
+    top_row = np.hstack([panel_tl, panel_tr])
+    bottom_row = np.hstack([panel_bl, panel_br])
+    debug_img = np.vstack([top_row, bottom_row])
+
+    return debug_img
+
+
+def build_two_stage_debug_image(
+    tile_image: np.ndarray,
+    anomaly_map: np.ndarray,
+    dust_mask_no_ext: np.ndarray,
+    features: list,
+    is_dust: bool,
+    top_percent: float = 5.0,
+    display_anomaly_map: Optional[np.ndarray] = None,
+    heatmap_binary: Optional[np.ndarray] = None,
+    evaluation_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    產生兩階段灰塵判定的 Debug 可視化圖
+
+    顯示：
+      左上: Heatmap + Hot Zone 框
+      右上: 原圖 + Dust Mask (黃, ext=0) + 特徵點標記
+      左下: 原圖放大 (hot zone 區域)
+      右下: 特徵判定結果 (紅=REAL, 綠=DUST)
+    """
+    sz = 256
+
+    # --- base image ---
+    if len(tile_image.shape) == 2:
+        base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
+    elif tile_image.shape[2] == 1:
+        base = cv2.cvtColor(tile_image, cv2.COLOR_GRAY2BGR)
+    else:
+        base = tile_image.copy()
+    tile_h, tile_w = base.shape[:2]
+    base_sm = cv2.resize(base, (sz, sz))
+
+    anomaly_f = np.asarray(anomaly_map, dtype=np.float32)
+    anomaly_f = np.maximum(anomaly_f, 0.0)
+    h_am, w_am = anomaly_f.shape
+    scale_tile = tile_w / w_am
+
+    # --- dust mask prep ---
+    dm = np.asarray(dust_mask_no_ext, dtype=np.uint8)
+    if len(dm.shape) == 3:
+        dm = cv2.cvtColor(dm, cv2.COLOR_BGR2GRAY)
+    if dm.shape != (tile_h, tile_w):
+        dm = cv2.resize(dm, (tile_w, tile_h), interpolation=cv2.INTER_NEAREST)
+
+    # --- hot zone detection (same as check_dust_two_stage) ---
+    pos_vals = anomaly_f[anomaly_f > 0]
+    hot_thr = np.percentile(pos_vals, 95) if len(pos_vals) > 0 else 0
+    hot_mask = (anomaly_f >= hot_thr).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+    hot_mask = cv2.dilate(hot_mask, kernel, iterations=2)
+    if evaluation_mask is not None:
+        allowed = cv2.resize((evaluation_mask > 0).astype(np.uint8), (w_am, h_am),
+                             interpolation=cv2.INTER_NEAREST)
+        hot_mask[allowed == 0] = 0
+
+    # --- 左上: Heatmap + Hot Zone ---
+    display_values = anomaly_f if display_anomaly_map is None else display_anomaly_map
+    norm = cv2.normalize(display_values, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    norm_rsz = cv2.resize(norm, (sz, sz))
+    hm_color = cv2.applyColorMap(norm_rsz, cv2.COLORMAP_JET)
+    panel_tl = cv2.addWeighted(base_sm, 0.5, hm_color, 0.5, 0)
+    # draw hot zone contour
+    hot_rsz = cv2.resize(hot_mask, (sz, sz), interpolation=cv2.INTER_NEAREST)
+    contours, _ = cv2.findContours(hot_rsz, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(panel_tl, contours, -1, (0, 255, 0), 1)
+    cv2.putText(panel_tl, "Heatmap+HotZone", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    # --- 右上: 原圖 + Dust Mask + 特徵標記 ---
+    panel_tr = base_sm.copy()
+    dm_sm = cv2.resize(dm, (sz, sz), interpolation=cv2.INTER_NEAREST)
+    dust_ol = np.zeros_like(panel_tr)
+    dust_ol[dm_sm > 0] = (0, 255, 255)
+    panel_tr = cv2.addWeighted(panel_tr, 0.6, dust_ol, 0.4, 0)
+    sx, sy = sz / tile_w, sz / tile_h
+
+    def _feature_color(feat):
+        return (255, 255, 0) if feat["is_dust"] else (0, 0, 255)
+
+    def _feature_contour_small(feat):
+        contour_points = feat.get("feature_contour") or []
+        if not contour_points:
+            return None
+        pts = [
+            [int(round(float(px) * sx)), int(round(float(py) * sy))]
+            for px, py in contour_points
+        ]
+        if len(pts) < 2:
+            return None
+        return np.asarray(pts, dtype=np.int32).reshape((-1, 1, 2))
+
+    def _draw_feature(panel, feat, fill=False):
+        fx, fy = feat["abs_pos"]
+        dx, dy = int(round(float(fx) * sx)), int(round(float(fy) * sy))
+        color = _feature_color(feat)
+        contour = _feature_contour_small(feat)
+        if contour is not None:
+            if fill:
+                overlay = panel.copy()
+                cv2.drawContours(overlay, [contour], -1, color, -1)
+                cv2.addWeighted(overlay, 0.65, panel, 0.35, 0, dst=panel)
+                cv2.drawContours(panel, [contour], -1, (255, 255, 255), 1)
+            else:
+                cv2.drawContours(panel, [contour], -1, (0, 0, 0), 3)
+                cv2.drawContours(panel, [contour], -1, color, 2)
+        else:
+            cv2.circle(panel, (dx, dy), 5, color, -1 if fill else 2)
+            if fill:
+                cv2.circle(panel, (dx, dy), 6, (255, 255, 255), 1)
+
+        cv2.drawMarker(panel, (dx, dy), (0, 0, 0), cv2.MARKER_CROSS, 10, 3)
+        cv2.drawMarker(panel, (dx, dy), color, cv2.MARKER_CROSS, 10, 1)
+        return dx, dy, color
+
+    for feat in features:
+        dx, dy, color = _draw_feature(panel_tr, feat, fill=False)
+        label = "D" if feat["is_dust"] else "R"
+        cv2.putText(panel_tr, label, (dx + 7, dy + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+    cv2.putText(panel_tr, "Feature contour (R=Real C=Dust)", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
+
+    # --- 左下: 熱區二值化 (Top X%) ---
+    panel_bl = np.zeros((sz, sz, 3), dtype=np.uint8)
+    pos_vals = anomaly_f[anomaly_f > 0]
+    if heatmap_binary is not None:
+        hb_rsz = cv2.resize(heatmap_binary, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        panel_bl[hb_rsz > 0] = (255, 255, 255)
+    elif len(pos_vals) > 0:
+        thr = np.percentile(pos_vals, 100 - top_percent)
+        hb = (anomaly_f >= thr).astype(np.uint8) * 255
+        hb_rsz = cv2.resize(hb, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        panel_bl[hb_rsz > 0] = (255, 255, 255)
+    scope = " (ROI)" if evaluation_mask is not None else ""
+    cv2.putText(panel_bl, f"Top {top_percent:g}%{scope}", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1)
+
+    # --- 右下: 判定結果 ---
+    panel_br = np.zeros((sz, sz, 3), dtype=np.uint8)
+    # dust mask as blue background
+    panel_br[dm_sm > 0] = (180, 80, 0)
+    # feature areas
+    real_count = sum(1 for f in features if not f["is_dust"])
+    dust_count = sum(1 for f in features if f["is_dust"])
+    for feat in features:
+        _draw_feature(panel_br, feat, fill=True)
+
+    verdict_color = (0, 0, 255) if not is_dust else (0, 200, 255)
+    verdict_text = f"R:{real_count} D:{dust_count}"
+    cv2.putText(panel_br, f"TwoStage {verdict_text}", (5, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, verdict_color, 1)
+    cv2.putText(panel_br, "B=DustMask R=Real C=Dust", (5, sz - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (128, 128, 128), 1)
+
+    for panel in (panel_tl, panel_tr, panel_bl, panel_br):
+        _draw_aoi_roi_outline(panel, evaluation_mask)
+
+    # --- 組合 2x2 ---
+    top_row = np.hstack([panel_tl, panel_tr])
+    bottom_row = np.hstack([panel_bl, panel_br])
+    return np.vstack([top_row, bottom_row])
+
+
+def build_aoi_roi_debug_panel(
+    tile_image: np.ndarray,
+    anomaly_map: Optional[np.ndarray],
+    heatmap_binary: Optional[np.ndarray],
+    dust_mask: Optional[np.ndarray],
+    roi_mask: Optional[np.ndarray],
+    tile_size: int = 512,
+    top_percent: Optional[float] = None,
+    original_image: Optional[np.ndarray] = None,
+    is_dust: bool = False,
+    region_details: Optional[list] = None,
+    decision_binary: Optional[np.ndarray] = None,
+    iou: float = 0.0,
+    metric_name: str = "COV",
+    iou_threshold: float = 0.01,
+) -> Optional[np.ndarray]:
+    """AOI Top% 核心沿用一般灰塵診斷圖，保留完整 tile 的底圖與比例。"""
+    if (heatmap_binary is None or dust_mask is None or roi_mask is None
+            or not np.any(roi_mask)):
+        return None
+    h, w = roi_mask.shape
+    allowed = roi_mask > 0
+
+    def _scoped_mask(values):
+        if values.ndim == 3:
+            values = cv2.cvtColor(values, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize((values > 0).astype(np.uint8), (w, h),
+                             interpolation=cv2.INTER_NEAREST)
+        return ((resized > 0) & allowed).astype(np.uint8) * 255
+
+    core = _scoped_mask(heatmap_binary)
+    dust = _scoped_mask(dust_mask)
+    labels = None
+    if decision_binary is not None:
+        _, labels = cv2.connectedComponents(_scoped_mask(decision_binary), connectivity=8)
+    debug = build_dust_iou_debug_image(
+        tile_image, anomaly_map, dust, core, iou,
+        100.0 if top_percent is None else top_percent, is_dust,
+        region_details=region_details, region_labels=labels,
+        original_image=original_image, metric_name=metric_name,
+        iou_threshold=iou_threshold, roi_core_display=True, roi_mask=roi_mask,
+    )
+    return cv2.resize(debug, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+
+
 def _draw_dashed_contour(
     img: np.ndarray,
     fg_inner: np.ndarray,
@@ -191,6 +624,9 @@ def build_region_zoom_panels(
     bomb_ignored_mask: Optional[np.ndarray] = None,
     bomb_priority_applied: bool = False,
     tile_image: Optional[np.ndarray] = None,
+    display_heatmap_binary: Optional[np.ndarray] = None,
+    display_top_percent: Optional[float] = None,
+    roi_mask: Optional[np.ndarray] = None,
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個異常區域生成放大面板（二值化 heatmap + 灰塵遮罩疊加 + 計算數值標註）。
 
@@ -203,6 +639,7 @@ def build_region_zoom_panels(
         iou_threshold: 判定閾值
         max_panels: 最多生成幾張
         tile_image: 原始 tile，提供時在原圖上疊加半透明遮罩
+        display_heatmap_binary: 可選的顯示核心；正式判定及數值仍使用原始區域
 
     Returns:
         [(panel_image, label_text), ...] 最多 max_panels 筆
@@ -225,7 +662,13 @@ def build_region_zoom_panels(
     heat_bin = heatmap_binary
     if len(heat_bin.shape) == 3:
         heat_bin = heat_bin[:, :, 0]
-    heat_resized = cv2.resize(heat_bin, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+    display_bin = heat_bin
+    decision_labels = None
+    if display_heatmap_binary is not None:
+        display_bin = cv2.resize(display_heatmap_binary, (heat_bin.shape[1], heat_bin.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST)
+        _, decision_labels = cv2.connectedComponents((heat_bin > 0).astype(np.uint8), connectivity=8)
+    heat_resized = cv2.resize(display_bin, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
     bomb_resized = None
     if bomb_excluded_mask is not None:
         bomb_resized = cv2.resize(bomb_excluded_mask, (tile_size, tile_size),
@@ -243,6 +686,8 @@ def build_region_zoom_panels(
         dm_resized = cv2.resize(dm, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
     h_src, w_src = heatmap_binary.shape[:2]
+    roi_border = (_aoi_roi_outline_mask(roi_mask, (tile_size, tile_size))
+                  if roi_mask is not None else None)
     original = (cv2.resize(ensure_bgr(tile_image), (tile_size, tile_size))
                 if tile_image is not None else None)
     results = []
@@ -294,10 +739,15 @@ def build_region_zoom_panels(
                 background[active] = (background[active] * 0.65 + base[active] * 0.35).astype(np.uint8)
                 base = background
 
+            if roi_border is not None:
+                base[roi_border[y1:y2, x1:x2]] = (255, 255, 0)
             panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
             # Dark backing keeps scores/reasons readable on bright source images.
-            cv2.rectangle(panel, (0, 0), (tile_size - 1, 145 if method_label else 120),
+            core_view = decision_labels is not None and display_top_percent is not None
+            extra_y = 160 if method_label else 135
+            header_bottom = extra_y + 40 if core_view else 145 if method_label else 120
+            cv2.rectangle(panel, (0, 0), (tile_size - 1, header_bottom),
                           (20, 20, 20), -1)
             cv2.rectangle(panel, (0, tile_size - 30), (tile_size - 1, tile_size - 1),
                           (20, 20, 20), -1)
@@ -321,6 +771,8 @@ def build_region_zoom_panels(
                 metric_text = f"{metric_name}: {cov:.4f} (overlap:{dust_ol})"
             else:
                 metric_text = f"{metric_name}: {dust_ol}/{metric_denominator} = {cov:.4f}"
+            if core_view:
+                metric_text = "Decision " + metric_text
             cv2.putText(panel, metric_text, (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
             cv2.putText(panel, f"Score: {score:.4f}", (10, 85),
@@ -366,12 +818,30 @@ def build_region_zoom_panels(
                 cv2.putText(panel, f"[{method_label}]", (10, 135),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, ml_color, 1)
 
+            if core_view:
+                region_core = (display_bin > 0) & (decision_labels == region["label_id"])
+                core_area = int(np.count_nonzero(region_core))
+                core_overlap = 0
+                if dust_mask is not None:
+                    core_dust = dust_mask
+                    if core_dust.ndim == 3:
+                        core_dust = cv2.cvtColor(core_dust, cv2.COLOR_BGR2GRAY)
+                    core_dust = cv2.resize(core_dust, (w_src, h_src), interpolation=cv2.INTER_NEAREST)
+                    core_overlap = int(np.count_nonzero(region_core & (core_dust > 0)))
+                core_cov = core_overlap / core_area if core_area else 0.0
+                cv2.putText(panel, f"View: ROI Top {display_top_percent:g}% core", (10, extra_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+                cv2.putText(panel, f"Core COV: {core_overlap}/{core_area} = {core_cov:.4f} (display)",
+                            (10, extra_y + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+
             # 圖例
             legend_y = tile_size - 15
             legend = ("White=Heat Yellow=Dust Green=Overlap Magenta=BOMB"
                       if bomb_resized is not None else "White=Heat  Yellow=Dust  Green=Overlap")
             if bomb_priority_applied:
                 legend = "Magenta=BOMB Gray=Ignored Yellow=Dust Green=Overlap"
+            elif core_view:
+                legend = "White=Core  Yellow=Dust  Green=Overlap"
             cv2.putText(panel, legend, (10, legend_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
@@ -396,6 +866,7 @@ def build_feature_zoom_panels(
     tile_size: int = 512,
     max_panels: int = 3,
     final_label: str = "",
+    roi_mask: Optional[np.ndarray] = None,
 ) -> List[Tuple[np.ndarray, str]]:
     """為每個 TWO_STAGE feature 生成放大面板（與 Original 上的 D/R 圈一一對應）。
 
@@ -448,6 +919,8 @@ def build_feature_zoom_panels(
 
     sx = tile_size / max(1, tile_w_orig)
     sy = tile_size / max(1, tile_h_orig)
+    roi_border = (_aoi_roi_outline_mask(roi_mask, (tile_size, tile_size))
+                  if roi_mask is not None else None)
     results = []
 
     for idx, feat in enumerate(sorted_feats, start=1):
@@ -477,6 +950,8 @@ def build_feature_zoom_panels(
                 base[dust_only] = (0, 255, 255)
                 base[overlap] = (0, 255, 0)
 
+            if roi_border is not None:
+                base[roi_border[y1:y2, x1:x2]] = (255, 255, 0)
             panel = cv2.resize(base, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
 
             is_dust = bool(feat.get("is_dust", False))
@@ -712,6 +1187,7 @@ class HeatmapManager:
         iou_threshold: float = 0.01,
         dust_metric: str = "coverage",
         dust_high_cov_threshold: Optional[float] = None,
+        dust_heatmap_top_percent: float = 5.0,
     ) -> str:
         """
         儲存單一 tile 的組合圖 (Original | Preprocessed | Heatmap | OMIT Crop | Dust Mask)
@@ -744,11 +1220,9 @@ class HeatmapManager:
             if not roi.get('enabled') or roi_mask is None:
                 return panel
             panel = panel.copy()
-            allowed = cv2.resize(roi_mask, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST) > 0
             # Keep full-tile brightness/colors; draw outside the ROI so defects
             # on the evaluated boundary remain unobstructed.
-            expanded = cv2.dilate(allowed.astype(np.uint8), np.ones((5, 5), dtype=np.uint8)) > 0
-            panel[expanded & ~allowed] = (255, 255, 0)
+            panel[_aoi_roi_outline_mask(roi_mask, panel.shape, thickness=2)] = (255, 255, 0)
             return panel
 
         def _roi_banner(composite):
@@ -1030,8 +1504,40 @@ class HeatmapManager:
         # 優先用 TWO_STAGE features (與 Original 上的 D/R 圈一一對應)；
         # 沒跑 two_stage 時才退回 PER_REGION region_details。
         zoom_results = []
+        roi_overlap_debug = False
         bomb_diagnostics = getattr(tile_info, 'bomb_region_diagnostics', None) if tile_info else None
         ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
+        roi_core = None
+        roi_top_percent = float(roi.get('display_top_percent', dust_heatmap_top_percent))
+        if has_omit and roi.get('enabled') and roi_mask is not None and not bomb_diagnostics:
+            decision_binary = getattr(tile_info, 'dust_heatmap_binary', None)
+            display_map = getattr(tile_info, 'aoi_roi_full_map', None)
+            if display_map is None:
+                display_map = anomaly_map
+            if decision_binary is not None and display_map is not None:
+                roi_core = build_aoi_roi_core_mask(display_map, decision_binary, roi_mask, roi_top_percent)
+                display_dust = dust_mask
+                if "TWO_STAGE" in dust_detail:
+                    precise_dust = getattr(tile_info, 'dust_two_stage_dust_mask', None)
+                    if precise_dust is not None:
+                        display_dust = precise_dust
+                if "TWO_STAGE" in dust_detail and display_dust is not None:
+                    roi_debug = build_two_stage_debug_image(
+                        tile_image, anomaly_map, display_dust, ts_features or [], is_dust,
+                        top_percent=roi_top_percent, display_anomaly_map=display_map,
+                        heatmap_binary=roi_core, evaluation_mask=roi_mask,
+                    )
+                else:
+                    roi_debug = build_aoi_roi_debug_panel(
+                        tile_image, display_map, roi_core, display_dust, roi_mask,
+                        tile_size, top_percent=roi_top_percent, original_image=original_src,
+                        is_dust=is_dust, region_details=getattr(tile_info, 'dust_region_details', None),
+                        decision_binary=decision_binary, iou=dust_iou,
+                        metric_name=metric_name, iou_threshold=iou_threshold,
+                    )
+                if roi_debug is not None:
+                    iou_debug_panel = roi_debug
+                    roi_overlap_debug = True
         if has_omit and bomb_diagnostics:
             iou_debug_panel = build_bomb_region_debug_panel(bomb_diagnostics, tile_size, original_src)
             zoom_results = build_region_zoom_panels(
@@ -1055,10 +1561,11 @@ class HeatmapManager:
             tile_h_orig = getattr(tile_info, 'height', tile_size)
             tile_w_orig = getattr(tile_info, 'width', tile_size)
             zoom_results = build_feature_zoom_panels(
-                heatmap_binary, ts_dust_mask, ts_features,
+                roi_core if roi_core is not None else heatmap_binary, ts_dust_mask, ts_features,
                 tile_w_orig=tile_w_orig, tile_h_orig=tile_h_orig,
                 tile_size=tile_size,
                 final_label=final_label,
+                roi_mask=roi_mask if roi.get('enabled') else None,
             )
         elif has_omit and tile_info is not None and getattr(tile_info, 'dust_region_details', None):
             region_details = getattr(tile_info, 'dust_region_details', None)
@@ -1070,6 +1577,9 @@ class HeatmapManager:
                 iou_threshold=iou_threshold,
                 high_cov_threshold=dust_high_cov_threshold,
                 tile_image=original_src,
+                display_heatmap_binary=roi_core if roi_overlap_debug else None,
+                display_top_percent=roi_top_percent if roi_overlap_debug else None,
+                roi_mask=roi_mask if roi.get('enabled') else None,
             )
 
         # --- 底部獨立標籤列（不蓋到面板內容）---
@@ -1079,6 +1589,9 @@ class HeatmapManager:
                 debug_label = ("Final: M=BOMB Gray=Ignored G=DUST"
                                if bomb_diagnostics.get('priority_applied')
                                else "Final: M=BOMB R=NG G=DUST")
+            elif roi_overlap_debug:
+                kind = "TwoStage" if is_two_stage else metric_name
+                debug_label = f"{kind} Debug | ROI Top {roi_top_percent:g}%"
             elif is_two_stage:
                 debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
@@ -2327,6 +2840,7 @@ class HeatmapManager:
                                 iou_threshold=inferencer.config.dust_heatmap_iou_threshold,
                                 dust_metric=getattr(inferencer.config, 'dust_heatmap_metric', 'coverage'),
                                 dust_high_cov_threshold=getattr(inferencer.config, 'dust_high_cov_threshold', None),
+                                dust_heatmap_top_percent=getattr(inferencer.config, 'dust_heatmap_top_percent', 5.0),
                             )
                             saved_files.append(path)
                         except Exception as e:

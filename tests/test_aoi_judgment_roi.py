@@ -75,6 +75,14 @@ def test_switch_off_keeps_full_tile_and_grid_unaffected():
     assert tile.aoi_roi_mask is None
 
 
+def test_roi_captures_configured_display_top_percent():
+    inf, result, tile = case([(256, 256, .8), (400, 400, 1)])
+    inf.config.dust_heatmap_top_percent = 0.5
+    inf._apply_aoi_judgment_roi([result], RESOLUTION)
+    inf.config.dust_heatmap_top_percent = 10
+    assert tile.decision_context['aoi_judgment_roi']['display_top_percent'] == 0.5
+
+
 @pytest.mark.parametrize('version', ['v1', 'v2'])
 @pytest.mark.parametrize('source', ['client', 'config'])
 def test_five_logged_aoi_bombs_ignore_spreading_heat(version, source, monkeypatch):
