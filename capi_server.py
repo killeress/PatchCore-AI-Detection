@@ -2037,12 +2037,19 @@ def _stored_machine_judgment_for_record(
     results: List[ImageResult],
     aoi_report: Optional[Dict] = None,
 ) -> str:
-    # Client 傳入 OK 時，資料庫的機檢判定必須與 AOI response 一致；
-    # AOI TXT 缺陷只維持原本對非 OK 請求的 NG 防護。
+    # Client 傳入 OK 時，資料庫的機檢判定必須與 AOI response 一致。
     if str(machine_judgment or "").upper() == "OK":
         return machine_judgment
     if str(machine_judgment or "").upper() != "HY" and _aoi_report_has_defects(aoi_report):
-        return "NG"
+        # AOI 報點先採 NG，仍須依整片推論結果套用全炸彈轉 OK。
+        machine_judgment = "NG"
+        # CSJBL 不進入一般切片判定，不能因其他切片全是炸彈而一併排除。
+        if any(
+            getattr(defect, "defect_code", "") in AOI_PASSTHROUGH_CODES
+            for defects in aoi_report.values()
+            for defect in defects
+        ):
+            return machine_judgment
     return _normalize_machine_judgment_for_bomb_only_panel(machine_judgment, results)
 
 

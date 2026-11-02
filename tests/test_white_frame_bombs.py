@@ -9,6 +9,7 @@ from capi_config import BombDefect, CAPIConfig
 from capi_inference import CAPIInferencer, ImageResult
 from capi_server import (
     _iter_qjpg_defect_records, _normalize_machine_judgment_for_bomb_only_panel,
+    _stored_machine_judgment_for_record,
     _white_frame_aoi_kwargs, _white_frame_image_result, aggregate_judgment,
     parse_request, results_to_db_data,
 )
@@ -137,6 +138,7 @@ def test_cv_excludes_full_bomb_gaps_but_keeps_other_or_extended_gaps(tmp_path, e
     result = _white_frame_image_result(inspection)
     assert aggregate_judgment([result])[0] == expected
     assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == expected
+    assert _stored_machine_judgment_for_record("NG", [result], report) == expected
     records = _iter_qjpg_defect_records([result], parsed["resolution"], inf.config)
     assert any(record.startswith("PCDK3") and record.endswith("WHITEFRA") for record in records)
     assert any(not record.startswith("PCDK3") for record in records) is (extra != "none")

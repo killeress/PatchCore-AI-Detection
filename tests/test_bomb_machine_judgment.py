@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from capi_server import (
     _normalize_machine_judgment_for_bomb_only_panel,
     _stored_machine_judgment_for_record,
@@ -81,8 +83,50 @@ def test_record_machine_judgment_preserves_client_ok_with_aoi_report():
     assert _stored_machine_judgment_for_record("OK", [result], aoi_report) == "OK"
 
 
-def test_record_machine_judgment_uses_aoi_report_ng_before_bomb_only_normalization():
-    result = _result(tiles=[_tile(is_bomb=True)])
-    aoi_report = {"WGF50500": [SimpleNamespace(defect_code="C1111")]}
+def test_record_machine_judgment_normalizes_all_five_reported_bombs_to_ok():
+    result = _result(tiles=[_tile(is_bomb=True) for _ in range(5)])
+    aoi_report = {"WINDOWS_BG": [SimpleNamespace(defect_code="CDK2") for _ in range(5)]}
+
+    assert _stored_machine_judgment_for_record("NG", [result], aoi_report) == "OK"
+
+
+def test_record_machine_judgment_keeps_ng_for_bomb_and_real_tile():
+    result = _result(tiles=[_tile(is_bomb=True), _tile()])
+    aoi_report = {"WINDOWS_BG": [SimpleNamespace(defect_code="CDK2") for _ in range(2)]}
 
     assert _stored_machine_judgment_for_record("NG", [result], aoi_report) == "NG"
+
+
+@pytest.mark.parametrize("other_result", [
+    pytest.param(_result(tiles=[_tile()]), id="other-lighting-real-tile"),
+    pytest.param(_result(edges=[_edge()]), id="real-edge"),
+    pytest.param(SimpleNamespace(white_frame_result={"status": "NG"}), id="white-frame-ng"),
+])
+def test_record_machine_judgment_keeps_ng_for_real_defect_elsewhere(other_result):
+    bomb_result = _result(tiles=[_tile(is_bomb=True)])
+    aoi_report = {"WINDOWS_BG": [SimpleNamespace(defect_code="CDK2")]}
+
+    assert _stored_machine_judgment_for_record("NG", [bomb_result, other_result], aoi_report) == "NG"
+
+
+def test_record_machine_judgment_keeps_ng_for_passthrough_defect_with_bombs():
+    result = _result(tiles=[_tile(is_bomb=True)])
+    aoi_report = {"WINDOWS_BG": [
+        SimpleNamespace(defect_code="CDK2"), SimpleNamespace(defect_code="CSJBL"),
+    ]}
+
+    assert _stored_machine_judgment_for_record("NG", [result], aoi_report) == "NG"
+
+
+@pytest.mark.parametrize("results", [[], [_result()], [_result(tiles=[_tile(is_dust=True)])]])
+def test_record_machine_judgment_does_not_convert_without_bomb_evidence(results):
+    aoi_report = {"WINDOWS_BG": [SimpleNamespace(defect_code="CDK2")]}
+
+    assert _stored_machine_judgment_for_record("NG", results, aoi_report) == "NG"
+
+
+def test_record_machine_judgment_preserves_hy_with_bombs_and_report():
+    result = _result(tiles=[_tile(is_bomb=True)])
+    aoi_report = {"WINDOWS_BG": [SimpleNamespace(defect_code="CDK2")]}
+
+    assert _stored_machine_judgment_for_record("HY", [result], aoi_report) == "HY"

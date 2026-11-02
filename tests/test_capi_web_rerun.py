@@ -30,6 +30,7 @@ def test_rerun_passes_stored_request_context_to_inference(
 ):
     import capi_server
     from capi_config import CAPIConfig
+    from capi_inference import AOIReportDefect
     from test_qjpg_report_response import _image_result, _tile
     from capi_web import CAPIWebHandler
 
@@ -42,6 +43,7 @@ def test_rerun_passes_stored_request_context_to_inference(
     inferencer.config = CAPIConfig()
     inferencer.config.side_white_detection_enabled = False
     inferencer.config.image_preprocess_pipeline = []
+    aoi_report = {"STANDARD": [AOIReportDefect("CDK2", 1481, 346, "STANDARD")]}
     inferencer.process_panel.return_value = (
         [result],
         None,
@@ -49,7 +51,7 @@ def test_rerun_passes_stored_request_context_to_inference(
         "",
         False,
         None,
-        {},
+        aoi_report,
     )
     parsed_aoi_report = {"W0F00000": [object()]}
     inferencer._parse_aoi_report_txt.return_value = parsed_aoi_report
@@ -82,11 +84,6 @@ def test_rerun_passes_stored_request_context_to_inference(
         capi_server,
         "results_to_db_data",
         lambda _results, _heatmap_info: [{"is_ng": False}],
-    )
-    monkeypatch.setattr(
-        capi_server,
-        "_stored_machine_judgment_for_record",
-        lambda judgment, _results, _report: judgment,
     )
     monkeypatch.setattr(capi_server.InferenceLogCapture, "start_capture", lambda: None)
     monkeypatch.setattr(capi_server.InferenceLogCapture, "stop_capture", lambda: "")
@@ -125,6 +122,7 @@ def test_rerun_passes_stored_request_context_to_inference(
     assert CAPIWebHandler._rerun_tasks[7]["status"] == "done"
     db.update_record_for_rerun.assert_called_once()
     saved = db.update_record_for_rerun.call_args.kwargs
+    assert saved["machine_judgment"] == "OK"
     assert "client_response_text" not in saved
     assert "[RERUN_RESPONSE_PREVIEW]" in saved["inference_log"]
     assert "未傳送 Client" in saved["inference_log"]
