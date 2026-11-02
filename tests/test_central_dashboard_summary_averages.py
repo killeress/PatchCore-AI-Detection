@@ -1,4 +1,4 @@
-"""中控看板即時模式：AAPI 上線且正常線體的平均排片率摘要卡（內容級檢查）。"""
+"""中控看板即時模式：目前製程上線且正常線體的加權排片率摘要卡。"""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,7 +18,7 @@ def test_summary_average_cards_exist():
 
 
 def test_summary_average_logic_filters_active_zone_production_online():
-    """納入目前製程類別（CAPI/AAPI 頁籤連動）、上線且狀態正常的線體，算術平均。"""
+    """納入目前製程類別（CAPI/AAPI 頁籤連動）、上線且狀態正常的線體。"""
     app_js = _read("app.js")
     assert "renderSummaryAverages" in app_js
     # 既有 updateSummary 已出現一次；平均卡邏輯需再出現一次

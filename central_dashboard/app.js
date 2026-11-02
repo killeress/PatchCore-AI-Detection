@@ -2002,7 +2002,7 @@
 
     function renderSummaryAverages() {
         // 跟著「製程類別」頁籤：目前類別中「上線」且狀態「正常」線體的
-        // 當班排片率算術平均；排片率無資料（顯示 —）的線自動排除
+        // 當班 NG 合計 ÷ 投入合計（投入量加權）；無資料或無投入的線自動排除
         const aoiElement = document.getElementById("summary-avg-aoi-rate");
         const aiElement = document.getElementById("summary-avg-ai-rate");
         if (!aoiElement || !aiElement) {
@@ -2025,6 +2025,8 @@
                 }
                 entries.push({
                     name: state.line.line || state.line.id,
+                    ng,
+                    total: state.data.total,
                     rate: (ng / state.data.total) * 100
                 });
             }
@@ -2033,13 +2035,15 @@
                 element.title = `${label}：無符合條件的 ${zoneLabel} 線體（需上線、狀態正常且有當班資料）`;
                 return;
             }
-            const mean =
-                entries.reduce((sum, entry) => sum + entry.rate, 0) / entries.length;
-            setText(element, `${formatDecimal(mean, 1)}%`);
+            const totalNg = entries.reduce((sum, entry) => sum + entry.ng, 0);
+            const totalInput = entries.reduce((sum, entry) => sum + entry.total, 0);
+            const rate = (totalNg / totalInput) * 100;
+            setText(element, `${formatDecimal(rate, 2)}%`);
             element.title =
-                `${label}（${entries.length} 條線算術平均）：` +
+                `${label}（${entries.length} 條線，投入量加權；目前製程、上線且狀態正常）：` +
+                `NG 合計 ${formatNumber(totalNg)} ÷ 投入合計 ${formatNumber(totalInput)} × 100 = ${formatDecimal(rate, 2)}%；` +
                 entries
-                    .map((entry) => `${entry.name} ${formatDecimal(entry.rate, 1)}%`)
+                    .map((entry) => `${entry.name} ${formatDecimal(entry.rate, 2)}%`)
                     .join("、");
         };
         renderAverage(aoiElement, `${zoneLabel} 平均 AOI 排片率`, (data) => data.aoiNg);
