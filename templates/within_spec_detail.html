@@ -262,6 +262,9 @@
 
 <section class="ws-band">
     <div class="ws-section-title">計算摘要</div>
+    {% if auto_decision.scope == 'front' %}
+    <p class="ws-muted">本次規格內判定適用於一般缺陷；整片結果另合併 CSJBL 側拍判定，請至推論紀錄查看。</p>
+    {% endif %}
     <div class="ws-metrics">
         <div class="ws-metric">
             <div class="label">判定結果</div>

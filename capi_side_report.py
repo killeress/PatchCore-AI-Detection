@@ -75,6 +75,36 @@ CONVERSION_FILTERS = {
 }
 
 
+SIDE_RELEASE_STATUSES = frozenset({"mark_suppressed", "omit_suppressed", "tape_suppressed", "no_anomaly"})
+
+
+def remaining_csjbl_records(records, points):
+    """Remove only the original protocol records whose same-screen point passed."""
+    released = [point for point in points if point.get("status") in SIDE_RELEASE_STATUSES]
+    remaining = []
+    for record in records:
+        try:
+            defect = {"type": "aoi_passthrough", "defect_code": record[:5],
+                      "product_x": int(record[5:10]), "product_y": int(record[10:15]),
+                      "image": record[15:]}
+            if _covered_csjbl_ng(defect, released):
+                continue
+        except (ValueError, TypeError):
+            pass
+        remaining.append(record)
+    return remaining
+
+
+def _active_ng_details(row):
+    """Keep original evidence while excluding front defects released in this run."""
+    details = _json(row.get("ng_details"), None)
+    front = (row.get("payload") or {}).get("front_decision") or {}
+    if isinstance(details, list) and front.get("within_spec_passed") and front.get("judgment") == "OK-i":
+        resolved = front.get("resolved_ng_details") or []
+        return [defect for defect in details if defect not in resolved]
+    return details
+
+
 def _covered_csjbl_ng(defect, points):
     """Match a formal NG reason to a saved AOI point from the same screen."""
     from capi_image_naming import canonical_image_prefix
@@ -105,6 +135,7 @@ def record_conversion(row, comparison):
     if not kinds:
         return result
     judgment = str(row.get("ai_judgment") or "")
+    front = (row.get("payload") or {}).get("front_decision") or {}
     result["state"] = "blocked"
     if judgment in {"OK", "OK-i", "OK-s"}:
         result.update(state="already_ok", reason="正式結果已是 OK，不重複計算排片減少")
@@ -114,8 +145,10 @@ def record_conversion(row, comparison):
         result["reason"] = "仍有 CSJBL 點未符合 MARK／貼紙／易撕貼／無異常轉 OK 條件"
     elif row.get("review_decision") in {"confirmed", "missed", "mapping_error", "uncertain"}:
         result["reason"] = "既有紀錄仍有缺陷、定位疑慮或尚無法確認，暫不計入整筆轉 OK"
+    elif front.get("judgment", "OK") not in {"OK", "OK-i"}:
+        result["reason"] = "一般缺陷尚未通過規格內判定，保留整片 NG"
     else:
-        details = _json(row.get("ng_details"), None)
+        details = _active_ng_details(row)
         covered = isinstance(details, list) and bool(details) and all(
             _covered_csjbl_ng(defect, points) for defect in details)
         if covered:
@@ -138,6 +171,8 @@ def side_inference_decision(row):
     reason = conversion["reason"]
     if converted:
         reason = "側拍轉 OK：" + "；".join(f"A{p['id']} {p['reason']}" for p in points)
+        if (payload.get("front_decision") or {}).get("within_spec_passed"):
+            reason += "；一般缺陷已通過規格內判定"
     return {"converted": converted, "original_judgment": original,
             "final_judgment": "OK-s" if converted else original, "reason": reason,
             "match_tolerance_product_px": comparison["match_tolerance"], "points": points,
@@ -156,8 +191,9 @@ def _remaining_ng_rows(details, points):
             return None
 
     rows = []
+    released = [point for point in points if point.get("status") in SIDE_RELEASE_STATUSES]
     for defect in details:
-        if _covered_csjbl_ng(defect, points):
+        if _covered_csjbl_ng(defect, released):
             continue
         defect = defect if isinstance(defect, dict) else {}
         image = str(defect.get("image") or "").replace("\\", "/").rsplit("/", 1)[-1]
@@ -206,7 +242,7 @@ def panel_projection(row, comparison, conversion):
             panel.update(projected="OK", state="eligible", tone="ok", text="整片可轉 OK",
                          reason="各畫面的全部正式 NG 原因均已由側拍處理涵蓋")
         else:
-            details = _json(row.get("ng_details"), None)
+            details = _active_ng_details(row)
             remaining = _remaining_ng_rows(details, comparison["points"]) if isinstance(details, list) else []
             sources = list(dict.fromkeys(item["image_prefix"] for item in remaining if item["image_prefix"]))
             panel["remaining_ng"] = remaining

@@ -161,7 +161,7 @@ def test_request_preserves_embedded_path_semicolons_and_aoi_payload(payload):
 
 
 @pytest.mark.parametrize("with_regular_ng", [False, True])
-def test_server_forwards_csjbl_unchanged_without_within_spec(tmp_path, with_regular_ng):
+def test_server_forwards_uninspected_csjbl_and_evaluates_regular_ng(tmp_path, with_regular_ng):
     import json
     import threading
     from types import SimpleNamespace
@@ -177,6 +177,7 @@ def test_server_forwards_csjbl_unchanged_without_within_spec(tmp_path, with_regu
         result.tiles = [tile]
         result.anomaly_tiles = [(tile, 0.91, None)]
     config = CAPIConfig()
+    config.side_white_detection_enabled = False
     inferencer = SimpleNamespace(
         config=config,
         process_panel=MagicMock(return_value=([result], None, False, "", False, None, report)),
@@ -196,12 +197,11 @@ def test_server_forwards_csjbl_unchanged_without_within_spec(tmp_path, with_regu
     judgment, details, results, *_ = server._process_request(parsed)
     assert judgment == "NG"
     assert json.loads(details)[-1]["defect_code"] == "CSJBL"
-    server._evaluate_within_spec_for_inference.assert_not_called()
+    assert server._evaluate_within_spec_for_inference.call_count == int(with_regular_ng)
     response = build_dual_protocol_response(parsed, judgment, results, config)
     assert response.startswith("AOI@YQ72C1223E25;GN160JCA5020S;CAPI09;NG;NG\r\n")
     assert response.endswith("CSJBL0013001080W0F00000,")
-    assert ("PCDK2" in response) == with_regular_ng
-    assert "PCDK2" not in response or "G0F00000" in response
+    assert "PCDK2" not in response  # Regular NG passed within-spec despite the pending side NG.
 
 
 def test_parse_field_report_preserves_csjbl_for_forwarding(tmp_path):

@@ -141,7 +141,8 @@ def test_real_side_detection_releases_clear_location_and_keeps_generated_evidenc
 
 
 @pytest.mark.parametrize("other_ng", [False, True])
-def test_live_process_converts_before_response_and_background_reuses_payload(tmp_path, monkeypatch, other_ng):
+@pytest.mark.parametrize("within_spec", [False, True])
+def test_live_process_converts_before_response_and_background_reuses_payload(tmp_path, monkeypatch, other_ng, within_spec):
     import capi_server
     row = clear_row()
     row["payload"]["evidence_context"]["product_resolution"] = [500, 300]
@@ -165,19 +166,20 @@ def test_live_process_converts_before_response_and_background_reuses_payload(tmp
     server.station_adapter = create_station_adapter("capi")
     server._get_or_create_inferencer = lambda _: inferencer
     server._maybe_clear_cuda_cache_after_panel = MagicMock()
-    server._evaluate_within_spec_for_inference = MagicMock(return_value={"converted": True})
+    server._evaluate_within_spec_for_inference = MagicMock(return_value={"converted": within_spec})
     server.heatmap_manager = SimpleNamespace(base_dir=tmp_path / "heatmaps", save_panel_heatmaps=lambda **kw: {})
     server.db = CAPIDatabase(str(tmp_path / "live.db"))
     server.save_overview = server.save_tile_detail = False
     parsed = {"glass_id": "SIDE1", "model_id": "MODEL", "machine_no": "CAPI1",
               "machine_judgment": "NG", "resolution": (500, 300), "image_dir": str(tmp_path)}
     judgment, ng_details, results, *_ = server._process_request(parsed)
-    assert judgment == ("NG" if other_ng else "OK-s")
+    assert judgment == ("NG" if other_ng and not within_spec else "OK-s")
     assert json.loads(ng_details)[-1]["defect_code"] == "CSJBL"  # Original NG evidence remains available.
-    server._evaluate_within_spec_for_inference.assert_not_called()
+    assert server._evaluate_within_spec_for_inference.call_count == int(other_ng)
     response = build_dual_protocol_response(parsed, judgment, results, config)
-    if other_ng:
-        assert "CSJBL0045000100W0F00000" in response
+    assert "CSJBL" not in response  # Side points are released even when regular NG remains.
+    if other_ng and not within_spec:
+        assert judgment == "NG"
     else:
         assert response == "AOI@SIDE1;MODEL;CAPI1;NG;OK\r\n@QJPG-SIDE1;OK;MA;OK,"
     server._save_results_async(("test", 1), parsed, results, judgment, ng_details,

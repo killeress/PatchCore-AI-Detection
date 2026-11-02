@@ -2522,6 +2522,10 @@ def _format_within_spec_inference_note(within_spec_info: Dict[str, Any], detail_
         if within_spec_info.get("converted")
         else f"已執行規格內檢查，結果={status}"
     )
+    if within_spec_info.get("scope") == "front":
+        result_text = ("一般缺陷符合規格內" if within_spec_info.get("converted")
+                       else f"一般缺陷已執行規格內檢查，結果={status}")
+        result_text += "；整片判定合併側拍結果"
 
     lines = [
         f"[WITHIN_SPEC_INFERENCE] 原始 AI=NG，{result_text}",
@@ -7356,6 +7360,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     "reason": reason,
                     "requires_all_panel_totals_within": True,
                 }
+                if ((log.get("detail") or {}).get("inference_auto_decision") or {}).get("scope") == "front":
+                    eval_result["inference_auto_decision"].update(
+                        scope="front", front_within_spec_passed=converted, converted_to_ok_i=False,
+                    )
 
             saved = self.db.save_within_spec_review_log(
                 client_record_id=client_record_id if client_record_id > 0 else None,
@@ -14229,7 +14237,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
             _stored_machine_judgment_for_record, _white_frame_image_result,
-            _has_white_frame_ng, _serialize_aoi_machine_coords, parse_request,
+            _serialize_aoi_machine_coords, parse_request, resolve_front_judgment,
             _white_frame_aoi_kwargs,
             build_qjpg_response, AOI_PASSTHROUGH_CODES, apply_side_white_inference,
         )
@@ -14407,18 +14415,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             within_spec_info = None
             passthrough_defects = [d for defects in (aoi_report or {}).values() for d in defects
                                    if d.defect_code in AOI_PASSTHROUGH_CODES]
-            if passthrough_defects:
-                ai_judgment = "NG"
-                details = json.loads(ng_details)
-                details.extend({"image": d.image_prefix, "type": "aoi_passthrough", "defect_code": d.defect_code,
-                                "product_x": d.product_x, "product_y": d.product_y} for d in passthrough_defects)
-                ng_details = json.dumps(details, ensure_ascii=False)
-            elif ai_judgment.startswith("NG") and _has_white_frame_ng(results):
-                logger.info(
-                    "[WHITE_FRAME][RERUN] Glass=%s formal NG bypasses within-spec OK-i conversion",
-                    detail.get("glass_id", ""),
-                )
-            elif ai_judgment.startswith("NG"):
+
+            def evaluate_within_spec():
                 parsed_for_within_spec = {
                     "glass_id": detail.get("glass_id", ""),
                     "model_id": model_id,
@@ -14500,8 +14498,16 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         "reason": reason,
                     }
 
-                if within_spec_info and within_spec_info.get("converted"):
-                    ai_judgment = "OK-i"
+                return within_spec_info
+
+            judgment_context = {
+                "glass_id": detail.get("glass_id", ""), "model_id": model_id,
+                "machine_no": detail.get("machine_no", ""),
+            }
+            ai_judgment, ng_details, within_spec_info = resolve_front_judgment(
+                judgment_context, results, ai_judgment, ng_details, passthrough_defects,
+                evaluate_within_spec,
+            )
 
             inference_scope.close()
             if within_spec_info:
@@ -14544,8 +14550,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             side_parsed = {
                 "glass_id": detail.get("glass_id", ""), "model_id": model_id,
                 "image_dir": str(panel_dir),
-                "aoi_passthrough_records": [
-                    f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}" for d in passthrough_defects],
+                "aoi_passthrough_records": judgment_context["aoi_passthrough_records"],
+                "front_decision": judgment_context["front_decision"],
             }
             if side_white_context is not None:
                 _update_status("正在重新檢測側拍與產生 OMIT 組合圖...")
@@ -14574,6 +14580,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "glass_id": detail.get("glass_id", ""),
                 "model_id": model_id,
                 "aoi_passthrough_records": side_parsed["aoi_passthrough_records"],
+                "front_decision": side_parsed["front_decision"],
             }
             response_preview = build_qjpg_response(
                 preview_context, ai_judgment, results, inferencer.config,

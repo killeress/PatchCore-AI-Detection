@@ -600,11 +600,72 @@ def build_response(
     return f"AOI@{glass_id};{model_id};{machine_no};{machine_judgment};{ai_judgment}"
 
 
+def resolve_front_judgment(parsed, results, ai_judgment, ng_details, passthrough_defects,
+                           evaluate_within_spec):
+    """Resolve front defects before merging the independently inspected CSJBL points."""
+    original_judgment = ai_judgment
+    front_details = json.loads(ng_details)
+    within_spec_info = None
+    if ai_judgment.startswith("NG"):
+        if _has_white_frame_ng(results):
+            logger.info(
+                "[WHITE_FRAME] Glass=%s formal NG bypasses within-spec OK-i conversion",
+                parsed.get("glass_id", ""),
+            )
+        else:
+            within_spec_info = evaluate_within_spec()
+            if within_spec_info and within_spec_info.get("converted"):
+                ai_judgment = "OK-i"
+            if within_spec_info:
+                logger.info(
+                    "[WITHIN_SPEC_INFERENCE] Glass=%s 一般缺陷規格內檢查，結果=%s: %s",
+                    parsed.get("glass_id", ""), within_spec_info.get("status", "unknown"),
+                    within_spec_info.get("reason", ""),
+                )
+
+    within_spec_passed = bool(within_spec_info and within_spec_info.get("converted"))
+    front_decision = {
+        "original_judgment": original_judgment,
+        "judgment": ai_judgment,
+        "within_spec_passed": within_spec_passed,
+        "resolved_ng_details": front_details if within_spec_passed else [],
+    }
+    parsed["front_decision"] = front_decision
+    parsed["aoi_passthrough_records"] = [
+        f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}"
+        for d in passthrough_defects
+    ]
+    if within_spec_info:
+        detail = within_spec_info.setdefault("detail", {})
+        detail["front_decision"] = front_decision
+        if passthrough_defects:
+            within_spec_info["scope"] = "front"
+            detail.setdefault("inference_auto_decision", {}).update(
+                scope="front", front_within_spec_passed=within_spec_passed,
+                converted_to_ok_i=False,
+            )
+
+    # Keep the original evidence; resolved front defects are tracked separately.
+    details = front_details + [{
+        "image": d.image_prefix, "type": "aoi_passthrough", "defect_code": d.defect_code,
+        "product_x": d.product_x, "product_y": d.product_y,
+    } for d in passthrough_defects]
+    if passthrough_defects:
+        if not ai_judgment.startswith("ERR"):
+            ai_judgment = "NG"
+        logger.info(
+            "[AOI_PASSTHROUGH] Glass=%s records=%s; front=%s; pending independent side decision",
+            parsed.get("glass_id", ""), ",".join(parsed["aoi_passthrough_records"]),
+            front_decision["judgment"],
+        )
+    return ai_judgment, json.dumps(details, ensure_ascii=False), within_spec_info
+
+
 def apply_side_white_inference(parsed, results, ai_judgment, ng_details, aoi_report, config,
                                output_dir, context=None, *, coords=None):
     """Inspect once before replying; background persistence reuses this exact evidence."""
     from capi_side_white import inspect_side_white_folder, prepare_aoi_context, snapshot_context
-    from capi_side_report import csjbl_points, side_inference_decision
+    from capi_side_report import csjbl_points, side_inference_decision, remaining_csjbl_records
 
     if not getattr(config, "side_white_detection_enabled", False):
         return ai_judgment
@@ -621,6 +682,8 @@ def apply_side_white_inference(parsed, results, ai_judgment, ng_details, aoi_rep
             Path(parsed["image_dir"]), output_dir, rotate_180=rotate,
             params=getattr(config, "side_white_detection_params", None), context=context,
         )
+        if "front_decision" in parsed:
+            payload["front_decision"] = parsed["front_decision"]
         decision = side_inference_decision({"payload": payload, "status": payload["status"],
                                             "ai_judgment": ai_judgment, "ng_details": ng_details,
                                             "aoi_machine_coords": coords})
@@ -629,13 +692,15 @@ def apply_side_white_inference(parsed, results, ai_judgment, ng_details, aoi_rep
         payload = {"status": "ERROR", "candidates": [], "artifacts": {}, "reason": str(exc)}
         decision = {"converted": False, "original_judgment": ai_judgment,
                     "final_judgment": ai_judgment, "reason": f"側拍檢查失敗，保留原判定：{exc}", "points": []}
+        if "front_decision" in parsed:
+            payload["front_decision"] = parsed["front_decision"]
     payload["shadow_only"] = False
     payload["inference_decision"] = decision
     parsed["_side_white_payload"] = payload
     parsed["_side_white_output_dir"] = str(Path(output_dir).resolve()) if payload.get("artifacts") else ""
-    if decision["converted"]:
-        # Remove only the AOI passthrough records proven covered by this decision.
-        parsed["aoi_passthrough_records"] = []
+    parsed["aoi_passthrough_records"] = remaining_csjbl_records(
+        parsed.get("aoi_passthrough_records", []), decision["points"],
+    )
     logger.info("[SIDE_WHITE_INFERENCE] Glass=%s 原始 AI=%s，最終判定 %s；%s",
                 parsed.get("glass_id", ""), ai_judgment, decision["final_judgment"], decision["reason"])
     return decision["final_judgment"]
@@ -1379,7 +1444,8 @@ def build_qjpg_response(
         results or [],
         product_resolution,
         config,
-        bomb_only=ai_judgment in ("OK", "OK-i", "OK-s"),
+        bomb_only=(ai_judgment in ("OK", "OK-i", "OK-s")
+                   or (parsed or {}).get("front_decision", {}).get("judgment") in ("OK", "OK-i")),
     )
     if not ai_judgment.startswith("ERR:"):
         records.extend((parsed or {}).get("aoi_passthrough_records", []))
@@ -3658,6 +3724,8 @@ class CAPIServer:
         # 依 model_id 取得對應推論器（per-machine dispatcher）
         parsed.pop("_side_white_payload", None)
         parsed.pop("_side_white_output_dir", None)
+        parsed.pop("front_decision", None)
+        parsed.pop("aoi_passthrough_records", None)
         model_id = parsed.get("model_id", "")
         inferencer = self._get_or_create_inferencer(model_id)
 
@@ -3781,11 +3849,6 @@ class CAPIServer:
                     for defect in defects
                     if defect.defect_code in AOI_PASSTHROUGH_CODES
                 ]
-                # Side views keep source coordinates, without front-view mapping.
-                parsed["aoi_passthrough_records"] = [
-                    f"{d.defect_code}{d.product_x:05d}{d.product_y:05d}{d.image_prefix}"
-                    for d in passthrough_defects
-                ]
 
                 try:
                     white_frame_path = station_adapter.find_white_frame_image(panel_dir)
@@ -3848,47 +3911,10 @@ class CAPIServer:
                             ai_judgment, ng_details, result.edge_defects, result.image_path.stem
                         )
 
-                within_spec_info = None
-                white_frame_ng = _has_white_frame_ng(results)
-                if passthrough_defects:
-                    ai_judgment = "NG"
-                    details = json.loads(ng_details)
-                    details.extend({
-                        "image": d.image_prefix,
-                        "type": "aoi_passthrough",
-                        "defect_code": d.defect_code,
-                        "product_x": d.product_x,
-                        "product_y": d.product_y,
-                    } for d in passthrough_defects)
-                    ng_details = json.dumps(details, ensure_ascii=False)
-                    logger.info(
-                        "[AOI_PASSTHROUGH] Glass=%s records=%s; pending side decision; "
-                        "bypass within-spec OK-i conversion",
-                        parsed.get("glass_id", ""),
-                        ",".join(parsed["aoi_passthrough_records"]),
-                    )
-                elif ai_judgment.startswith("NG") and white_frame_ng:
-                    logger.info(
-                        "[WHITE_FRAME] Glass=%s formal NG bypasses within-spec OK-i conversion",
-                        parsed.get("glass_id", ""),
-                    )
-                elif ai_judgment.startswith("NG"):
-                    within_spec_info = self._evaluate_within_spec_for_inference(parsed, results, inferencer)
-                    if within_spec_info and within_spec_info.get("converted"):
-                        reason = within_spec_info.get("reason", "")
-                        logger.info(
-                            "[WITHIN_SPEC_INFERENCE] Glass=%s 原始 AI=NG，符合規格內，轉為 OK-i: %s",
-                            parsed.get("glass_id", ""),
-                            reason,
-                        )
-                        ai_judgment = "OK-i"
-                    elif within_spec_info:
-                        logger.info(
-                            "[WITHIN_SPEC_INFERENCE] Glass=%s 原始 AI=NG，已執行規格內檢查，結果=%s: %s",
-                            parsed.get("glass_id", ""),
-                            within_spec_info.get("status", "unknown"),
-                            within_spec_info.get("reason", ""),
-                        )
+                ai_judgment, ng_details, within_spec_info = resolve_front_judgment(
+                    parsed, results, ai_judgment, ng_details, passthrough_defects,
+                    lambda: self._evaluate_within_spec_for_inference(parsed, results, inferencer),
+                )
 
                 if getattr(inferencer.config, "side_white_detection_enabled", False):
                     output_dir = (Path(getattr(getattr(self, "heatmap_manager", None), "base_dir", "heatmaps"))
