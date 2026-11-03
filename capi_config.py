@@ -25,6 +25,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
                 "mapping_margin_px": 3, "crop_padding_px": 32,
                 "csjbl_preview_radius_product_px": 50,
                 "csjbl_match_tolerance_product_px": 5,
+                "csjbl_release_guard_radius_product_px": 10,
                 "bomb_check_enabled": True, "bomb_tolerance_product_px": 50,
                 "bomb_force_detection_enabled": False}
     if value is None:
@@ -42,6 +43,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
         ("crop_padding_px", "組合圖周邊範圍", 0, 512, True),
         ("csjbl_preview_radius_product_px", "CSJBL 顯示範圍", 0, 500, True),
         ("csjbl_match_tolerance_product_px", "CSJBL 判定距離容錯", 0, 500, True),
+        ("csjbl_release_guard_radius_product_px", "CSJBL 放行保護範圍", 0, 500, True),
         ("bomb_tolerance_product_px", "炸彈容許誤差", 0, 500, True),
     ):
         number = result[key]
@@ -51,6 +53,12 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
             unit = "整數" if integer else "數值"
             raise ValueError(f"{label}必須是 {low}～{high} 的{unit}")
         result[key] = int(number) if integer else float(number)
+    # Existing configurations can have a match tolerance larger than the new default.
+    if "csjbl_release_guard_radius_product_px" not in value:
+        result["csjbl_release_guard_radius_product_px"] = max(
+            result["csjbl_release_guard_radius_product_px"], result["csjbl_match_tolerance_product_px"])
+    if result["csjbl_release_guard_radius_product_px"] < result["csjbl_match_tolerance_product_px"]:
+        raise ValueError("CSJBL 放行保護範圍不得小於判定距離容錯")
     for key in ("apply_exclusions", "bomb_check_enabled", "bomb_force_detection_enabled"):
         if not isinstance(result[key], bool):
             raise ValueError(f"{key} 必須是布林值")

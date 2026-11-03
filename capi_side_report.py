@@ -1,6 +1,7 @@
 """AOI/side-camera evidence shared by live decisions and historical reports."""
 
 import json
+import re
 from pathlib import Path
 
 import cv2
@@ -24,9 +25,11 @@ SIDE_ANNOTATION_LEGEND = [
     {"key": "aoi", "color": "#F43F5E", "tag": "□ A1", "label": "AOI 報點",
      "hint": "64×64 原圖 px 細框以 AOI TXT 映射位置為中心，不填色；A1 對應下方完整座標。"},
     {"key": "candidate", "color": "#FACC15", "tag": "#1", "label": "保留檢查候選",
-     "hint": "黃色表示 AOI 判定距離容錯內仍需保留檢查的候選，編號沿用原始明細。"},
+     "hint": "黃色輪廓表示命中 AOI 判定距離容錯；新推論的黃色圓圈表示該容錯範圍。編號沿用原始明細。"},
+    {"key": "guard", "color": "#F59E0B", "tag": "GUARD", "label": "放行保護 · 保留 NG",
+     "hint": "橙色圓圈表示放行保護範圍；橙色候選超出命中容錯，但仍在保護範圍內，位置待確認並保留 NG。"},
     {"key": "reference", "color": "#94A3B8", "tag": "#", "label": "參考候選",
-     "hint": "灰色候選位於 AOI 判定距離容錯外，僅供影像對照，不影響該點轉 OK。"},
+     "hint": "灰色候選未命中 AOI 命中／放行保護範圍，或已排除，僅供影像對照。"},
     {"key": "mark", "color": "#22D3EE", "tag": "MARK / PRINT", "label": "MARK／印字屏蔽",
      "hint": "MARK 為定位標記，PRINT 為角落印字；框線表示屏蔽範圍。"},
     {"key": "zone", "color": "#A78BFA", "tag": "ZONE", "label": "設定不檢測區",
@@ -166,16 +169,20 @@ def side_inference_decision(row):
     converted = conversion["eligible"]
     original = str(row.get("ai_judgment") or "")
     points = [{key: point[key] for key in ("id", "image_prefix", "status", "reason", "retained_candidate_ids",
-                                          "product_xy", "nearest_retained_distance_product_px") if key in point}
+                                          "guard_candidate_ids", "product_xy", "nearest_retained_distance_product_px",
+                                          "nearest_retained_candidate_id", "retained_candidate_distances") if key in point}
               for point in comparison["points"]]
     reason = conversion["reason"]
     if converted:
         reason = "側拍轉 OK：" + "；".join(f"A{p['id']} {p['reason']}" for p in points)
         if (payload.get("front_decision") or {}).get("within_spec_passed"):
             reason += "；一般缺陷已通過規格內判定"
+    elif any(p["status"] == "guarded" for p in points):
+        reason = "側拍保留 NG：" + "；".join(f"A{p['id']} {p['reason']}" for p in points if p["status"] == "guarded")
     return {"converted": converted, "original_judgment": original,
             "final_judgment": "OK-s" if converted else original, "reason": reason,
             "match_tolerance_product_px": comparison["match_tolerance"], "points": points,
+            "release_guard_radius_product_px": comparison["release_guard_radius"],
             "conversion": conversion}
 
 
@@ -374,6 +381,54 @@ def has_csjbl(coords, ng_details):
     return int(bool(csjbl_points(coords, ng_details)[0]))
 
 
+def side_white_diagnostics(row):
+    """Export the original side log and full payload without mixing rerun snapshots."""
+    payload = row.get("payload") or {}
+    log = str(row.get("inference_log") or "")
+    summary = {key: payload[key] for key in (
+        "algorithm", "status", "side_image", "front_image", "rotation_applied", "reason", "diagnostics",
+        "mapping", "processing_ms", "inference_decision") if key in payload}
+    localization = payload.get("localization") or {}
+    if localization:
+        summary["localization"] = {key: localization[key] for key in ("method", "edges") if key in localization}
+    saved_summaries = []
+    for marker in re.finditer(r"\[SIDE_WHITE_RESULT\]\s*", log):
+        try:
+            saved, length = json.JSONDecoder().raw_decode(log[marker.end():])
+            saved_summaries.append((saved, marker.end() + length))
+        except (ValueError, TypeError):
+            continue
+    matching = bool(saved_summaries and saved_summaries[-1][0] == summary)
+    lines, active = [], False
+    if matching:
+        start = saved_summaries[-2][1] if len(saved_summaries) > 1 else 0
+        selected_log = log[start:].lstrip("\r\n")
+        if start and selected_log.startswith("[SIDE_WHITE_INFERENCE]"):
+            selected_log = selected_log.partition("\n")[2]
+        for line in selected_log.splitlines():
+            if line.startswith("["):
+                active = bool(re.search(r"\[(?:SIDE_WHITE(?:_[A-Z_]+)?|capi\.side_white)\]", line))
+            if active:
+                lines.append(line)
+    side_log_source = "inference_log" if matching else "payload_snapshot"
+    side_log = "\n".join(lines).strip()
+    if not matching:
+        side_log = ("此側拍結果沒有可對應的原始 LOG（舊紀錄或推論紀錄已更新）；以下摘要由所選 payload 重建，非原始執行 LOG。\n"
+                    "[SIDE_WHITE_RESULT] " + json.dumps(summary, ensure_ascii=False))
+        decision = payload.get("inference_decision") or {}
+        if decision:
+            side_log += (f"\n[SIDE_WHITE_INFERENCE] 原始 AI={decision.get('original_judgment', '')}，"
+                         f"最終判定 {decision.get('final_judgment', '')}；{decision.get('reason', '')}")
+    record = {key: row[key] for key in ("record_id", "glass_id", "model_id", "machine_no", "app_version",
+              "machine_judgment", "ai_judgment", "image_dir", "request_time", "response_time",
+              "inference_created_at") if key in row}
+    record.update(side_result_id=row.get("id"), side_created_at=row.get("created_at"))
+    return {"schema_version": 1, "source": "saved_side_white_result", "record": record,
+            "side_log_source": side_log_source, "side_log": side_log,
+            "aoi_machine_coords": _json(row.get("aoi_machine_coords"), {}),
+            "ng_details": _json(row.get("ng_details"), []), "payload": payload}
+
+
 def _side_record_source(row, detail=None):
     source = {**(detail or {}), **row}
     context = (source.get("payload") or {}).get("evidence_context", {})
@@ -534,8 +589,8 @@ def peel_tape_regions(payload):
 def compare_side_record(row, tolerance=50):
     """Map front product coordinates to the saved side-camera detection orientation.
 
-    Reference radius is separate from the configured decision distance tolerance.
-    Remaining contours within that distance block release. Bombs stay distinct.
+    Reference radius is separate from both the match tolerance and release guard.
+    Remaining contours in the guard block release without claiming a point hit.
     A MARK inside the point's ROI removes only candidates covered by its exact mask.
     """
     row = _side_record_source(row)
@@ -547,8 +602,14 @@ def compare_side_record(row, tolerance=50):
     match_tolerance = float(payload.get("parameters", {}).get("csjbl_match_tolerance_product_px", 5))
     if not np.isfinite(match_tolerance) or not 0 <= match_tolerance <= 500:
         raise ValueError("CSJBL 判定距離容錯須為 0～500 產品 px")
+    # Unsnapshotted historical decisions retain their original single-distance rule.
+    guard_enabled = "csjbl_release_guard_radius_product_px" in payload.get("parameters", {})
+    guard_radius = float(payload.get("parameters", {}).get("csjbl_release_guard_radius_product_px", match_tolerance))
+    if not np.isfinite(guard_radius) or not match_tolerance <= guard_radius <= 500:
+        raise ValueError("CSJBL 放行保護範圍須介於判定距離容錯與 500 產品 px 之間")
     result = {"has_csjbl": bool(points), "source": source, "points": [],
               "match_tolerance": match_tolerance, "no_anomaly": 0,
+              "release_guard_radius": guard_radius, "release_guard_enabled": guard_enabled, "guarded": 0,
               "tolerance": tolerance, "matched": 0, "mapped": 0, "mark_suppressed": 0, "omit_suppressed": 0,
               "tape_suppressed": 0,
               "incomplete": bool(payload.get("truncated")), "reason": ""}
@@ -588,6 +649,7 @@ def compare_side_record(row, tolerance=50):
                 "coordinate_space": point.get("coordinate_space", "product"),
                 "status": "unavailable", "reason": result["reason"],
                 "candidate_ids": [], "aoi_candidate_ids": [], "retained_candidate_ids": [], "sticker_candidate_ids": [],
+                "guard_candidate_ids": [], "retained_candidate_distances": [],
                 "tape_candidate_ids": [], "mark_candidate_ids": [],
                 "omit": {"status": "unavailable", "label": OMIT_COMPARISON_STATES["unavailable"],
                          "reason": "尚無有效 AOI 映射", "candidates": []}}
@@ -623,6 +685,10 @@ def compare_side_record(row, tolerance=50):
             circle = product_xy + np.column_stack((np.cos(angles), np.sin(angles))) * tolerance
             item["side_roi"] = _transform(circle, to_side).tolist()
             item["front_roi"] = _transform(circle, to_front).tolist()
+            for name, radius in (("match", match_tolerance), ("guard", guard_radius)):
+                circle = product_xy + np.column_stack((np.cos(angles), np.sin(angles))) * radius
+                item["side_" + name + "_roi"] = _transform(circle, to_side).tolist()
+                item["front_" + name + "_roi"] = _transform(circle, to_front).tolist()
             item["crop_size"] = _point_crop_size(item)
             # Pixel bounds are half-open, matching the formal inference mask.
             point_marks = []
@@ -643,7 +709,7 @@ def compare_side_record(row, tolerance=50):
                     raise ValueError("候選輪廓資料不完整，保留檢查")
                 product_contour = _transform(contour, to_product)
                 distance = cv2.pointPolygonTest(product_contour, tuple(map(float, product_xy)), True)
-                if distance < -max(tolerance, match_tolerance):
+                if distance < -max(tolerance, guard_radius):
                     continue
                 item["candidate_ids"].append(candidate["id"])
                 if distance >= -match_tolerance:
@@ -685,10 +751,16 @@ def compare_side_record(row, tolerance=50):
                     distances = [max(0., -cv2.pointPolygonTest(_transform(c, to_product),
                                  tuple(map(float, product_xy)), True)) for c in remaining if len(c) >= 3]
                     if distances:
-                        item["nearest_retained_distance_product_px"] = min(
-                            item.get("nearest_retained_distance_product_px", float("inf")), min(distances))
+                        nearest = min(distances)
+                        item["retained_candidate_distances"].append(
+                            {"candidate_id": candidate["id"], "distance_product_px": nearest})
+                        if nearest < item.get("nearest_retained_distance_product_px", float("inf")):
+                            item["nearest_retained_distance_product_px"] = nearest
+                            item["nearest_retained_candidate_id"] = candidate["id"]
                     if any(d <= match_tolerance for d in distances):
                         item["retained_candidate_ids"].append(candidate["id"])
+                    elif any(d <= guard_radius for d in distances):
+                        item["guard_candidate_ids"].append(candidate["id"])
             item["status"] = ("matched" if item["retained_candidate_ids"] else
                               "filtered" if item["aoi_candidate_ids"] else "unmatched")
             item["reason"] = (f"AOI 位置 {match_tolerance:g} 產品 px 容錯內仍有異常候選，保留 NG"
@@ -734,7 +806,14 @@ def compare_side_record(row, tolerance=50):
                     item["reason"] = ("AOI ROI 內有 MARK，但涉及炸彈驗證範圍，保留檢查" if bomb_overlap else
                                       "AOI ROI 內的 MARK 已屏蔽，但報點仍命中 MARK 範圍外的保留候選，保留檢查")
             if item["status"] == "unmatched":
-                item.update(status="no_anomaly", reason=f"AOI 位置 {match_tolerance:g} 產品 px 容錯內未發現異常，該點可轉 OK")
+                item.update(status="no_anomaly", reason=f"AOI 位置 {guard_radius:g} 產品 px 放行保護範圍內未發現保留異常，該點可轉 OK"
+                            if guard_enabled else f"AOI 位置 {match_tolerance:g} 產品 px 容錯內未發現異常，該點可轉 OK")
+            # Positive MARK/OMIT/tape evidence must not release a separate nearby residual.
+            if item["guard_candidate_ids"] and not item["retained_candidate_ids"]:
+                item.update(status="guarded", reason=(
+                    f"最近保留候選 #{item['nearest_retained_candidate_id']} 距離 {item['nearest_retained_distance_product_px']:.2f} 產品 px，"
+                    f"超出 {match_tolerance:g} 產品 px 命中容錯，但仍在 {guard_radius:g} 產品 px 放行保護範圍內；"
+                    "報點與候選位置待確認，保留 NG"))
             # Bombs are verification evidence even if the detector found nothing.
             bomb_nearby = any(c.get("bomb_ids") for c in nearby if c["id"] in item["aoi_candidate_ids"]) or any(
                 len(b.get("side_tolerance_polygon", [])) >= 3 and cv2.pointPolygonTest(
@@ -747,6 +826,7 @@ def compare_side_record(row, tolerance=50):
                 item["reason"] = "檢測未完成或候選資料曾截斷，僅供位置對照"
             result["mapped"] += 1
             result["matched"] += item["status"] == "matched"
+            result["guarded"] += item["status"] == "guarded"
             result["mark_suppressed"] += item["status"] == "mark_suppressed"
             result["omit_suppressed"] += item["status"] == "omit_suppressed"
             result["tape_suppressed"] += item["status"] == "tape_suppressed"
@@ -785,9 +865,11 @@ def side_white_view(row, detail=None):
     candidates = payload.get("candidates", [])
     nearby_ids = {i for point in points for i in point["candidate_ids"]}
     yellow_nearby_ids = {i for point in points for i in point["retained_candidate_ids"]}
+    guard_nearby_ids = {i for point in points for i in point["guard_candidate_ids"]}
     aoi_ids = {i for point in points for i in point.get("aoi_candidate_ids", [])}
     retained_ids = set(retained_candidate_contours(payload, source.get("inference_marks", [])))
     yellow_ids = retained_ids & yellow_nearby_ids
+    guard_ids = retained_ids & guard_nearby_ids - yellow_ids
     mark_ids = {i for point in points for i in point.get("mark_candidate_ids", [])}
     nearby = [c for c in candidates if c["id"] in aoi_ids] if points else []
     omit = _point_omit_evidence(payload, [c for c in nearby if c["id"] not in mark_ids])
@@ -801,13 +883,17 @@ def side_white_view(row, detail=None):
         elif closed:
             headline, tone = f"已排除 {closed}／{len(points)} 個 AOI 點", "warn"
         else:
-            headline, tone = "AOI 仍有候選需確認" if comparison["matched"] else "AOI 尚無可轉 OK 結論", "warn"
+            headline, tone = ("AOI 附近仍有候選 · 位置待確認，保留 NG" if comparison["guarded"] else
+                              "AOI 仍有候選需確認" if comparison["matched"] else "AOI 尚無可轉 OK 結論"), "warn"
     if payload.get("inference_decision", {}).get("converted"):
         headline, tone = "OK-s · 側拍轉 OK", "ok"
 
     clear = {"title": "AOI 位置無異常", "tone": "ok" if comparison["no_anomaly"] else "neutral",
              "text": f"{comparison['no_anomaly']} 點可轉 OK" if comparison["no_anomaly"] else "無可放行點",
-             "reason": f"判定距離容錯 {comparison['match_tolerance']:g} 產品 px；範圍內沒有保留異常。"}
+             "reason": f"命中容錯 {comparison['match_tolerance']:g}／放行保護 {comparison['release_guard_radius']:g} 產品 px；只有保護範圍內無保留異常的點可放行。"}
+    if comparison["guarded"]:
+        clear.update(tone="warn", text=f"{comparison['guarded']} 點位置待確認 · 保留 NG",
+                     reason="；".join(p["reason"] for p in points if p["status"] == "guarded"))
 
     sticker = {"title": "貼紙／表面異物", "tone": "neutral", "text": "無相關候選", "reason": ""}
     if comparison["omit_suppressed"]:
@@ -869,12 +955,17 @@ def side_white_view(row, detail=None):
         candidate_rows.append({"id": candidate["id"], "label": "MARK 已屏蔽" if candidate["id"] in mark_ids else
             "易撕貼已排除" if candidate["id"] in tape_ids else
             "貼紙已排除" if sticker_match else
+            "放行保護範圍內 · 位置待確認，保留 NG" if candidate["id"] in guard_ids else
             ("報點無保留輪廓 · 其餘僅供參考" if candidate["id"] in aoi_ids else "僅供參考 · AOI 未命中")
                 if candidate.get("disposition", "retained") == "retained"
                 and candidate["id"] not in yellow_ids and not candidate.get("bomb_ids") else
             labels.get(candidate.get("disposition"), "舊版未記錄"),
             "core_overlap_ratio": dust.get("core_overlap_ratio"), "overlap_ratio": dust.get("overlap_ratio"),
             "composite_key": candidate.get("composite_key"), "nearby": candidate["id"] in nearby_ids,
+            "guarded": candidate["id"] in guard_ids,
+            "aoi_distances": [{"id": p["id"], "distance": d["distance_product_px"]}
+                              for p in points for d in p["retained_candidate_distances"]
+                              if d["candidate_id"] == candidate["id"]],
             "aoi_hit": candidate["id"] in aoi_ids,
             "area_px": candidate.get("area_px"), "remaining_area_px": candidate.get("remaining_area_px")})
     legacy_preview = bool(payload.get("artifacts", {}).get("side")
@@ -892,8 +983,9 @@ def side_white_view(row, detail=None):
             "missing_preview_bounds": missing_bounds,
             "comparison": comparison, "candidates": candidate_rows,
             "yellow_candidates": {"nearby": len(yellow_ids & yellow_nearby_ids), "total": len(yellow_ids)},
-            "reference_candidates": {"nearby": len((retained_ids - yellow_ids) & nearby_ids),
-                                     "total": len(retained_ids - yellow_ids)},
+            "guard_candidates": {"nearby": len(guard_ids & nearby_ids), "total": len(guard_ids)},
+            "reference_candidates": {"nearby": len((retained_ids - yellow_ids - guard_ids) & nearby_ids),
+                                     "total": len(retained_ids - yellow_ids - guard_ids)},
             "release_count": closed, "conversion": conversion, "panel": panel}
 
 
@@ -951,6 +1043,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
             polygon(points, "bomb", f"B{bomb['id']}")
         selected = {i for point in comparison["points"] for i in point["candidate_ids"]}
         aoi_selected = {i for point in comparison["points"] for i in point["retained_candidate_ids"]}
+        guarded = {i for point in comparison["points"] for i in point["guard_candidate_ids"]}
         retained = retained_candidate_contours(payload, inference_marks)
         for candidate in payload.get("candidates", []):
             if candidate["id"] not in retained or (not all_candidates and candidate["id"] not in selected):
@@ -967,7 +1060,8 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
                             continue
                         points = candidate.get("front_contour")
                 if points is not None:
-                    polygon(points, "candidate" if candidate["id"] in aoi_selected else "reference",
+                    polygon(points, "candidate" if candidate["id"] in aoi_selected else
+                            "guard" if candidate["id"] in guarded else "reference",
                             f"#{candidate['id']}" if index == 0 else None)
 
     for point in comparison["points"]:
@@ -978,6 +1072,12 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         if np.any(xy < 0) or np.any(xy >= [width, height]):
             continue
         color = annotation_color("aoi")
+        if comparison["release_guard_enabled"]:
+            for name, key in (("guard", "guard"), ("match", "candidate")):
+                polygon(point[coordinate_kind + "_" + name + "_roi"], key)
+            # An open cross identifies the centre without painting over its pixel.
+            for delta in ([-5, 0, -2, 0], [2, 0, 5, 0], [0, -5, 0, -2], [0, 2, 0, 5]):
+                cv2.line(image, tuple(xy + delta[:2]), tuple(xy + delta[2:]), color, 1)
         # Detailed coordinates and region names belong outside the image.
         corners = preview_points([source_xy - 32, source_xy + 32])
         labels.insert(0, (xy, f"A{point['id']}", color, corners))
@@ -1040,6 +1140,8 @@ def _point_crop_size(point):
         roi = np.asarray(point[kind + "_roi"], np.float64)
         xy = np.asarray(point[kind + "_xy"], np.float64)
         half = max(half, float(np.max(np.abs(roi - xy))) + 20)
+        if kind + "_guard_roi" in point:
+            half = max(half, float(np.max(np.abs(np.asarray(point[kind + "_guard_roi"]) - xy))) + 20)
     return int(np.ceil(half)) * 2
 
 

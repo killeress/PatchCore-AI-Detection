@@ -49,7 +49,7 @@ def test_preview_counts_only_retained_yellow_candidates_and_keeps_original_ids(d
     assert _candidate_preview_scope(payload)['candidate_ids'] == [2]
 
 
-@pytest.mark.parametrize('radius,x,expected', [(0, 400, [1]), (0, 411, []),
+@pytest.mark.parametrize('radius,x,expected', [(0, 400, [1]), (0, 411, [1]), (0, 415, [1]), (0, 416, []),
     (20, 430, []), (20, 431, []), (100, 500, []), (500, 400, [1])])
 def test_preview_radius_does_not_expand_aoi_point_hits(radius, x, expected):
     payload = mapped_payload([point(x, 200)])

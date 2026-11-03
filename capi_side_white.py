@@ -12,7 +12,7 @@ import numpy as np
 
 from capi_config import normalize_side_white_params
 
-ALGORITHM = "side-white-cv-v6"
+ALGORITHM = "side-white-cv-v7"
 logger = logging.getLogger("capi.side_white")
 _SIDE_NAME = re.compile(r"^(.*?)SW0F00000(_?\d{6})?$", re.IGNORECASE)
 _FRONT_NAME = re.compile(r"^(.*?)W0F00000(_?\d{6})?$", re.IGNORECASE)
@@ -414,6 +414,8 @@ def _candidate_preview_scope(payload):
         {"payload": payload, "status": payload["status"], "aoi_machine_coords": coords}, tolerance=radius)
     selected = {candidate_id for point in comparison["points"]
                 if point["status"] != "unavailable" for candidate_id in point["retained_candidate_ids"]}
+    guarded = {candidate_id for point in comparison["points"]
+               if point["status"] != "unavailable" for candidate_id in point["guard_candidate_ids"]} - selected
     candidates = payload.get("candidates", [])
     retained = retained_candidate_contours(payload)
     reason = ""
@@ -423,7 +425,9 @@ def _candidate_preview_scope(payload):
         reason = "有 CSJBL 座標無法映射，僅顯示可對應黃框。"
     return {"scope": "csjbl_nearby", "tolerance_product_px": radius,
             "candidate_ids": [c["id"] for c in candidates if c["id"] in selected and c["id"] in retained],
-            "total": len(selected & retained.keys()), "reference_total": len(retained.keys() - selected), "reason": reason}
+            "guard_candidate_ids": [c["id"] for c in candidates if c["id"] in guarded and c["id"] in retained],
+            "total": len(selected & retained.keys()), "guard_total": len(guarded & retained.keys()),
+            "reference_total": len(retained.keys() - selected - guarded), "reason": reason}
 
 
 def _save_preview(path, image):
@@ -633,7 +637,8 @@ def _crop_bounds(points, shape, padding):
     return max(0, x - padding), max(0, y - padding), min(shape[1], x + w + padding), min(shape[0], y + h + padding)
 
 
-def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 220), remaining_contours=()):
+def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 220), remaining_contours=(),
+           *, contour_color=(184, 163, 148), annotate=None):
     """Fixed-size letterboxed panel; image pixels and annotations share one transform."""
     canvas = np.full((350, 400, 3), 20, np.uint8)
     cv2.putText(canvas, title, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, .6, (230, 230, 230), 1)
@@ -651,14 +656,82 @@ def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 22
         colored[mask > 0] = mask_color
         crop = cv2.addWeighted(crop, .55, colored, .45, 0)
     if contour is not None:
-        cv2.polylines(crop, [np.rint(np.asarray(contour) - [x1, y1]).astype(np.int32)], True, (0, 180, 255), 1)
+        cv2.polylines(crop, [np.rint(np.asarray(contour) - [x1, y1]).astype(np.int32)], True, contour_color, 1)
     for remaining in remaining_contours:
         cv2.polylines(crop, [np.rint(np.asarray(remaining) - [x1, y1]).astype(np.int32)], True, (80, 240, 80), 1)
     scale = min(400 / crop.shape[1], 315 / crop.shape[0])
+    source_size = [crop.shape[1], crop.shape[0]]
     crop = cv2.resize(crop, (max(1, round(crop.shape[1] * scale)), max(1, round(crop.shape[0] * scale))))
+    if annotate is not None:
+        annotate(crop, [x1, y1, *source_size])
     left, top = (400 - crop.shape[1]) // 2, 35 + (315 - crop.shape[0]) // 2
     canvas[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
     return canvas
+
+
+def _candidate_comparison(item, side, front, omit, mask=None, *, payload=None, comparison=None, retained=None):
+    """Use the formal match/guard colours and show the AOI-to-candidate distance."""
+    from capi_side_report import annotation_color, draw_side_annotations, retained_candidate_contours
+
+    related = [p for p in (comparison or {}).get("points", []) if item["id"] in p["candidate_ids"]]
+    hit = any(item["id"] in p["retained_candidate_ids"] for p in related)
+    guarded = any(item["id"] in p["guard_candidate_ids"] for p in related)
+    key = "candidate" if hit else "guard" if guarded else "reference"
+    color = annotation_color(key)
+    bounds = dict(item["crop_bounds"])
+    # Include the actual AOI and guard, even if the old candidate crop excluded them.
+    for kind, image in (("side", side), ("front", front)):
+        contour = item.get(kind + "_contour")
+        if image is not None and contour:
+            points = list(contour)
+            for point in related:
+                points.extend(point[kind + "_guard_roi"])
+                points.extend((np.asarray(point[kind + "_xy"]) + [-32, -32],
+                               np.asarray(point[kind + "_xy"]) + [32, 32]))
+            bounds[kind] = _crop_bounds(points, image.shape, 16)
+
+    if retained is None:
+        retained = retained_candidate_contours(payload or {"candidates": [item]})
+    remaining = retained.get(item["id"], [])
+
+    def overlay(kind):
+        def draw(image, crop_bounds):
+            height, width = image.shape[:2]
+            scale = np.array([width / crop_bounds[2], height / crop_bounds[3]])
+            contours = remaining or [item["side_contour"]]
+            for contour in contours:
+                if kind == "front":
+                    contour = _transform(contour, np.asarray(payload["mapping"]["matrix"], np.float64))
+                pixels = np.rint((np.asarray(contour) - crop_bounds[:2]) * scale).astype(np.int32)
+                cv2.polylines(image, [pixels], True, color, 1, cv2.LINE_AA)
+            draw_side_annotations(image, payload, {**comparison, "points": related}, kind,
+                                  crop_bounds, full=False)
+        return draw
+
+    contextual = payload is not None and comparison is not None
+    aligned = omit is not None and omit.shape[:2] == side.shape[:2]
+    panels = [_panel(side, bounds["side"], f"Side #{item['id']}",
+                     annotate=overlay("side") if contextual else None),
+              _panel(front, bounds.get("front"), "Front (estimated)",
+                     None if contextual else item.get("front_contour"), contour_color=color,
+                     annotate=overlay("front") if contextual and front is not None and item.get("front_contour") else None),
+              _panel(omit if aligned else None, item["crop_bounds"].get("omit"), "Side OMIT",
+                     item["side_contour"], contour_color=color),
+              _panel(omit if aligned and mask is not None else None, item["crop_bounds"].get("omit"),
+                     "Side OMIT surface mask", item["side_contour"], mask, contour_color=color)]
+    image = np.hstack(panels)
+    if contextual:
+        footer = np.full((32, image.shape[1], 3), 20, np.uint8)
+        distances = [(p["id"], d["distance_product_px"]) for p in related
+                     for d in p["retained_candidate_distances"] if d["candidate_id"] == item["id"]]
+        text = " / ".join(f"A{pid} to #{item['id']}: {distance:.2f} product px" for pid, distance in distances[:4])
+        if len(distances) > 4:
+            text += f" (+{len(distances) - 4} AOI; see table)"
+        text += (" | " if text else "") + f"match={comparison['match_tolerance']:g}; guard={comparison['release_guard_radius']:g} product px"
+        text += " | " + ("AOI HIT - NG" if hit else "POSITION CHECK - NG" if guarded else "REFERENCE / FILTERED")
+        cv2.putText(footer, text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .5, color, 1, cv2.LINE_AA)
+        image = np.vstack((image, footer))
+    return image
 
 
 def _mask_regions(mask, origin):
@@ -709,7 +782,7 @@ def _omit_halo_mask(side, residual, item, comparison, bounds, remaining, core, t
 
 
 def _candidate_evidence(item, side, front, omit, detector, omit_info, transform, zone_mask, residual, params,
-                        *, mark_mask=None, detection_threshold=None, panel_quad=None):
+                        *, mark_mask=None, detection_threshold=None, panel_quad=None, composite_context=None):
     """Evaluate actual CV support pixels, not the candidate bounding rectangle."""
     x, y, w, h = item["side_bbox"]
     support = item.pop("_mask").astype(bool)
@@ -789,12 +862,10 @@ def _candidate_evidence(item, side, front, omit, detector, omit_info, transform,
     item["disposition"] = ("retained" if remaining.any() else
                            "mark_suppressed" if item["mark_excluded_area_px"] == int(support.sum()) else
                            "dust_suppressed" if item["dust"]["status"] == "suppressed" else "excluded")
-    # Keep the side crop unannotated so overlays cannot obscure the defect.
-    panels = [_panel(side, item["crop_bounds"]["side"], f"Side #{item['id']}"),
-              _panel(front, front_bounds, "Front (estimated)", item.get("front_contour")),
-              _panel(omit if aligned else None, omit_bounds, "Side OMIT", item["side_contour"]),
-              _panel(omit if aligned and mask is not None else None, omit_bounds, "Side OMIT surface mask", item["side_contour"], mask)]
-    return np.hstack(panels)
+    if composite_context is not None:
+        composite_context["mask"] = mask
+        return None  # Formal colours and AOI evidence are available after every candidate is filtered.
+    return _candidate_comparison(item, side, front, omit, mask)
 
 
 def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output_dir: Path,
@@ -887,6 +958,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
         output_dir.mkdir(parents=True, exist_ok=True)
         # Filtering and bomb matching run on every candidate. Only image generation is capped.
         composites = {}
+        composite_contexts = []
         for item in candidates:
             point = np.array(item["side_xy"], np.float32)
             item["side_raw_xy"] = ((np.array(side.shape[::-1]) - 1 - point) if rotate_180 else point).tolist()
@@ -899,9 +971,11 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                 contour = np.array(item["side_contour"], np.float32).reshape(-1, 1, 2)
                 item["front_contour"] = cv2.perspectiveTransform(contour, transform).reshape(-1, 2).tolist()
             support = item["_mask"]
-            composite = _candidate_evidence(item, side, front, omit_image, dust_detector, omit_info,
-                                            transform, zone_mask, residual, params, mark_mask=mark_mask,
-                                            detection_threshold=threshold, panel_quad=panel_boundary)
+            composite_context = {}
+            _candidate_evidence(item, side, front, omit_image, dust_detector, omit_info,
+                                transform, zone_mask, residual, params, mark_mask=mark_mask,
+                                detection_threshold=threshold, panel_quad=panel_boundary,
+                                composite_context=composite_context)
             item["excluded_zone_names"] = []
             if item["excluded_area_px"]:
                 bx, by, bw, bh = item["side_bbox"]
@@ -911,10 +985,10 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                     cv2.fillConvexPoly(local_mask, np.rint(polygon).astype(np.int32), 255)
                     if np.any((support > 0) & (local_mask > 0)):
                         item["excluded_zone_names"].append(zone["name"])
-            if len(composites) < 100:
+            if len(composite_contexts) < 100:
                 key = f"candidate_{item['id']}"
-                composites[key] = _save_preview(output_dir / f"{key}.jpg", composite)
                 item["composite_key"] = key
+                composite_contexts.append((item, composite_context["mask"]))
         for bomb in bombs:
             matched = [c for c in candidates if bomb["id"] in c["bomb_ids"]]
             bomb["overlaps_exclusion"] = any(c["excluded_area_px"] > 0 for c in matched)
@@ -938,14 +1012,21 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                    "bomb_matched": sum(b["status"] == "matched" for b in bombs), "bomb_total": len(bombs)}
         payload.update(summary=summary, truncated=False, composites_truncated=len(candidates) > 100,
                        status="CANDIDATES" if summary["retained"] else "FILTERED" if candidates else "NO_CANDIDATES")
-        payload["artifacts"].update(composites)
         side_view = _preview(side, quad)
         front_view = _preview(front, front_quad) if transform is not None else None
         residual_view = cv2.cvtColor(np.clip(128 + residual * 10, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
         payload["candidate_display"] = _candidate_preview_scope(payload)
-        from capi_side_report import compare_side_record, draw_side_annotations
+        from capi_side_report import compare_side_record, draw_side_annotations, retained_candidate_contours
         comparison = compare_side_record({"payload": payload, "status": payload["status"]},
                                          params["csjbl_preview_radius_product_px"])
+        retained = retained_candidate_contours(payload)
+        for item, mask in composite_contexts:
+            key = item["composite_key"]
+            composite = _candidate_comparison(item, side, front, omit_image, mask,
+                                             payload=payload, comparison=comparison, retained=retained)
+            composites[key] = _save_preview(output_dir / f"{key}.jpg", composite)
+        payload["artifacts"].update(composites)
+        payload["candidate_comparison_version"] = 2
         views = {"side": side_view, "residual": residual_view, "front": front_view}
         all_views = {}
         if include_all_candidates:
@@ -971,7 +1052,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                     draw_side_annotations(crop, payload, comparison, "front" if name.startswith("front") else "side",
                                           payload["preview_bounds"][name], all_candidates=name.endswith("_all"))
                 payload["artifacts"][name] = _save_preview(output_dir / (name + ".jpg"), crop)
-        payload["preview_annotation_version"] = 2
+        payload["preview_annotation_version"] = 3
     except (ValueError, OSError, cv2.error) as exc:
         payload["status"] = "ERROR"
         payload["reason"] = str(exc)

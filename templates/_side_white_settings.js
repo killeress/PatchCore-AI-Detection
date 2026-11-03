@@ -4,7 +4,10 @@
     function savedSideWhiteParams() {
         const defaults = Object.fromEntries(sideWhiteParamFields.map(([key,,value]) => [key,value]));
         const row = allParams.find(p => p.param_name === 'side_white_detection_params');
-        return {...defaults,...Object.fromEntries(sideWhiteSwitches.map(([k,,v]) => [k,v])),...parseJsonLoose(row ? row.param_value : null, defaults),dust_mode:'suppress'};
+        const saved = parseJsonLoose(row ? row.param_value : null, defaults);
+        const values = {...defaults,...Object.fromEntries(sideWhiteSwitches.map(([k,,v]) => [k,v])),...saved,dust_mode:'suppress'};
+        if (!Object.hasOwn(saved,'csjbl_release_guard_radius_product_px')) values.csjbl_release_guard_radius_product_px = Math.max(10,values.csjbl_match_tolerance_product_px);
+        return values;
     }
     function editSideWhiteParam(key, value) {
         if (!sideWhiteParamDraft) sideWhiteParamDraft = savedSideWhiteParams();
@@ -22,7 +25,7 @@
             ${sideWhiteSwitches.map(([key,label]) => `<label>${label}<input id="sw-param-${key}" type="checkbox" ${values[key]?'checked':''} onchange="editSideWhiteParam('${key}',this.checked)"></label>`).join('')}
             </fieldset>
             <p class="sw-note">貼紙／灰塵過濾固定啟用，依側拍 SPINIGBI 證據屏蔽符合條件的候選。</p>
-            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定。CSJBL 顯示範圍只控制參考範圍；判定距離容錯內仍有保留候選即維持 NG。全部 CSJBL 及正式 NG 原因均可放行時，轉 OK-s 並回覆 testing OK；缺圖或映射失敗時保留原判定。</p></details>
+            <details><summary>參數說明</summary><p class="sw-note">檢測門檻取最低局部反差與「影像雜訊 × 倍率」較大者。不檢測區沿用 CV 邊緣檢測設定。CSJBL 顯示範圍只控制參考範圍；命中容錯內有保留候選即維持 NG。超出命中容錯但仍在放行保護範圍內有候選時，標示位置待確認並保留 NG。全部 CSJBL 及正式 NG 原因均可放行時，轉 OK-s 並回覆 testing OK；缺圖或映射失敗時保留原判定。</p></details>
             <button class="sw-btn" type="submit" ${sideWhiteParamSaving?'disabled':''}>${sideWhiteParamSaving?'儲存中…':'儲存側拍參數'}</button>
             <span id="sw-param-message" class="sw-note" role="status">${escapeHtml(sideWhiteParamMessage||(sideWhiteParamDraft?'尚未儲存':''))}</span>
         </form>`;

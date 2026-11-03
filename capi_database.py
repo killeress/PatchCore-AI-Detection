@@ -2117,6 +2117,20 @@ class CAPIDatabase:
         finally:
             conn.close()
 
+    def get_side_white_diagnostics(self, result_id: int) -> Optional[Dict]:
+        """Load the selected snapshot and its parent log only when copying diagnostics."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT s.*, r.glass_id, r.model_id, r.machine_no, r.app_version, "
+                "r.machine_judgment, r.ai_judgment, r.image_dir, r.request_time, r.response_time, "
+                "r.created_at AS inference_created_at, r.inference_log, r.aoi_machine_coords, r.ng_details "
+                "FROM side_white_results s JOIN inference_records r ON r.id = s.record_id WHERE s.id = ?",
+                (result_id,)).fetchone()
+            return self._decode_side_white_row(row) if row else None
+        finally:
+            conn.close()
+
     def list_side_white_results(self, *, status="", glass_id="", machine_no="",
                                 limit=50, offset=0) -> Dict:
         conditions, params = [], []

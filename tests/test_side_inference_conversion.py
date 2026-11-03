@@ -192,9 +192,15 @@ def test_live_process_converts_before_response_and_background_reuses_payload(tmp
     assert "最終判定 " + judgment in saved["inference_log"]
 
 
-def test_rerun_applies_same_release_and_preserves_original_sent_response(tmp_path, monkeypatch):
+@pytest.mark.parametrize("guarded", [False, True])
+def test_rerun_applies_same_release_and_preserves_original_sent_response(tmp_path, monkeypatch, guarded):
     import capi_server
     row = clear_row()
+    if guarded:
+        row["payload"]["parameters"] = normalize_side_white_params()
+        row["status"] = row["payload"]["status"] = "CANDIDATES"
+        row["payload"]["candidates"] = [{"id": 1, "disposition": "retained",
+            "side_contour": [[459.52144, 90], [470, 90], [470, 110], [459.52144, 110]]}]
     payload = copy.deepcopy(row["payload"])
     payload["evidence_context"]["product_resolution"] = [500, 300]
     inspect = MagicMock(return_value=payload)
@@ -224,11 +230,11 @@ def test_rerun_applies_same_release_and_preserves_original_sent_response(tmp_pat
     cls._rerun_worker(record_id, db.get_record_detail(record_id))
     assert cls._rerun_tasks[record_id]["status"] == "done", cls._rerun_tasks[record_id]
     saved = db.get_record_detail(record_id)
-    assert saved["ai_judgment"] == "OK-s"
+    assert saved["ai_judgment"] == ("NG" if guarded else "OK-s")
     assert saved["client_response_text"] == "original NG"
-    assert "@QJPG-REPEATED;OK;MA;OK," in saved["inference_log"]
-    assert "側拍轉 OK" in saved["inference_log"]
-    assert saved["side_white_result"]["payload"]["inference_decision"]["converted"]
+    assert ("NGCSJBL0045000100W0F00000," if guarded else "@QJPG-REPEATED;OK;MA;OK,") in saved["inference_log"]
+    assert ("位置待確認" if guarded else "側拍轉 OK") in saved["inference_log"]
+    assert saved["side_white_result"]["payload"]["inference_decision"]["converted"] == (not guarded)
     inspect.assert_called_once()
 
 
@@ -242,6 +248,25 @@ def test_side_inspection_exception_preserves_ng_and_passthrough_reply(tmp_path, 
                                           tmp_path / "evidence", coords=row["aoi_machine_coords"])
     assert judgment == "NG" and parsed["_side_white_payload"]["status"] == "ERROR"
     assert build_dual_protocol_response(parsed, judgment, [], config).endswith(";NGCSJBL0045000100W0F00000,")
+
+
+def test_live_guard_preserves_original_csjbl_in_testing_reply(tmp_path, monkeypatch):
+    from capi_server import apply_side_white_inference
+    from test_side_release_guard import guard_row
+
+    row = guard_row()
+    payload = copy.deepcopy(row["payload"])
+    inspect = MagicMock(return_value=payload)
+    monkeypatch.setattr("capi_side_white.inspect_side_white_folder", inspect)
+    parsed = {"image_dir": str(tmp_path), "glass_id": "GUARDED",
+              "aoi_passthrough_records": ["CSJBL0045000100W0F00000"]}
+    config = CAPIConfig(side_white_detection_enabled=True)
+    judgment = apply_side_white_inference(parsed, [], "NG", json.dumps(row["ng_details"]), {}, config,
+                                          tmp_path / "evidence", coords=json.dumps(row["aoi_machine_coords"]))
+    assert judgment == "NG"
+    assert parsed["_side_white_payload"]["inference_decision"]["points"][0]["status"] == "guarded"
+    assert build_dual_protocol_response(parsed, judgment, [], config).endswith(";NGCSJBL0045000100W0F00000,")
+    inspect.assert_called_once()
 
 
 @pytest.mark.parametrize("value", [-1, 501, 1.5, True, float("nan")])

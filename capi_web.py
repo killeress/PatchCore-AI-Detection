@@ -4057,6 +4057,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     self._handle_api_side_white(query)
             elif path == "/api/side-white/image":
                 self._handle_api_side_white_image(query)
+            elif path == "/api/side-white/diagnostics":
+                self._handle_api_side_white_diagnostics(query)
             elif path == "/api/settings/mark-shadow/crop":
                 if self._require_settings_user(api=True, admin=True):
                     self._handle_api_settings_mark_shadow_crop(query)
@@ -9092,7 +9094,9 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             }
             self.init_jinja()
             html = self.jinja_env.get_template("_side_white_result.html").render(
-                detail={"side_white_result": {"id": "debug", "status": payload["status"],
+                detail={"id": (detail or {}).get("id"), "glass_id": (detail or {}).get("glass_id"),
+                        "model_id": resolution.get("model_id"), "machine_no": (detail or {}).get("machine_no"),
+                        "side_white_result": {"id": "debug", "status": payload["status"],
                         "candidate_count": len(payload.get("candidates", [])), "payload": payload}},
                 embedded=True, debug_result=True, artifact_urls=artifact_urls,
             )
@@ -12780,6 +12784,23 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
     def _handle_api_side_white_review(self):
         self._send_json({"error": "側拍結果已改為唯讀"}, status=410)
+
+    def _handle_api_side_white_diagnostics(self, query):
+        # Same read access as the result/image; no settings or review mutation.
+        try:
+            result_id = int(query.get("id", [0])[0])
+            if result_id <= 0:
+                raise ValueError
+        except (ValueError, TypeError, IndexError):
+            self._send_json({"error": "側拍結果 ID 格式錯誤"}, status=400)
+            return
+        row = self.db.get_side_white_diagnostics(result_id)
+        if not row:
+            self._send_json({"error": "找不到側拍結果，請重新查詢"}, status=404)
+            return
+        from capi_side_report import side_white_diagnostics
+        self._send_json(side_white_diagnostics(row), headers={"Cache-Control": "no-store"},
+                        compact=True, compress=True)
 
     def _handle_api_side_white_image(self, query):
         # Same visibility as record detail; only serve artifacts recorded by this inspector.

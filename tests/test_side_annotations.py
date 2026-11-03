@@ -87,8 +87,10 @@ def test_region_sources_use_distinct_colors_with_names_outside_the_picture(monke
     assert labels["B1"] == annotation_color("bomb")
     assert labels["#1"] == annotation_color("candidate")
     assert labels["#2"] == annotation_color("reference")
-    assert len({annotation_color(item["key"]) for item in SIDE_ANNOTATION_LEGEND}) == 7
+    assert len({annotation_color(item["key"]) for item in SIDE_ANNOTATION_LEGEND}) == 8
     for item in SIDE_ANNOTATION_LEGEND:
+        if item["key"] == "guard":
+            continue  # This legacy snapshot did not have an independent release guard.
         difference = np.abs(image.astype(np.int16) - annotation_color(item["key"]))
         assert np.any(difference.max(axis=2) < 25), item["key"]
 

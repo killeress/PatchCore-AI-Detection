@@ -50,8 +50,8 @@ def test_surface_filtering_stays_enabled_with_legacy_mode_values(mode):
     json.dumps(row)
 
 
-@pytest.mark.parametrize("x,expected", [(39, "omit_suppressed"), (40, "matched"), (50, "matched")])
-def test_partial_omit_only_blocks_the_aoi_point_on_uncovered_pixels(x, expected):
+@pytest.mark.parametrize("x,expected", [(34, "omit_suppressed"), (39, "guarded"), (40, "matched"), (50, "matched")])
+def test_partial_omit_keeps_uncovered_pixels_in_match_or_guard_range(x, expected):
     omit = full_omit()
     omit[:, 45:] = 0
     row = observed_row(omit, threshold=.5)

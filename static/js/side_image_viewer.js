@@ -85,3 +85,91 @@
         image.src = trigger.href;
     });
 })();
+
+/* Delegation also covers side-statistics and DEBUG cards inserted after page load. */
+(() => {
+    'use strict';
+
+    async function copyText(text) {
+        if (navigator.clipboard?.writeText) {
+            try { await navigator.clipboard.writeText(text); return; }
+            catch (_) { /* HTTP/restricted clipboard: use the local selection fallback. */ }
+        }
+        const previous = document.activeElement;
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.readOnly = true;
+        area.style.cssText = 'position:fixed;left:-9999px;top:0';
+        document.body.append(area);
+        try {
+            area.focus({preventScroll: true});
+            area.select();
+            if (!document.execCommand('copy')) throw new Error('clipboard');
+        } finally {
+            area.remove();
+            previous?.focus({preventScroll: true});
+        }
+    }
+
+    async function copyDiagnostics(button) {
+        if (button.disabled) return;
+        const card = button.closest('section');
+        const status = card.querySelector('[data-sw-copy-status]');
+        const originalLabel = button.textContent;
+        let text;
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+        button.textContent = '複製中…';
+        status.hidden = false;
+        status.textContent = '正在準備側拍 LOG 與完整 payload…';
+        card.querySelector('[data-sw-copy-manual]')?.remove();
+        try {
+            let data;
+            const inline = card.querySelector('[data-sw-debug-diagnostics]');
+            if (inline) data = JSON.parse(inline.textContent);
+            else {
+                const id = button.dataset.swResultId || '';
+                if (!/^[1-9]\d*$/.test(id)) throw new Error('沒有有效的側拍結果 ID，請重新查詢');
+                const response = await fetch('/api/side-white/diagnostics?id=' + encodeURIComponent(id),
+                    {cache: 'no-store', headers: {'Accept': 'application/json'}});
+                data = await response.json();
+                if (!response.ok || data.error) throw new Error(data.error || '側拍排查資料讀取失敗');
+            }
+            if (!data.payload || typeof data.payload !== 'object' || typeof data.side_log !== 'string') {
+                throw new Error('排查資料格式不完整，請重新查詢');
+            }
+            const {payload, side_log, ...context} = data;
+            text = '=== 側拍排查資料 ===\n' + JSON.stringify({
+                ...context, copied_at: new Date().toISOString(), page_url: window.location.href,
+            }, null, 2) + '\n\n=== 側拍 LOG ===\n' + side_log +
+                '\n\n=== 側拍結果 payload（完整 JSON） ===\n' + JSON.stringify(payload, null, 2);
+            await copyText(text);
+            status.textContent = '已複製側拍 LOG、完整 payload 與紀錄資訊，可直接貼上排查。';
+        } catch (error) {
+            if (text !== undefined) {
+                const area = document.createElement('textarea');
+                area.className = 'sw-copy-manual';
+                area.setAttribute('data-sw-copy-manual', '');
+                area.setAttribute('aria-label', '側拍排查資料，請手動複製');
+                area.readOnly = true;
+                area.value = text;
+                status.after(area);
+                area.focus();
+                area.select();
+                status.textContent = '瀏覽器無法自動複製，資料已選取，請按 Ctrl+C 複製。';
+            } else status.textContent = '複製失敗：' + (error.message || String(error));
+        } finally {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            button.textContent = originalLabel;
+            if (document.activeElement === document.body) button.focus({preventScroll: true});
+        }
+    }
+
+    document.addEventListener('click', event => {
+        const button = event.target.closest('[data-sw-copy-diagnostics]');
+        if (!button) return;
+        event.preventDefault();
+        void copyDiagnostics(button);
+    });
+})();
