@@ -36,17 +36,21 @@ def review_low_coverage_regions(
     *,
     coverage_threshold,
     evaluation_mask=None,
+    support_anomaly_map=None,
 ):
     """Return copied region decisions and feature evidence in image coordinates.
 
-    Coverage remains the original heatmap metric. Only low-coverage NG regions
-    with direct OMIT evidence can be reconsidered, and every visible feature
-    in such a region must match the unextended OMIT core by at least 80%.
+    Coverage remains the original Top% metric. The pre-core, post-exclusion map
+    can associate a displaced core with its connected half-peak response inside
+    the ROI. Every observed feature must still match the unextended OMIT mask;
+    a nearby dust patch or an empty observation cannot clear a region.
     """
     regions = [dict(region) for region in region_details]
     candidates = [region for region in regions if (
         not region["is_dust"]
-        and 0 < region.get("dust_overlap", 0)
+        and (0 < region.get("dust_overlap", 0) or (
+            support_anomaly_map is not None and evaluation_mask is not None
+        ))
         and region["coverage"] < coverage_threshold
     )]
     if not candidates:
@@ -80,6 +84,15 @@ def review_low_coverage_regions(
         allowed = cv2.resize(evaluation.astype(np.uint8), (width, height),
                              interpolation=cv2.INTER_NEAREST) > 0
     dust = dust > 0
+    support = None
+    allowed_map = None
+    if support_anomaly_map is not None:
+        support = np.asarray(support_anomaly_map, dtype=np.float32)
+        if (evaluation_mask is None or support.shape != amap.shape
+                or not np.isfinite(support).all()):
+            return regions, []
+        allowed_map = cv2.resize(allowed.astype(np.uint8), (amap.shape[1], amap.shape[0]),
+                                 interpolation=cv2.INTER_NEAREST) > 0
 
     # Suppress the LCD pixel lattice before measuring local dark/bright contrast.
     # A robust noise estimate avoids letting one strong dust spot hide a weaker
@@ -90,6 +103,29 @@ def review_low_coverage_regions(
     features = []
     for region in candidates:
         zone = (labels_tile == region["label_id"]) & allowed
+        region["feature_review_scope"] = "core"
+        if support is not None:
+            core = (labels == region["label_id"]) & allowed_map & (amap > 0)
+            if not np.any(core):
+                continue
+            # This is association evidence only: neither Top% selection nor its
+            # coverage denominator is expanded. Preserve excluded/thresholded
+            # pixels from the production map instead of reusing the display map.
+            half_peak = float(np.max(amap[core])) * 0.5
+            response = (support >= half_peak) & allowed_map
+            _, response_labels = cv2.connectedComponents(response.astype(np.uint8), connectivity=8)
+            response_ids = np.unique(response_labels[core])
+            response_ids = response_ids[response_ids > 0]
+            scope = np.isin(response_labels, response_ids)
+            # A shared warm response cannot let one core borrow another core's
+            # surface evidence. Ambiguous associations keep the original scope.
+            foreign_core = scope & (labels > 0) & (labels != region["label_id"])
+            if np.all(scope[core]) and not np.any(foreign_core):
+                zone = cv2.resize(scope.astype(np.uint8), (width, height),
+                                   interpolation=cv2.INTER_NEAREST) > 0
+                zone &= allowed
+                region["feature_review_scope"] = "half_peak_component"
+        region["feature_review_scope_pixels"] = int(np.count_nonzero(zone))
         region["feature_reviewed"] = True
         region["feature_review_reason"] = "no_matched_features"
         if not np.any(zone) or not np.any(zone & dust):
@@ -185,3 +221,94 @@ def review_low_coverage_regions(
             region["is_dust"] = True
             region["feature_review_reason"] = "all_features_match_precise_dust"
     return regions, features
+
+
+def confirmed_roi_surface_mask(original_image, precise_dust_mask, roi_mask, support_map):
+    """Confirm surface components using all active ROI pixels, without Top%/half-peak cuts.
+
+    The result is only an edit mask for residual inference. It is never itself
+    sufficient evidence to release the tile, or a replacement for formal COV.
+    """
+    if any(value is None for value in (original_image, precise_dust_mask, roi_mask, support_map)):
+        return None, [], "missing_evidence"
+    image = np.asarray(original_image)
+    dust = np.asarray(precise_dust_mask)
+    roi = np.asarray(roi_mask)
+    support = np.asarray(support_map, dtype=np.float32)
+    if (image.ndim not in (2, 3) or dust.shape != image.shape[:2]
+            or roi.ndim != 2 or not roi.size or support.ndim != 2 or not support.size
+            or not np.isfinite(support).all()):
+        return None, [], "invalid_evidence"
+    height, width = image.shape[:2]
+    allowed = cv2.resize((roi > 0).astype(np.uint8), (width, height),
+                         interpolation=cv2.INTER_NEAREST) > 0
+    active = (support > 0) & (cv2.resize((roi > 0).astype(np.uint8),
+              (support.shape[1], support.shape[0]), interpolation=cv2.INTER_NEAREST) > 0)
+    if not np.any(active) or not np.any((dust > 0) & allowed):
+        return None, [], "missing_surface_evidence"
+    labels = active.astype(np.int32)
+    dust_map = cv2.resize((dust > 0).astype(np.uint8),
+                          (support.shape[1], support.shape[0]), interpolation=cv2.INTER_NEAREST)
+    overlap = int(np.count_nonzero(active & (dust_map > 0)))
+    region = dict(label_id=1, is_dust=False, coverage=overlap / int(active.sum()),
+                  dust_overlap=overlap, area=int(active.sum()))
+    # This auxiliary region describes every above-threshold ROI pixel. It does
+    # not replace the stored Top% labels or their measured coverage.
+    reviewed, features = review_low_coverage_regions(
+        image, dust, support, labels, [region], coverage_threshold=1.01,
+        evaluation_mask=roi,
+    )
+    if not reviewed[0].get("is_dust"):
+        return None, features, reviewed[0].get("feature_review_reason", "missing_evidence")
+    _, dust_labels = cv2.connectedComponents((dust > 0).astype(np.uint8), connectivity=8)
+    selected = set()
+    edit = np.zeros((height, width), bool)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    smooth = cv2.GaussianBlur(gray.astype(np.float32), (5, 5), 0)
+    residual = smooth - cv2.GaussianBlur(smooth, (31, 31), 0)
+    feature_labels = {}
+    for feature in features:
+        if not feature["is_dust"]:
+            return None, features, "unmatched_features"
+        contour = np.asarray(feature["feature_contour"], dtype=np.int32).reshape(-1, 1, 2)
+        sign = -1 if feature["type"] == "dark" else 1
+        key = (sign, feature["contrast_threshold"])
+        if key not in feature_labels:
+            _, feature_labels[key] = cv2.connectedComponents(
+                (sign * residual >= key[1]).astype(np.uint8), connectivity=8)
+        fx, fy = contour[0, 0]
+        component = feature_labels[key] == feature_labels[key][fy, fx]
+        selected.update(int(value) for value in np.unique(dust_labels[component]) if value > 0)
+        # Preserve unverified pixels even inside an oversized OMIT component.
+        # In particular, do not fill a contour's holes or a neighboring faint spot.
+        edit |= component & (dust > 0)
+    if not selected:
+        return None, features, "missing_surface_evidence"
+    surface = np.isin(dust_labels, list(selected))
+    if (np.any(surface & ~allowed) or np.any(surface[:2]) or np.any(surface[-2:])
+            or np.any(surface[:, :2]) or np.any(surface[:, -2:])):
+        return None, features, "surface_mask_clipped"
+    ring = (cv2.dilate(edit.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0) & ~edit & allowed
+    if np.count_nonzero(ring) < 16:
+        return None, features, "insufficient_background"
+    return edit.astype(np.uint8) * 255, features, "confirmed_surface"
+
+
+def surface_removed_images(image, edit_mask):
+    """Create two independent background fills; preserve every other input pixel."""
+    source = np.asarray(image)
+    mask = np.asarray(edit_mask, dtype=np.uint8)
+    if source.shape[:2] != mask.shape or not np.any(mask):
+        raise ValueError("invalid surface edit mask")
+    for name, method in (("telea", cv2.INPAINT_TELEA), ("navier_stokes", cv2.INPAINT_NS)):
+        channels = [source] if source.ndim == 2 else cv2.split(source)
+        filled = [cv2.inpaint(channel.astype(np.float32), mask, 3, method) for channel in channels]
+        candidate = filled[0] if source.ndim == 2 else np.stack(filled, axis=-1)
+        if not np.isfinite(candidate).all():
+            raise ValueError("non-finite background fill")
+        if np.issubdtype(source.dtype, np.integer):
+            bounds = np.iinfo(source.dtype)
+            candidate = np.clip(np.rint(candidate), bounds.min, bounds.max)
+        result = source.copy()
+        result[mask > 0] = candidate.astype(source.dtype)[mask > 0]
+        yield name, result

@@ -4213,6 +4213,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._handle_debug_mark_detection()
             elif path == "/api/debug/preprocess-lab":
                 self._handle_debug_preprocess_lab()
+            elif path == "/api/debug/white-spot":
+                self._handle_debug_white_spot()
             elif path == "/api/debug/coord-inference":
                 self._handle_debug_coord_inference()
             elif path == "/api/debug/edge-inspect":
@@ -6822,9 +6824,29 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             logger.error(f"[DEBUG] Preprocess lab error: {e}", exc_info=True)
             self._send_json({"error": f"影像前處理失敗: {str(e)}"})
 
+    def _handle_debug_white_spot(self):
+        """Debug-only DoG preview and paired original/enhanced PatchCore trial."""
+        from capi_white_spot_debug import run_debug
+
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= 65536:
+                raise ValueError("請提供有效的 JSON 請求（上限 64 KB）")
+            data = json.loads(self.rfile.read(length).decode("utf-8"))
+            if CAPIWebHandler._debug_heatmap_dir is None:
+                CAPIWebHandler._debug_heatmap_dir = Path(tempfile.mkdtemp(prefix="capi_debug_hm_"))
+            result = run_debug(self, data, CAPIWebHandler._debug_heatmap_dir)
+            self._send_json(result)
+        except (ValueError, UnicodeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.exception("[DEBUG] White spot experiment failed")
+            self._send_json({"error": f"白丸檢測失敗：{exc}"}, status=500)
+
     def _handle_debug_page(self, path: str):
         """Debug 推論頁面"""
         from capi_image_preprocess_lab import get_method_specs
+        from capi_white_spot_debug import PRESETS as white_spot_presets
 
         # 從 DB 讀取最新設定，若無則 fallback 到推論器的 config
         db_params = {}
@@ -6877,6 +6899,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         template = self.jinja_env.get_template("debug_inference.html")
         html = template.render(
             request_path=path,
+            white_spot_presets=white_spot_presets,
             default_threshold=get_val('anomaly_threshold', 0.5),
             default_edge_margin=get_val('edge_margin_px', 0),
             default_dust_extension=get_val('dust_extension', 0),
@@ -12722,15 +12745,18 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             comparison = compare_side_record(row, float(query.get("tolerance", [50])[0]))
             point_id = int(query["point"][0]) if query.get("point") else None
             kind = query.get("kind", ["side"])[0]
-            if point_id is not None and self._send_side_original_crop(row, comparison, kind, point_id):
+            candidates = query.get("candidates", ["0"])[0] == "1"
+            if point_id is not None and self._send_side_original_crop(row, comparison, kind, point_id,
+                                                                     candidates=candidates):
                 return
-            image = render_comparison_image(row, comparison, self.heatmap_base_dir, kind, point_id)
+            image = render_comparison_image(row, comparison, self.heatmap_base_dir, kind, point_id,
+                                            candidates=candidates)
             self._send_image_array_png(image)
         except (ValueError, TypeError, OSError):
             self._send_404()
 
-    def _send_side_original_crop(self, row, comparison, kind, point_id) -> bool:
-        """Send the AOI point region cut from the original file, byte-for-byte pixel values.
+    def _send_side_original_crop(self, row, comparison, kind, point_id, *, candidates=False) -> bool:
+        """Send the original crop, optionally annotating a separate display copy.
 
         Returns False when the original is gone or unreadable so the caller can
         fall back to the saved preview.
@@ -12749,7 +12775,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             resolve = getattr(module, "resolve_unc_path", None)
             path_mapping = getattr(server, "path_mapping", {}) or {}
             folder = Path(resolve(image_dir, path_mapping) if resolve else image_dir)
-            crop = crop_original_image(row, comparison, folder, kind, point_id)
+            crop = crop_original_image(row, comparison, folder, kind, point_id, candidates=candidates)
             # PNG is lossless and keeps 8/16-bit depth; nothing is rescaled.
             ok, buf = cv2.imencode(".png", crop) if crop.size else (False, None)
         except (OSError, ValueError, TypeError, cv2.error):

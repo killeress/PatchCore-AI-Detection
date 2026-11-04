@@ -37,9 +37,10 @@ def _capture_text(monkeypatch):
     return captured
 
 
-def test_reviewed_dust_displays_feature_reason_and_preserves_low_coverage(monkeypatch):
+@pytest.mark.parametrize("overlap", [0, 958])
+def test_reviewed_dust_displays_feature_reason_and_preserves_low_coverage(monkeypatch, overlap):
     texts = _capture_text(monkeypatch)
-    region = _region()
+    region = _region(dust_overlap=overlap, coverage=overlap / 21140)
     original = dict(region)
     panels = build_region_zoom_panels(
         np.ones((128, 128), np.uint8), np.zeros((128, 128), np.uint8),
@@ -47,7 +48,7 @@ def test_reviewed_dust_displays_feature_reason_and_preserves_low_coverage(monkey
     )
 
     assert len(panels) == 1
-    assert "COV: 958/21140 = 0.0453" in texts
+    assert f"COV: {overlap}/21140 = {overlap / 21140:.4f}" in texts
     assert "FEATURE_MATCH Dust:2 Real:0 -> DUST" in texts
     assert not any("HighCOV" in text or "PeakInDust" in text or "-> REAL_NG" in text
                    for text in texts)
@@ -97,6 +98,40 @@ def test_bomb_reason_keeps_priority_over_feature_review(monkeypatch):
     assert "BOMB excluded: 100 px" in texts
     assert not any("FEATURE_MATCH" in text for text in texts)
     assert " BOMB " in panels[0][1]
+
+
+@pytest.mark.parametrize("status,reason", [
+    ("clear", "ROI_RESIDUAL 2/2 clear -> DUST"),
+    ("remaining", "ROI_RESIDUAL Remaining -> REAL_NG"),
+    ("unconfirmed", "ROI_RESIDUAL Unconfirmed -> KEEP_NG"),
+])
+def test_roi_residual_verdict_overrides_preliminary_feature_match(monkeypatch, status, reason):
+    texts = _capture_text(monkeypatch)
+    region = _region(is_dust=status == "clear", coverage=0., dust_overlap=0,
+                     roi_residual_status=status)
+    build_region_zoom_panels(np.ones((128, 128), np.uint8), None, [region], iou_threshold=.1)
+    assert reason in texts
+    assert "COV: 0/21140 = 0.0000" in texts
+    assert not any(text.startswith("FEATURE_MATCH") for text in texts)
+
+
+def test_remaining_model_point_is_marked_without_moving_original_heat(tmp_path, monkeypatch):
+    texts = _capture_text(monkeypatch)
+    image = np.full((128, 128), 90, np.uint8)
+    values = np.zeros(image.shape, np.float32)
+    values[50, 40] = 1.
+    tile = SimpleNamespace(
+        x=0, y=0, width=128, height=128, original_image=image,
+        decision_context={"aoi_dust_residual": dict(status="remaining", remaining_image_xy=[88, 82])},
+        is_suspected_dust_or_scratch=False,
+    )
+    original = values.copy()
+    path = HeatmapManager(tmp_path).save_tile_heatmap(
+        tmp_path, "residual", 0, image, values, 1., tile_info=tile,
+    )
+    assert Path(path).is_file()
+    assert "ROI-R" in texts
+    np.testing.assert_array_equal(values, original)
 
 
 def test_tile_review_header_and_contours_do_not_use_two_stage_zoom(tmp_path, monkeypatch):

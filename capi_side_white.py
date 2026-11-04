@@ -679,13 +679,12 @@ def _candidate_comparison(item, side, front, omit, mask=None, *, payload=None, c
     key = "candidate" if hit else "guard" if guarded else "reference"
     color = annotation_color(key)
     bounds = dict(item["crop_bounds"])
-    # Include the actual AOI and guard, even if the old candidate crop excluded them.
+    # Include the actual AOI even if the old candidate crop excluded it.
     for kind, image in (("side", side), ("front", front)):
         contour = item.get(kind + "_contour")
         if image is not None and contour:
             points = list(contour)
             for point in related:
-                points.extend(point[kind + "_guard_roi"])
                 points.extend((np.asarray(point[kind + "_xy"]) + [-32, -32],
                                np.asarray(point[kind + "_xy"]) + [32, 32]))
             bounds[kind] = _crop_bounds(points, image.shape, 16)
@@ -698,14 +697,12 @@ def _candidate_comparison(item, side, front, omit, mask=None, *, payload=None, c
         def draw(image, crop_bounds):
             height, width = image.shape[:2]
             scale = np.array([width / crop_bounds[2], height / crop_bounds[3]])
-            contours = remaining or [item["side_contour"]]
-            for contour in contours:
-                if kind == "front":
-                    contour = _transform(contour, np.asarray(payload["mapping"]["matrix"], np.float64))
+            if not remaining:
+                contour = (item.get("front_contour") if kind == "front" else item["side_contour"])
                 pixels = np.rint((np.asarray(contour) - crop_bounds[:2]) * scale).astype(np.int32)
                 cv2.polylines(image, [pixels], True, color, 1, cv2.LINE_AA)
             draw_side_annotations(image, payload, {**comparison, "points": related}, kind,
-                                  crop_bounds, full=False)
+                                  crop_bounds, full=False, candidate_ids=[item["id"]], retained=retained)
         return draw
 
     contextual = payload is not None and comparison is not None
@@ -1026,7 +1023,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                                              payload=payload, comparison=comparison, retained=retained)
             composites[key] = _save_preview(output_dir / f"{key}.jpg", composite)
         payload["artifacts"].update(composites)
-        payload["candidate_comparison_version"] = 2
+        payload["candidate_comparison_version"] = 3
         views = {"side": side_view, "residual": residual_view, "front": front_view}
         all_views = {}
         if include_all_candidates:
@@ -1052,7 +1049,7 @@ def inspect_side_white_image(side_path: Path, front_path: Optional[Path], output
                     draw_side_annotations(crop, payload, comparison, "front" if name.startswith("front") else "side",
                                           payload["preview_bounds"][name], all_candidates=name.endswith("_all"))
                 payload["artifacts"][name] = _save_preview(output_dir / (name + ".jpg"), crop)
-        payload["preview_annotation_version"] = 3
+        payload["preview_annotation_version"] = 4
     except (ValueError, OSError, cv2.error) as exc:
         payload["status"] = "ERROR"
         payload["reason"] = str(exc)

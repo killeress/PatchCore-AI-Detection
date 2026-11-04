@@ -55,6 +55,9 @@ def _scene(monkeypatch, *, two_stage=False):
     )
     monkeypatch.setattr(worker, "_check_dust_or_scratch_feature_with_context",
                         lambda *args, **kwargs: (True, dust.copy(), 0.1, "TEST_OMIT"))
+    monkeypatch.setattr(worker, "_get_inferencer_for_zone", lambda *a: object())
+    monkeypatch.setattr(worker, "predict_tile", lambda probe, **kw: (
+        .1, np.full(probe.image.shape[:2], .1, np.float32)))
     return worker, tile, result, amap, dust, core
 
 
@@ -85,7 +88,60 @@ def _run_v1(worker, result, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("two_stage", [False, True])
-def test_formal_coverage_is_9_over_41_and_reaches_aoi_ok(monkeypatch, tmp_path, version, two_stage):
+@pytest.mark.parametrize("independent", [False, True])
+def test_displaced_point_four_core_uses_raw_features_and_preserves_evidence(
+    monkeypatch, tmp_path, version, two_stage, independent,
+):
+    worker, tile, result, _, _, _ = _scene(monkeypatch, two_stage=two_stage)
+    worker.config.dust_heatmap_top_percent = 0.4
+    tile.decision_context["aoi_judgment_roi"]["display_top_percent"] = 0.4
+    cv2.circle(tile.original_image, (250, 270), 12, 70, -1)
+    if independent:
+        cv2.circle(tile.original_image, (267, 239), 4, 79, -1)
+    dust = np.zeros_like(tile.image)
+    cv2.circle(dust, (250, 270), 17, 255, -1)
+    yy, xx = np.mgrid[:512, :512]
+    full_map = np.exp(-((xx - 250) ** 2 + (yy - 240) ** 2) / (2 * 22.0 ** 2)).astype(np.float32)
+    amap = np.where((tile.aoi_roi_mask > 0) & (full_map >= 0.34), full_map, 0)
+    full_map[tile.aoi_roi_mask == 0] = 2  # Outside heat cannot participate.
+    tile.aoi_roi_full_map = full_map.copy()
+    core = capi_heatmap.build_aoi_roi_core_mask(full_map, amap > 0, tile.aoi_roi_mask, 0.4)
+    result.anomaly_tiles = [(tile, 0.9347, amap)]
+    monkeypatch.setattr(worker, "_check_dust_or_scratch_feature_with_context",
+                        lambda *args, **kwargs: (True, dust.copy(), 0.1, "TEST_OMIT"))
+
+    if version == "v1":
+        _run_v1(worker, result, monkeypatch, tmp_path)
+    else:
+        worker._apply_omit_dust_postprocess([result], tile.image, False, "", cpu_workers=1)
+
+    assert np.count_nonzero(core) < np.count_nonzero(tile.aoi_roi_mask) * 0.005
+    np.testing.assert_array_equal(tile.dust_heatmap_binary, core)
+    np.testing.assert_array_equal(tile.aoi_roi_full_map, full_map)
+    np.testing.assert_array_equal(result.anomaly_tiles[0][2], amap)
+    assert len(tile.dust_region_details) == 1
+    region = tile.dust_region_details[0]
+    assert region["coverage"] == region["dust_overlap"] == tile.dust_heatmap_iou == 0
+    assert region["area"] == region["metric_denominator"] == np.count_nonzero(core)
+    assert region["feature_review_scope"] == "half_peak_component"
+    assert tile.is_suspected_dust_or_scratch is (not independent)
+    assert "response_regions=1" in tile.dust_detail_text
+    assert tile.dust_two_stage_features is None
+    if independent:
+        assert abs(tile.anomaly_peak_x - 267) <= 2
+        assert abs(tile.anomaly_peak_y - 239) <= 2
+    stored = results_to_db_data([result], {})[0]
+    assert stored["is_ng"] == int(independent)
+    scope = json.loads(stored["tiles"][0]["decision_context"])["aoi_judgment_roi"]
+    assert scope["dust_top_percent"] == 0.4
+    assert scope["dust_core_pixel_count"] == np.count_nonzero(core)
+    assert any(row.startswith("PCDK2") for row in
+               _iter_qjpg_defect_records([result], (1920, 1200), worker.config)) is independent
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("two_stage", [False, True])
+def test_formal_coverage_is_9_over_41_but_flat_raw_cannot_confirm_surface(monkeypatch, tmp_path, version, two_stage):
     worker, tile, result, amap, dust, core = _scene(monkeypatch, two_stage=two_stage)
     legacy = worker.check_dust_per_region(dust, amap, top_percent=100,
                                          iou_threshold=0.15)
@@ -116,15 +172,16 @@ def test_formal_coverage_is_9_over_41_and_reaches_aoi_ok(monkeypatch, tmp_path, 
     assert tile.dust_heatmap_iou == pytest.approx(9 / 41)
     assert region["peak_in_dust"] is False
     assert region["dust_sub_peak_rescue"] is True
-    assert tile.is_suspected_dust_or_scratch
+    assert not tile.is_suspected_dust_or_scratch
+    assert tile.decision_context["aoi_dust_residual"]["status"] == "unconfirmed"
     assert bool(two_stage_cores) is two_stage
     stored = results_to_db_data([result], {})[0]
-    assert stored["is_ng"] == 0
+    assert stored["is_ng"] == 1
     scope = json.loads(stored["tiles"][0]["decision_context"])["aoi_judgment_roi"]
     assert scope["dust_top_percent"] == 0.3
     assert scope["dust_core_pixel_count"] == 41
-    assert not any(row.startswith("PCDK2") for row in
-                   _iter_qjpg_defect_records([result], (1920, 1200), worker.config))
+    assert any(row.startswith("PCDK2") for row in
+               _iter_qjpg_defect_records([result], (1920, 1200), worker.config))
 
 
 def test_render_reuses_formal_core_without_reranking(monkeypatch, tmp_path):

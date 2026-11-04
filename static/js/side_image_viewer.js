@@ -1,8 +1,16 @@
 /* Shared by record details, the AJAX report and DEBUG results. */
 (() => {
     'use strict';
-    let dialog, image, canvas, stage, status, marker, markerButton, opener;
-    let fit = true, showMarker = true, frameRatio = 0;
+    let dialog, image, canvas, stage, status, marker, markerButton, candidatesButton, opener;
+    let fit = true, showMarker = true, showCandidates = true, frameRatio = 0;
+    let cleanUrl = '', markedUrl = '';
+
+    function loadImage(url) {
+        canvas.hidden = true;
+        status.hidden = false;
+        status.textContent = '載入中…';
+        image.src = url;
+    }
 
     function layout() {
         if (!dialog.open || !image.naturalWidth || canvas.hidden) return;
@@ -24,6 +32,7 @@
             <button type="button" data-sw-fit aria-pressed="true">適合視窗</button>
             <button type="button" data-sw-native aria-pressed="false">1:1 原始像素</button>
             <button type="button" data-sw-marker aria-pressed="true">顯示 AOI 框</button>
+            <button type="button" data-sw-candidates aria-pressed="true">顯示候選與距離</button>
             <button type="button" data-sw-close autofocus aria-label="關閉放大檢視">關閉 ×</button></div>
             <div class="sw-viewer-stage"><p class="sw-viewer-status" role="status">載入中…</p>
             <div class="sw-viewer-canvas" hidden><img alt=""><span class="sw-aoi-frame" aria-hidden="true"></span></div></div>
@@ -35,6 +44,7 @@
         status = dialog.querySelector('[role=status]');
         marker = dialog.querySelector('.sw-aoi-frame');
         markerButton = dialog.querySelector('[data-sw-marker]');
+        candidatesButton = dialog.querySelector('[data-sw-candidates]');
         image.addEventListener('load', () => {
             status.hidden = true;
             canvas.hidden = false;
@@ -53,6 +63,10 @@
                 showMarker = !showMarker;
                 markerButton.setAttribute('aria-pressed', String(showMarker));
                 layout();
+            } else if (event.target.closest('[data-sw-candidates]')) {
+                showCandidates = !showCandidates;
+                candidatesButton.setAttribute('aria-pressed', String(showCandidates));
+                loadImage(showCandidates ? markedUrl : cleanUrl);
             }
         });
         dialog.addEventListener('close', () => {
@@ -64,6 +78,21 @@
     }
 
     document.addEventListener('click', event => {
+        const toggle = event.target.closest('[data-sw-candidates-toggle]');
+        if (toggle) {
+            event.preventDefault();
+            const show = toggle.getAttribute('aria-pressed') !== 'true';
+            toggle.setAttribute('aria-pressed', String(show));
+            toggle.textContent = show ? '隱藏候選與距離' : '顯示候選與距離';
+            toggle.closest('[data-sw-aoi-point]').querySelectorAll('a[data-sw-marked-url]').forEach(link => {
+                if (link.classList.contains('sw-image-missing')) return;
+                const url = show ? link.dataset.swMarkedUrl : link.dataset.swCleanUrl;
+                link.dataset.swCandidatesVisible = String(show);
+                link.href = url;
+                link.querySelector('img').src = url;
+            });
+            return;
+        }
         const trigger = event.target.closest('a[data-sw-image]');
         if (!trigger) return;
         event.preventDefault();
@@ -72,17 +101,19 @@
         opener = trigger;
         fit = true;
         showMarker = true;
+        showCandidates = trigger.dataset.swCandidatesVisible !== 'false';
+        cleanUrl = trigger.dataset.swCleanUrl || '';
+        markedUrl = trigger.dataset.swMarkedUrl || '';
         frameRatio = Number(trigger.dataset.swFrameRatio) || 0;
         markerButton.hidden = !frameRatio;
         markerButton.setAttribute('aria-pressed', 'true');
+        candidatesButton.hidden = !cleanUrl || !markedUrl;
+        candidatesButton.setAttribute('aria-pressed', String(showCandidates));
         dialog.querySelector('[data-sw-caption]').textContent = trigger.dataset.swTitle || '影像';
         image.alt = trigger.dataset.swTitle || '影像';
-        canvas.hidden = true;
-        status.hidden = false;
-        status.textContent = '載入中…';
         dialog.showModal();
         stage.scrollTop = stage.scrollLeft = 0;
-        image.src = trigger.href;
+        loadImage(trigger.href);
     });
 })();
 

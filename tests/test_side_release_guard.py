@@ -152,11 +152,14 @@ def test_main_and_candidate_comparison_draw_guard_aoi_and_distance(monkeypatch):
     assert np.array_equal(source, before)
     for index in range(2):
         panel = composite[:350, index * 400:(index + 1) * 400]
-        for key in ("aoi", "candidate", "guard"):
+        for key in ("aoi", "distance", "guard"):
             assert np.any(np.max(np.abs(panel.astype(int) - annotation_color(key)), axis=2) < 20), key
     image = cv2.cvtColor(source, cv2.COLOR_GRAY2BGR)
     draw_side_annotations(image, payload, comparison, "side", [0, 0, 500, 300])
     assert np.any(np.max(np.abs(image.astype(int) - annotation_color("guard")), axis=2) < 20)
+    assert "9.52 px" in texts
+    assert np.array_equal(image[100, 440], [140, 140, 140])  # Former outer circle stays clear.
+    assert not np.any(np.max(np.abs(image.astype(int) - annotation_color("candidate")), axis=2) < 20)
     env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"))
     env.globals["side_white_view"] = side_white_view
     html = env.get_template("_side_white_result.html").render(detail={"side_white_result": row})
@@ -190,7 +193,8 @@ def test_inspector_saves_guard_evidence_before_formal_decision(tmp_path, monkeyp
     assert payload["status"] == "CANDIDATES", payload.get("reason")
     assert payload["parameters"]["csjbl_release_guard_radius_product_px"] == 10
     assert payload["candidate_display"]["guard_candidate_ids"] == [1]
-    assert payload["candidate_comparison_version"] == 2
+    assert payload["candidate_comparison_version"] == 3
+    assert payload["preview_annotation_version"] == 4
     assert Path(payload["artifacts"]["candidate_1"]).is_file()
     decision = side_inference_decision({"payload": payload, "status": payload["status"], "ai_judgment": "NG",
         "ng_details": [{**point, "image": "W0F00000", "type": "aoi_passthrough"}]})

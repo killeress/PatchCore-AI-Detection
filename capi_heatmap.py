@@ -768,6 +768,11 @@ def build_region_zoom_panels(
             elif region.get("bomb_status") == "PARTIAL_BOMB":
                 reason = (f"BOMB: {region['bomb_excluded_px']} px; "
                           f"remaining NG: {region['bomb_remaining_px']} px")
+            elif region.get("roi_residual_status"):
+                status = region["roi_residual_status"]
+                reason = ("ROI_RESIDUAL 2/2 clear -> DUST" if status == "clear" else
+                          "ROI_RESIDUAL Remaining -> REAL_NG" if status == "remaining" else
+                          "ROI_RESIDUAL Unconfirmed -> KEEP_NG")
             elif region.get("feature_reviewed"):
                 matched = int(region.get("feature_review_matched", 0))
                 unmatched = int(region.get("feature_review_unmatched", 0))
@@ -1422,6 +1427,18 @@ class HeatmapManager:
                 cv2.putText(heatmap_panel, 'FM-D' if matched else 'FM-R', (dx + 10, dy + 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
+        residual_review = ((getattr(tile_info, 'decision_context', None) or {}).get('aoi_dust_residual') or {})
+        residual_xy = residual_review.get('remaining_image_xy')
+        if residual_review.get('status') != 'clear' and residual_xy is not None:
+            sx = tile_size / max(1, getattr(tile_info, 'width', tile_size))
+            sy = tile_size / max(1, getattr(tile_info, 'height', tile_size))
+            rx = int((residual_xy[0] - getattr(tile_info, 'x', 0)) * sx)
+            ry = int((residual_xy[1] - getattr(tile_info, 'y', 0)) * sy)
+            if 0 <= rx < tile_size and 0 <= ry < tile_size:
+                cv2.drawMarker(heatmap_panel, (rx, ry), (0, 0, 255), cv2.MARKER_CROSS, 14, 2)
+                cv2.putText(heatmap_panel, 'ROI-R', (rx + 10, ry + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
         # --- Panel 3 & 4 & 5: OMIT Crop & Dust Mask & IOU Debug (如果有 tile_info) ---
         has_omit = False
         iou_debug_panel = None
@@ -1634,7 +1651,9 @@ class HeatmapManager:
                 verdict = "BOMB: AOI priority (Filtered as OK)"
             verdict_color = (255, 0, 255)  # 洋紅色
         elif is_dust:
-            if "TWO_STAGE" in str(dust_detail):
+            if ((getattr(tile_info, 'decision_context', None) or {}).get('aoi_dust_residual') or {}).get('status') == 'clear':
+                verdict = "DUST (Filtered as OK) | ROI_RESIDUAL 2/2 clear"
+            elif "TWO_STAGE" in str(dust_detail):
                 verdict = "DUST (Filtered as OK) | TWO_STAGE -> DUST"
             elif any(r.get('feature_reviewed')
                      for r in (getattr(tile_info, 'dust_region_details', None) or [])):

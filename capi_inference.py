@@ -30,7 +30,7 @@ _warnings.filterwarnings("ignore", message=r".*xFormers is not available.*")
 import cv2
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Dict, Tuple, Optional, Any
 import re
 import time
@@ -5097,11 +5097,14 @@ class CAPIInferencer:
     def _review_aoi_low_coverage_dust(
         self, tile, anomaly_map, region_details, region_labels,
         omit_image, omit_crop, *, focus_x=None, product_resolution=None,
+        support_anomaly_map=None,
     ):
         """Review low-COV AOI regions using raw pixels and unextended OMIT cores."""
         threshold = self.config.dust_heatmap_iou_threshold
         if tile.aoi_roi_mask is None or not any(
-            not region["is_dust"] and 0 < region.get("dust_overlap", 0)
+            not region["is_dust"] and (
+                0 < region.get("dust_overlap", 0) or support_anomaly_map is not None
+            )
             and region["coverage"] < threshold for region in region_details
         ):
             return region_details, ""
@@ -5118,16 +5121,136 @@ class CAPIInferencer:
             tile.original_image, precise_mask, anomaly_map, region_labels,
             region_details, coverage_threshold=threshold,
             evaluation_mask=tile.aoi_roi_mask,
+            support_anomaly_map=support_anomaly_map,
         )
         tile.dust_low_coverage_features = features
         rescued = sum(region.get("feature_review_reason") ==
                       "all_features_match_precise_dust" for region in reviewed)
         matched = sum(feature["is_dust"] for feature in features)
         unmatched = len(features) - matched
+        response_regions = sum(region.get("feature_review_scope") ==
+                               "half_peak_component" for region in reviewed)
         return reviewed, (
             f" LOW_COV_FEATURE: {matched}dust+{unmatched}real"
-            f" rescued_regions={rescued}"
+            f" rescued_regions={rescued} response_regions={response_regions}"
         )
+
+    def _confirm_aoi_dust_residual(
+        self, result, tile, support_map, omit_image, omit_crop, *,
+        focus_x=None, product_resolution=None, model_id=None,
+    ):
+        """Require both surface-removal predictions to clear the entire AOI ROI.
+
+        CV evidence proposes an edit, never an OK verdict. Missing evidence or
+        an unsuccessful/abnormal residual prediction leaves the tile NG.
+        """
+        if (tile.aoi_roi_mask is None or not tile.is_suspected_dust_or_scratch
+                or tile.is_bright_spot_detection or tile.is_half_spot_detection
+                or getattr(tile, "is_aoi_coord_below_threshold", False)):
+            return ""
+        from capi_dust_review import confirmed_roi_surface_mask, surface_removed_images
+
+        snapshot = dict(scope="whole_roi", status="unconfirmed", checks=[],
+                        threshold=tile.score_threshold, method="surface_removed_model_v1")
+        tile.decision_context = dict(tile.decision_context or {}, aoi_dust_residual=snapshot)
+        tile.is_suspected_dust_or_scratch = False
+
+        def finish(status, reason, peak_image=None):
+            snapshot.update(status=status, reason=reason)
+            tile.is_suspected_dust_or_scratch = status == "clear"
+            if status != "clear":
+                tile.scratch_filtered = False
+            if peak_image is None and status != "clear" and snapshot.get("remaining_image_xy"):
+                peak_image = tuple(snapshot["remaining_image_xy"])
+            if peak_image is not None:
+                tile.anomaly_peak_x, tile.anomaly_peak_y = peak_image
+                tile.anomaly_peak_source = "aoi_dust_residual"
+                snapshot["remaining_image_xy"] = list(peak_image)
+            for region in tile.dust_region_details or []:
+                region["roi_residual_status"] = status
+                region["roi_residual_reason"] = reason
+                if status != "clear":
+                    region["core_is_dust"] = bool(region["is_dust"])
+                    region["is_dust"] = False
+                    region["feature_reviewed"] = True
+                    if peak_image is not None and tile.dust_heatmap_binary is not None:
+                        mh, mw = tile.dust_heatmap_binary.shape[:2]
+                        region["real_feature_peak_yx"] = (
+                            int((peak_image[1] - tile.y) * mh / tile.height),
+                            int((peak_image[0] - tile.x) * mw / tile.width),
+                        )
+            outcome = "DUST" if status == "clear" else "KEEP_NG"
+            return f" ROI_RESIDUAL: {status} {reason} checks={len(snapshot['checks'])}/2 -> {outcome}"
+
+        try:
+            threshold = float(tile.score_threshold)
+            if not np.isfinite(threshold) or threshold <= 0 or omit_crop is None:
+                return finish("unconfirmed", "missing_threshold_or_omit")
+            if getattr(self.config, "grid_canonicalization_enabled", False):
+                return finish("unconfirmed", "transformed_input_geometry")
+            _, precise, _, _ = self._check_dust_or_scratch_feature_with_context(
+                omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
+                extension_override=0, focus_x=focus_x, product_resolution=product_resolution,
+            )
+            edit_mask, features, reason = confirmed_roi_surface_mask(
+                tile.original_image, precise, tile.aoi_roi_mask, support_map,
+            )
+            tile.dust_low_coverage_features = features
+            if edit_mask is None:
+                unmatched = [f for f in features if not f["is_dust"] and f["dust_reason"] == "unmatched"]
+                if unmatched:
+                    feature = max(unmatched, key=lambda f: f["contrast"])
+                    fx, fy = feature["real_pos"]
+                    return finish("remaining", reason, (tile.x + fx, tile.y + fy))
+                return finish("unconfirmed", reason)
+            if tile.image.shape[:2] != edit_mask.shape:
+                return finish("unconfirmed", "image_geometry_mismatch")
+            snapshot["surface_pixels"] = int(np.count_nonzero(edit_mask))
+            prefix = self._get_model_prefix(self._get_image_prefix(result.image_path.name))
+            model = self._get_inferencer_for_zone(prefix, tile.zone or "inner")
+            if model is None:
+                return finish("unconfirmed", "missing_model")
+            for name, image in surface_removed_images(tile.image, edit_mask):
+                probe = replace(tile, image=image, decision_context=dict(tile.decision_context))
+                with cuda_stage("aoi-dust-residual", image=str(result.image_path), variant=name):
+                    score, values = self.predict_tile(
+                        probe, inferencer=model, threshold=threshold, model_id=model_id,
+                    )
+                check = dict(variant=name, status="unconfirmed")
+                snapshot["checks"].append(check)
+                if (values is None or not np.isfinite(score) or score < 0):
+                    return finish("unconfirmed", "invalid_residual_prediction")
+                values = np.asarray(values, dtype=np.float32)
+                if values.ndim != 2 or not values.size or not np.isfinite(values).all() or np.any(values < 0):
+                    return finish("unconfirmed", "invalid_residual_map")
+                peak = float(np.max(values))
+                if peak <= 0 and score > 0:
+                    return finish("unconfirmed", "score_map_inconsistent")
+                # Reapply configured exclusions, but never use Top% or the
+                # original 50% association region to limit residual evidence.
+                residual, _ = self._mask_aoi_exclude_zones_for_dust(tile, values, model_id)
+                allowed = cv2.resize((tile.aoi_roi_mask > 0).astype(np.uint8),
+                                      (values.shape[1], values.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+                if not np.any(allowed):
+                    return finish("unconfirmed", "empty_residual_roi")
+                roi_values = np.where(allowed, residual, 0)
+                roi_score = float(score) * float(np.max(roi_values)) / peak if peak > 0 else 0.
+                check.update(roi_score=roi_score, status="clear" if roi_score < threshold else "remaining")
+                if roi_score >= threshold:
+                    py, px = np.unravel_index(np.argmax(roi_values), roi_values.shape)
+                    peak_image = (tile.x + int(px * tile.width / values.shape[1]),
+                                  tile.y + int(py * tile.height / values.shape[0]))
+                    # Still run the second fill, so disagreement is recorded.
+                    snapshot.setdefault("remaining_image_xy", list(peak_image))
+            if any(check["status"] != "clear" for check in snapshot["checks"]):
+                return finish("remaining", "residual_score_at_or_above_threshold",
+                              tuple(snapshot["remaining_image_xy"]))
+            if len(snapshot["checks"]) != 2:
+                return finish("unconfirmed", "incomplete_residual_checks")
+            return finish("clear", "both_fills_below_threshold")
+        except Exception as exc:
+            logger.warning("AOI residual verification failed: %s", exc)
+            return finish("unconfirmed", type(exc).__name__)
 
     def _build_dust_association_mask(
         self,
@@ -8322,12 +8445,14 @@ class CAPIInferencer:
                             # 逐區域判定：拆開異常連通區域，各自與灰塵比對
                             has_real_defect, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
                                 self._check_tile_dust_regions(tile, anomaly_map, dust_mask)
+                            review_support_map = anomaly_map
                             anomaly_map = self._aoi_dust_core_map(tile, anomaly_map, heatmap_binary)
                             if has_real_defect:
                                 region_details, review_note = self._review_aoi_low_coverage_dust(
                                     tile, anomaly_map, region_details, region_labels,
                                     omit_image, omit_crop, focus_x=context_focus_x,
                                     product_resolution=product_resolution,
+                                    support_anomaly_map=review_support_map,
                                 )
                                 detail_text += review_note
                                 remaining = [region for region in region_details if not region["is_dust"]]
@@ -8428,6 +8553,12 @@ class CAPIInferencer:
                                         f"{len(dust_regions)}dust -> DUST"
                                     )
 
+                            detail_text += self._confirm_aoi_dust_residual(
+                                result, tile, review_support_map, omit_image, omit_crop,
+                                focus_x=context_focus_x, product_resolution=product_resolution,
+                                model_id=model_id,
+                            )
+
                             # 產生 Debug 可視化圖
                             try:
                                 if _two_stage_ran:
@@ -8453,6 +8584,11 @@ class CAPIInferencer:
                             # 有灰塵但沒有 heatmap → 保守標記為灰塵
                             tile.is_suspected_dust_or_scratch = True
                             detail_text += " (no heatmap, marked as dust)"
+                            detail_text += self._confirm_aoi_dust_residual(
+                                result, tile, None, omit_image, omit_crop,
+                                focus_x=context_focus_x, product_resolution=product_resolution,
+                                model_id=model_id,
+                            )
                         else:
                             detail_text += " NO_DUST -> REAL_NG"
                         
@@ -9420,6 +9556,7 @@ class CAPIInferencer:
                         detail_text += " EXCLUDE_ZONE_HEATMAP_ZEROED"
                     has_real, real_peak_yx, overall_iou, region_details, heatmap_binary, region_labels = \
                         self._check_tile_dust_regions(tile, anomaly_map_for_dust, dust_mask)
+                    review_support_map = anomaly_map_for_dust
                     anomaly_map_for_dust = self._aoi_dust_core_map(
                         tile, anomaly_map_for_dust, heatmap_binary)
                     if has_real:
@@ -9427,6 +9564,7 @@ class CAPIInferencer:
                             tile, anomaly_map_for_dust, region_details, region_labels,
                             omit_image, omit_crop, focus_x=context_focus_x,
                             product_resolution=product_resolution,
+                            support_anomaly_map=review_support_map,
                         )
                         detail_text += review_note
                         remaining = [region for region in region_details if not region["is_dust"]]
@@ -9519,6 +9657,11 @@ class CAPIInferencer:
                                 f" PER_REGION: 0real+{len(dust_regions)}dust -> DUST"
                             )
 
+                    detail_text += self._confirm_aoi_dust_residual(
+                        result, tile, review_support_map, omit_image, omit_crop,
+                        focus_x=context_focus_x, product_resolution=product_resolution,
+                        model_id=model_id,
+                    )
                     rescue_dust_mask = (
                         _ts_dust_mask_no_ext
                         if _ts_dust_mask_no_ext is not None
@@ -9557,6 +9700,11 @@ class CAPIInferencer:
                 elif is_dust:
                     tile.is_suspected_dust_or_scratch = True
                     detail_text += " (no heatmap, marked as dust)"
+                    detail_text += self._confirm_aoi_dust_residual(
+                        result, tile, None, omit_image, omit_crop,
+                        focus_x=context_focus_x, product_resolution=product_resolution,
+                        model_id=model_id,
+                    )
                     detail_text += self._apply_aoi_edge_light_leak_rescue(
                         result,
                         tile,
@@ -9905,6 +10053,11 @@ class CAPIInferencer:
                     tile.aoi_product_y, self.config.bomb_match_tolerance, code,
                 )
                 return True, code
+        residual_review = (tile.decision_context or {}).get("aoi_dust_residual") or {}
+        if residual_review.get("status") in ("remaining", "unconfirmed"):
+            # The stored Top% core precedes surface removal and cannot explain
+            # the new residual. Keep explicit AOI-coordinate bomb priority above.
+            return False, ""
         bombs = [bomb for bomb in active_bombs
                  if self._aoi_prefix_matches(img_prefix, bomb.image_prefix)]
         if not bombs or any(bomb.defect_type != "point" for bomb in bombs):

@@ -269,7 +269,7 @@ def test_roi_heatmap_banner_box_preserves_full_tile_display(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize('has_inner_ng', [False, True])
-def test_dust_inside_roi_cannot_hide_another_valid_inner_region(has_inner_ng, monkeypatch):
+def test_unconfirmed_full_dust_mask_cannot_clear_roi(has_inner_ng, monkeypatch):
     inf, result, tile = case([(256, 256, 1), (280, 256, .7), (400, 400, 1)])
     # Both regions must be selected for this mixed-core regression case.
     inf.config.dust_heatmap_top_percent = 100
@@ -282,8 +282,8 @@ def test_dust_inside_roi_cannot_hide_another_valid_inner_region(has_inner_ng, mo
                         lambda *a, **k: (True, dust, .9, 'OMIT'))
     inf._apply_omit_dust_postprocess([result], np.full((512, 512), 100, dtype=np.uint8),
                                    False, '', cpu_workers=1, product_resolution=RESOLUTION)
-    assert tile.is_suspected_dust_or_scratch is (not has_inner_ng)
-    assert results_to_db_data([result], {})[0]['is_ng'] == int(has_inner_ng)
+    assert not tile.is_suspected_dust_or_scratch
+    assert results_to_db_data([result], {})[0]['is_ng'] == 1
     assert not np.any(tile.dust_heatmap_binary[tile.aoi_roi_mask == 0])
 
 

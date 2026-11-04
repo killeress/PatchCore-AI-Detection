@@ -25,9 +25,11 @@ SIDE_ANNOTATION_LEGEND = [
     {"key": "aoi", "color": "#F43F5E", "tag": "□ A1", "label": "AOI 報點",
      "hint": "64×64 原圖 px 細框以 AOI TXT 映射位置為中心，不填色；A1 對應下方完整座標。"},
     {"key": "candidate", "color": "#FACC15", "tag": "#1", "label": "保留檢查候選",
-     "hint": "黃色輪廓表示命中 AOI 判定距離容錯；新推論的黃色圓圈表示該容錯範圍。編號沿用原始明細。"},
+     "hint": "黃色細輪廓表示命中 AOI 判定距離容錯的保留異常區域，不填色；編號沿用原始明細。"},
     {"key": "guard", "color": "#F59E0B", "tag": "GUARD", "label": "放行保護 · 保留 NG",
-     "hint": "橙色圓圈表示放行保護範圍；橙色候選超出命中容錯，但仍在保護範圍內，位置待確認並保留 NG。"},
+     "hint": "橙色細輪廓表示候選超出命中容錯，但仍在放行保護範圍內，位置待確認並保留 NG。"},
+    {"key": "distance", "color": "#60A5FA", "tag": "A→#", "label": "AOI 到候選距離",
+     "hint": "藍色直線連接 AOI 報點與最近保留候選的邊界，數值為產品 px；報點位於候選內時距離為 0。正拍與 OMIT 的輪廓由側拍映射或對應而來。"},
     {"key": "reference", "color": "#94A3B8", "tag": "#", "label": "參考候選",
      "hint": "灰色候選未命中 AOI 命中／放行保護範圍，或已排除，僅供影像對照。"},
     {"key": "mark", "color": "#22D3EE", "tag": "MARK / PRINT", "label": "MARK／印字屏蔽",
@@ -517,6 +519,20 @@ def _transform(points, matrix):
     return result
 
 
+def _nearest_contour_point(contour, xy):
+    """Find the closest edge point in product space, using the judgment's metric."""
+    contour = np.asarray(contour, np.float64)
+    xy = np.asarray(xy, np.float64)
+    if cv2.pointPolygonTest(contour.astype(np.float32), tuple(map(float, xy)), False) >= 0:
+        return xy
+    edges = np.roll(contour, -1, axis=0) - contour
+    lengths = np.sum(edges * edges, axis=1)
+    fractions = np.divide(np.sum((xy - contour) * edges, axis=1), lengths,
+                          out=np.zeros_like(lengths), where=lengths > 0)
+    projected = contour + np.clip(fractions, 0, 1)[:, None] * edges
+    return projected[np.argmin(np.sum((projected - xy) ** 2, axis=1))]
+
+
 def _report_mark_regions(payload, fallback=()):
     """Keep exact formal and saved side-detection masks, without ROI padding."""
     marks = mapped_inference_marks(payload, fallback)
@@ -748,12 +764,17 @@ def compare_side_record(row, tolerance=50):
                         if remaining and not outside_tape:
                             item["tape_candidate_ids"].append(candidate["id"])
                         remaining = outside_tape
-                    distances = [max(0., -cv2.pointPolygonTest(_transform(c, to_product),
-                                 tuple(map(float, product_xy)), True)) for c in remaining if len(c) >= 3]
+                    product_contours = [_transform(c, to_product) for c in remaining if len(c) >= 3]
+                    distances = [max(0., -cv2.pointPolygonTest(c, tuple(map(float, product_xy)), True))
+                                 for c in product_contours]
                     if distances:
                         nearest = min(distances)
+                        edge_xy = _nearest_contour_point(product_contours[int(np.argmin(distances))], product_xy)
                         item["retained_candidate_distances"].append(
-                            {"candidate_id": candidate["id"], "distance_product_px": nearest})
+                            {"candidate_id": candidate["id"], "distance_product_px": nearest,
+                             "nearest_product_xy": edge_xy.tolist(),
+                             "nearest_side_xy": _transform([edge_xy], to_side)[0].tolist(),
+                             "nearest_front_xy": _transform([edge_xy], to_front)[0].tolist()})
                         if nearest < item.get("nearest_retained_distance_product_px", float("inf")):
                             item["nearest_retained_distance_product_px"] = nearest
                             item["nearest_retained_candidate_id"] = candidate["id"]
@@ -990,7 +1011,8 @@ def side_white_view(row, detail=None):
 
 
 def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference_marks=(),
-                          all_candidates=False, full=True):
+                          all_candidates=False, full=True, candidate_ids=None, retained=None, aoi_frame=True,
+                          raw_orientation=False):
     """Draw in saved-preview pixels, after resizing; never alter evidence or coordinates."""
     coordinate_kind = "front" if kind == "front" else "side"
     height, width = image.shape[:2]
@@ -1001,10 +1023,16 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
     font_scale = min(.6, max(.35, width / 2400))
     labels, markers = [], []
 
+    def color_for(key):
+        factor = 257 if image.dtype == np.uint16 else 1
+        return tuple(value * factor for value in annotation_color(key))
+
     def preview_points(points):
         points = np.asarray(points, np.float64)
         if points.ndim != 2 or points.shape[1] != 2 or not np.isfinite(points).all():
             return None
+        if raw_orientation and payload.get("rotation_applied"):
+            points = np.asarray(payload[coordinate_kind + "_size"]) - 1 - points
         return np.rint((points - origin) * scale).astype(np.int32)
 
     def polygon(points, key, label=None):
@@ -1013,8 +1041,8 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
             return
         if np.any(points.max(axis=0) < 0) or np.any(points.min(axis=0) >= [width, height]):
             return
-        color = annotation_color(key)
-        cv2.polylines(image, [points], True, color, max(2, thickness) if key == "candidate" else thickness, cv2.LINE_AA)
+        color = color_for(key)
+        cv2.polylines(image, [points], True, color, thickness, cv2.LINE_AA)
         if label:
             anchor = np.clip(points.min(axis=0), [0, 0], [width - 1, height - 1])
             labels.append((anchor, label, color, None))
@@ -1041,12 +1069,16 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
             if coordinate_kind == "front":
                 points = _transform(points, np.asarray(payload["mapping"]["matrix"], np.float64))
             polygon(points, "bomb", f"B{bomb['id']}")
-        selected = {i for point in comparison["points"] for i in point["candidate_ids"]}
+    if full or candidate_ids is not None:
+        selected = (set(candidate_ids) if candidate_ids is not None else
+                    {i for point in comparison["points"] for i in point["candidate_ids"]})
         aoi_selected = {i for point in comparison["points"] for i in point["retained_candidate_ids"]}
         guarded = {i for point in comparison["points"] for i in point["guard_candidate_ids"]}
-        retained = retained_candidate_contours(payload, inference_marks)
+        if retained is None:
+            retained = retained_candidate_contours(payload, inference_marks)
         for candidate in payload.get("candidates", []):
-            if candidate["id"] not in retained or (not all_candidates and candidate["id"] not in selected):
+            if candidate["id"] not in retained or ((candidate_ids is not None or not all_candidates)
+                                                  and candidate["id"] not in selected):
                 continue
             for index, points in enumerate(retained[candidate["id"]]):
                 if coordinate_kind == "front":
@@ -1071,15 +1103,32 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         xy = preview_points([source_xy])[0]
         if np.any(xy < 0) or np.any(xy >= [width, height]):
             continue
-        color = annotation_color("aoi")
-        if comparison["release_guard_enabled"]:
-            for name, key in (("guard", "guard"), ("match", "candidate")):
-                polygon(point[coordinate_kind + "_" + name + "_roi"], key)
+        color = color_for("aoi")
+        measurements = [d for d in point.get("retained_candidate_distances", [])
+                        if d.get("nearest_" + coordinate_kind + "_xy") is not None
+                        and (candidate_ids is None or d["candidate_id"] in candidate_ids)]
+        if measurements:
+            nearest = min(measurements, key=lambda d: d["distance_product_px"])
+            end = preview_points([nearest["nearest_" + coordinate_kind + "_xy"]])[0]
+            vector = end.astype(float) - xy
+            length = float(np.linalg.norm(vector))
+            if length > 2:
+                # Leave the AOI's centre pixel visible, and use a small end tick.
+                start = np.rint(xy + vector / length * min(3., length / 3)).astype(int)
+                cv2.line(image, tuple(start), tuple(end), color_for("distance"), 1, cv2.LINE_AA)
+                if length > 8:
+                    tick = np.array([-vector[1], vector[0]]) / length * 2
+                    cv2.line(image, tuple(np.rint(end - tick).astype(int)),
+                             tuple(np.rint(end + tick).astype(int)), color_for("distance"), 1, cv2.LINE_AA)
+            labels.append((np.rint((xy + end) / 2).astype(int),
+                           f"{nearest['distance_product_px']:.2f} px", color_for("distance"), None))
+        if comparison["release_guard_enabled"] or measurements:
             # An open cross identifies the centre without painting over its pixel.
             for delta in ([-5, 0, -2, 0], [2, 0, 5, 0], [0, -5, 0, -2], [0, 2, 0, 5]):
                 cv2.line(image, tuple(xy + delta[:2]), tuple(xy + delta[2:]), color, 1)
         # Detailed coordinates and region names belong outside the image.
         corners = preview_points([source_xy - 32, source_xy + 32])
+        corners = np.array([corners.min(axis=0), corners.max(axis=0)])
         labels.insert(0, (xy, f"A{point['id']}", color, corners))
         markers.append(corners)
 
@@ -1128,8 +1177,9 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (24, 24, 24), thickness + 1, cv2.LINE_AA)
         cv2.putText(image, text, (rect[0] + 1, rect[1] + 1 + text_h),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
-    for low, high in markers:
-        cv2.rectangle(image, tuple(low), tuple(high), annotation_color("aoi"), 1)
+    if aoi_frame:
+        for low, high in markers:
+            cv2.rectangle(image, tuple(low), tuple(high), color_for("aoi"), 1)
     return image
 
 
@@ -1162,7 +1212,19 @@ def _padded_crop(image, low, size):
     return result
 
 
-def render_comparison_image(row, comparison, root, kind="side", point_id=None):
+def _annotate_point_crop(image, payload, comparison, kind, point, bounds, *, raw_orientation=False,
+                         inference_marks=()):
+    """Annotate a display copy; the unmarked crop retains its depth and file pixels."""
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.shape[2] == 4:
+        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return draw_side_annotations(image, payload, {**comparison, "points": [point]}, kind, bounds,
+                                 full=False, candidate_ids=point["candidate_ids"], aoi_frame=False,
+                                 raw_orientation=raw_orientation, inference_marks=inference_marks)
+
+
+def render_comparison_image(row, comparison, root, kind="side", point_id=None, *, candidates=False):
     """Annotate saved previews, respecting the crop and resize used by the inspector."""
     if kind not in {"side", "front", "omit"}:
         raise ValueError("不支援的圖片種類")
@@ -1212,14 +1274,18 @@ def render_comparison_image(row, comparison, root, kind="side", point_id=None):
         image = _padded_crop(image, low, preview_size)
         if preview_size != size:
             image = cv2.resize(image, (size, size), interpolation=cv2.INTER_LINEAR)
+        if candidates:
+            crop_bounds = [*(origin + low / scale), *(preview_size / scale)]
+            image = _annotate_point_crop(image, payload, comparison, kind, point, crop_bounds,
+                                         inference_marks=row.get("inference_marks", []))
     return image
 
 
-def crop_original_image(row, comparison, folder, kind="side", point_id=None):
+def crop_original_image(row, comparison, folder, kind="side", point_id=None, *, candidates=False):
     """Cut the AOI point region straight from the original image file.
 
-    No rotation, resizing, brightness change, colour conversion or annotation:
-    the returned array keeps the file's own orientation, bit depth and channels.
+    The default returns unchanged file pixels. Optional candidate annotations
+    use a display copy in the file's orientation, without resizing or brightening.
     """
     if kind not in {"side", "front", "omit"} or point_id is None:
         raise ValueError("原始圖只提供 AOI 點局部圖")
@@ -1254,4 +1320,8 @@ def crop_original_image(row, comparison, folder, kind="side", point_id=None):
         # Locate the AOI in file pixels, preserving the file's original orientation.
         xy = np.array([width, height]) - 1 - xy
     low = np.rint(xy).astype(int) - crop_size // 2
-    return _padded_crop(image, low, crop_size)
+    crop = _padded_crop(image, low, crop_size)
+    if candidates:
+        crop = _annotate_point_crop(crop, payload, comparison, kind, point, [*low, crop_size, crop_size],
+                                    raw_orientation=True, inference_marks=row.get("inference_marks", []))
+    return crop

@@ -44,6 +44,12 @@ class ScratchFilter:
                 continue
             if getattr(tile, "is_aoi_coord_below_threshold", False):
                 continue
+            residual = (getattr(tile, "decision_context", None) or {}).get("aoi_dust_residual") or {}
+            if residual.get("status") in ("remaining", "unconfirmed"):
+                tile.scratch_filtered = False
+                logger.info("[scratch] %s tile#%s: keep ROI residual NG (%s)",
+                            img_name, getattr(tile, "tile_id", "?"), residual["status"])
+                continue
             t0 = time.perf_counter()
             try:
                 classifier_image = getattr(tile, "original_image", None)

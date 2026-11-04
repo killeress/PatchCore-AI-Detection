@@ -1,0 +1,217 @@
+<div id="tab-white-spot" class="tab-content">
+    <style>
+        #tab-white-spot .ws-card { padding:22px; margin-bottom:18px; border:1px solid var(--border); border-radius:12px; background:var(--surface); }
+        #tab-white-spot .ws-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+        #tab-white-spot h3 { margin:0; color:var(--text); }
+        #tab-white-spot .ws-note { color:var(--text-muted); font-size:.85rem; line-height:1.65; margin:8px 0; overflow-wrap:anywhere; }
+        #tab-white-spot .ws-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin:16px 0; }
+        #tab-white-spot .ws-params { grid-template-columns:repeat(3,minmax(0,1fr)); }
+        #tab-white-spot .ws-field { min-width:0; }
+        #tab-white-spot .ws-field > input, #tab-white-spot .ws-field > select { margin-top:8px; }
+        #tab-white-spot .ws-param { padding:16px; border:1px solid var(--border); border-radius:10px; background:rgba(15,23,42,.2); }
+        #tab-white-spot .ws-help { color:var(--text-muted); font-size:.82rem; line-height:1.65; margin:8px 0 0; }
+        #tab-white-spot .ws-help span { display:block; margin-top:4px; }
+        #tab-white-spot .ws-help b { color:var(--text); font-weight:500; }
+        #tab-white-spot .ws-tech { color:var(--text-muted); font-size:.75rem; font-weight:400; }
+        #tab-white-spot .ws-section { border-top:1px solid var(--border); margin-top:22px; padding-top:18px; }
+        #tab-white-spot .ws-section h4 { color:var(--text); font-size:1rem; margin:0 0 8px; }
+        #tab-white-spot .ws-start { padding:12px 16px; border-left:3px solid #14b8a6; background:rgba(20,184,166,.06); border-radius:6px; }
+        #tab-white-spot .ws-guide { margin-top:14px; padding:12px 16px; border:1px solid var(--border); border-radius:8px; }
+        #tab-white-spot .ws-guide summary { cursor:pointer; color:var(--text); font-size:.9rem; }
+        #tab-white-spot .ws-guide ul { padding-left:20px; margin:10px 0 0; }
+        #tab-white-spot .ws-guide li { margin:7px 0; }
+        @media (max-width:1050px) { #tab-white-spot .ws-params { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+        @media (max-width:650px) { #tab-white-spot .ws-params, #tab-white-spot .ws-grid { grid-template-columns:1fr; } }
+        #tab-white-spot label { display:flex; flex-direction:column; gap:7px; color:var(--text-muted); font-size:.85rem; }
+        #tab-white-spot input, #tab-white-spot select { width:100%; box-sizing:border-box; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); padding:10px; }
+        #tab-white-spot .ws-actions { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:15px; }
+        #tab-white-spot button { cursor:pointer; border:1px solid var(--border); border-radius:8px; padding:10px 16px; background:var(--surface); color:var(--text); }
+        #tab-white-spot button.ws-primary { background:#0f766e; color:white; border-color:#14b8a6; }
+        #tab-white-spot button:disabled { opacity:.5; cursor:wait; }
+        #tab-white-spot .ws-images { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:18px; }
+        #tab-white-spot .ws-image-wrap { display:block; position:relative; margin-top:12px; }
+        #tab-white-spot .ws-image-wrap img { display:block; width:100%; border-radius:6px; }
+        #tab-white-spot .ws-roi { position:absolute; border:1px solid #63e6be; pointer-events:none; box-sizing:border-box; }
+        #ws-overview { display:block; max-width:100%; max-height:360px; width:auto; height:auto; cursor:crosshair; margin:12px auto; }
+        #tab-white-spot table { width:100%; border-collapse:collapse; font-size:.9rem; }
+        #tab-white-spot th, #tab-white-spot td { padding:10px; border-bottom:1px solid var(--border); text-align:left; white-space:nowrap; }
+        #tab-white-spot .ws-error { color:#fda4af; }
+        #tab-white-spot .ws-warning { color:#fcd34d; }
+        #tab-white-spot [hidden] { display:none !important; }
+    </style>
+    <form id="ws-form" class="ws-card" onsubmit="whiteSpotDebug.run(true, event)">
+        <div class="ws-head"><h3>白丸檢測</h3><span class="debug-badge">DEBUG ONLY</span></div>
+        <p class="ws-note">把背景紋理壓淡，讓原本不明顯的白丸比較容易看見。PC 是 PatchCore 異常偵測模型，可比較強化前後的反應。參數只用於本次測試。</p>
+        <p class="ws-note ws-start"><strong>第一次用：</strong>先選白丸位置 → 保留預設參數，按「預覽強化圖」 → 看清楚後再按「強化 + PC 檢測」。<br>調參時，每次只改一項，才知道是哪個設定讓圖片變好或變差。</p>
+        <fieldset id="ws-fields" style="border:0;padding:0;margin:0;min-width:0">
+            <section class="ws-section" aria-labelledby="ws-location-title">
+                <h4 id="ws-location-title">1. 找到要看的白丸</h4>
+                <div class="ws-field">
+                    <label for="ws-path">圖片檔案路徑</label>
+                    <input id="ws-path" required autocomplete="off" spellcheck="false" placeholder="輸入伺服器上的圖片絕對路徑" aria-describedby="ws-path-help">
+                    <p id="ws-path-help" class="ws-help">填入檢測伺服器能讀到的圖片完整位置，也可按下方「帶入單圖推論路徑」。</p>
+                </div>
+                <div class="ws-grid">
+                    <div class="ws-field">
+                        <label for="ws-center-x">白丸的左右位置（中心 X）</label>
+                        <input id="ws-center-x" type="number" min="0" step="1" placeholder="可留空，先預覽再選位置" aria-describedby="ws-x-help">
+                        <p id="ws-x-help" class="ws-help">從圖片左邊開始算。<b>數字越大，位置越往右。</b>單位是圖片像素（px）。</p>
+                    </div>
+                    <div class="ws-field">
+                        <label for="ws-center-y">白丸的上下位置（中心 Y）</label>
+                        <input id="ws-center-y" type="number" min="0" step="1" placeholder="可留空，先預覽再選位置" aria-describedby="ws-y-help">
+                        <p id="ws-y-help" class="ws-help">從圖片上方開始算。<b>數字越大，位置越往下。</b>X、Y 要一起填，也可一起留空。</p>
+                    </div>
+                    <div class="ws-field">
+                        <label for="ws-radius">看白丸周圍多大範圍（中心半徑）</label>
+                        <input id="ws-radius" type="number" min="1" max="512" step="1" value="64" required aria-describedby="ws-radius-help">
+                        <p id="ws-radius-help" class="ws-help">64 代表從中心往左、右、上、下各看 64 px，畫面會用綠框標出。
+                            <span><b>調大：</b>涵蓋更多範圍，也可能把旁邊其他異常算進來。</span>
+                            <span><b>調小：</b>更集中看白丸，但可能漏掉白丸邊緣。</span>
+                            <span>只改「中心分數」的檢查範圍；PC 仍會看整個切塊。</span>
+                        </p>
+                    </div>
+                </div>
+                <p class="ws-note">不知道座標時，先把 X、Y 留空按預覽，再展開「原圖總覽」點白丸。座標以目前顯示的圖片方向為準；若服務有旋轉圖片，請在旋轉後的總覽上選點。</p>
+            </section>
+            <section class="ws-section" aria-labelledby="ws-enhance-title">
+                <h4 id="ws-enhance-title">2. 讓白丸看得更清楚</h4>
+                <p class="ws-note">先減少細碎紋理，再扣掉大片背景，最後把剩下的亮暗差放大。這個方法叫 DoG。下面的 X 都是「左右」，Y 都是「上下」。</p>
+                <div class="ws-field" style="max-width:620px">
+                    <label for="ws-preset">先選一組起始設定</label>
+                    <select id="ws-preset" onchange="whiteSpotDebug.applyPreset(this.value)" aria-describedby="ws-preset-help">
+                        {% for key, preset in (white_spot_presets|default({})).items() %}
+                        <option value="{{ key }}">{{ preset.label }}</option>
+                        {% endfor %}
+                        <option value="custom">自訂參數</option>
+                    </select>
+                    <p id="ws-preset-help" class="ws-help" aria-live="polite">建議先從這組開始：壓低細碎背景，讓比較寬、淡的白斑容易看見。</p>
+                </div>
+                <div class="ws-grid ws-params">
+                    <div class="ws-field ws-param">
+                        <label for="ws-signal-x">左右去紋強度 <small class="ws-tech">平滑 sigma X</small></label>
+                        <input id="ws-signal-x" data-ws-param="signal_sigma_x" type="number" min="0.5" max="64" step="0.5" value="20" required aria-describedby="ws-signal-x-help">
+                        <p id="ws-signal-x-help" class="ws-help">把左右相鄰的像素平均，讓細碎顆粒比較平順。
+                            <span><b>調大：</b>顆粒較少，但白丸左右邊緣也會變糊、變寬。</span>
+                            <span><b>調小：</b>保留較多細節，背景紋理也較多。</span>
+                            <span><b>先用 20。</b>背景太花可先試 24；白丸變糊就調回。</span>
+                        </p>
+                    </div>
+                    <div class="ws-field ws-param">
+                        <label for="ws-signal-y">上下去紋強度 <small class="ws-tech">平滑 sigma Y</small></label>
+                        <input id="ws-signal-y" data-ws-param="signal_sigma_y" type="number" min="0.5" max="64" step="0.5" value="6" required aria-describedby="ws-signal-y-help">
+                        <p id="ws-signal-y-help" class="ws-help">把上下相鄰的像素平均，幫助壓低細細的水平條紋。
+                            <span><b>調大：</b>細條紋較淡，但小白丸也可能被抹淡。</span>
+                            <span><b>調小：</b>上下輪廓較清楚，條紋也較容易留下。</span>
+                            <span><b>先用 6。</b>水平細紋很多時，可先試 8。</span>
+                        </p>
+                    </div>
+                    <div class="ws-field ws-param">
+                        <label for="ws-gain">明暗差放大倍數 <small class="ws-tech">增益</small></label>
+                        <input id="ws-gain" data-ws-param="gain" type="number" min="1" max="100" step="0.5" value="40" required aria-describedby="ws-gain-help">
+                        <p id="ws-gain-help" class="ws-help">把白丸和背景之間的亮度差放大。
+                            <span><b>調大：</b>白丸更亮，雜紋也一起變明顯；太大會亮成一片。</span>
+                            <span><b>調小：</b>畫面較柔和，但白丸可能又不明顯。</span>
+                            <span><b>先用 40。</b>白丸仍太淡時，可先試 45。</span>
+                        </p>
+                    </div>
+                    <div class="ws-field ws-param">
+                        <label for="ws-background-x">左右背景參考範圍 <small class="ws-tech">背景 sigma X</small></label>
+                        <input id="ws-background-x" data-ws-param="background_sigma_x" type="number" min="1" max="192" step="0.5" value="96" required aria-describedby="ws-background-x-help">
+                        <p id="ws-background-x-help" class="ws-help">估算背景時，要參考左右多遠的範圍。
+                            <span><b>調大：</b>較寬的白斑比較容易保留，但大片明暗起伏也可能留下。</span>
+                            <span><b>調小：</b>較貼近附近背景，但可能連白丸也一起扣淡。</span>
+                            <span><b>先保留 96。</b>必須大於「左右去紋強度」。</span>
+                        </p>
+                    </div>
+                    <div class="ws-field ws-param">
+                        <label for="ws-background-y">上下背景參考範圍 <small class="ws-tech">背景 sigma Y</small></label>
+                        <input id="ws-background-y" data-ws-param="background_sigma_y" type="number" min="1" max="192" step="0.5" value="32" required aria-describedby="ws-background-y-help">
+                        <p id="ws-background-y-help" class="ws-help">估算背景時，要參考上下多遠的範圍。
+                            <span><b>調大：</b>上下暈開的白斑較容易保留，但大片橫向亮帶也可能留下。</span>
+                            <span><b>調小：</b>較能跟著上下明暗變化扣背景，但白丸也可能變淡。</span>
+                            <span><b>先保留 32。</b>必須大於「上下去紋強度」。</span>
+                        </p>
+                    </div>
+                    <div class="ws-field ws-param">
+                        <label for="ws-offset">整張圖的基準亮度 <small class="ws-tech">背景灰階</small></label>
+                        <input id="ws-offset" data-ws-param="offset" type="number" min="0" max="255" step="1" value="128" required aria-describedby="ws-offset-help">
+                        <p id="ws-offset-help" class="ws-help">沒有亮暗差的位置會顯示成這個亮度。0 是黑、128 是灰、255 是白。
+                            <span><b>調大：</b>整張圖變亮，太高會讓亮部變成全白。</span>
+                            <span><b>調小：</b>整張圖變暗，太低會讓暗部變成全黑。</span>
+                            <span><b>先保留 128。</b>這項是調整體亮度，無法單獨凸顯白丸。</span>
+                        </p>
+                    </div>
+                </div>
+                <p class="ws-note">強化後的圖片會直接送給 PC，所以這六項參數都可能影響 PC 分數。先確認白丸還在、輪廓沒有被抹掉，再比較分數。</p>
+                <details class="ws-guide">
+                    <summary>看到這些狀況，可以先這樣調</summary>
+                    <ul class="ws-help">
+                        <li><b>背景顆粒太多：</b>先把「左右去紋強度」20 → 24；若是細水平條紋，可改試「上下去紋強度」6 → 8。一次只改一項。</li>
+                        <li><b>白丸變糊或變淡：</b>先降低剛調大的去紋強度；也可以切回「白丸：保留對比」預設比較。</li>
+                        <li><b>背景已經平順，白丸還是太淡：</b>試著把「明暗差放大倍數」40 → 45，同時看雜紋有沒有被放大。</li>
+                        <li><b>亮成一片白、看不到輪廓：</b>先降低放大倍數；若改過基準亮度，先還原成 128。</li>
+                        <li><b>只想讓 PC 更容易達門檻：</b>往下調「異常判定門檻」即可，但正常背景也更容易被判成異常；圖片本身不會變清楚。</li>
+                    </ul>
+                </details>
+                <details class="ws-guide">
+                    <summary>想看計算方式</summary>
+                    <p class="ws-help">強化圖 = 基準亮度 + 放大倍數 ×（去紋後圖片 − 估計的背景）。預設是 128 + 40 × [G(20,6) − G(96,32)]；括號內依序為左右、上下範圍。系統會先處理切塊周圍的圖片，再裁出結果，減少切塊邊界的假亮暗。</p>
+                </details>
+            </section>
+            <section class="ws-section" aria-labelledby="ws-pc-title">
+                <h4 id="ws-pc-title">3. 用 PC 比較強化前後的反應</h4>
+                <div class="ws-grid">
+                    <div class="ws-field">
+                        <label for="ws-zone">使用哪一區的模型</label>
+                        <select id="ws-zone" aria-describedby="ws-zone-help"><option value="inner">Inner 內部</option><option value="edge">Edge 邊緣</option></select>
+                        <p id="ws-zone-help" class="ws-help"><b>白丸在產品內部，先選 Inner。</b>靠近產品邊緣才考慮 Edge。這是在選不同模型，切換可能改變分數；強化圖不會因此改變。</p>
+                    </div>
+                    <div class="ws-field">
+                        <label for="ws-threshold">異常判定門檻（PC 門檻）</label>
+                        <input id="ws-threshold" type="number" min="0" max="1000000" step="any" placeholder="建議先留空，使用模型設定" aria-describedby="ws-threshold-help">
+                        <p id="ws-threshold-help" class="ws-help">中心分數要到多少，才顯示「中心達門檻」。
+                            <span><b>調低：</b>比較敏感，但正常背景也容易被判成異常。</span>
+                            <span><b>調高：</b>比較嚴格，可能漏掉很淡的白丸。</span>
+                            <span><b>建議先留空。</b>只改判斷標準，不會把強化圖變清楚。</span>
+                        </p>
+                    </div>
+                </div>
+            </section>
+            <div class="ws-actions">
+                <button type="button" onclick="whiteSpotDebug.copyPath()">帶入單圖推論路徑</button>
+                <button id="ws-preview-button" type="button" onclick="whiteSpotDebug.run(false)">預覽強化圖</button>
+                <button id="ws-run-button" type="submit" class="ws-primary">強化 + PC 檢測</button>
+            </div>
+            <p class="ws-note">「預覽強化圖」只處理圖片；「強化 + PC 檢測」會再用同一個模型比較原圖與強化圖。</p>
+        </fieldset>
+        <p id="ws-message" class="ws-note" role="status" aria-live="polite"></p>
+    </form>
+    <div id="ws-results" hidden>
+        <div class="ws-card">
+            <p id="ws-summary" class="ws-note"></p>
+            <details>
+                <summary style="cursor:pointer;color:var(--text)">原圖總覽：點選指定白丸中心</summary>
+                <img id="ws-overview" alt="原圖總覽與切塊位置" onclick="whiteSpotDebug.pickCenter(event)">
+            </details>
+        </div>
+        <div class="ws-images">
+            <div class="ws-card"><h3>原圖切塊</h3><a id="ws-original-link" class="ws-image-wrap" target="_blank" rel="noopener"><img id="ws-original" alt="原始白丸切塊"><span id="ws-original-roi" class="ws-roi"></span></a></div>
+            <div class="ws-card"><h3>DoG 強化圖 / PC 輸入</h3><a id="ws-enhanced-link" class="ws-image-wrap" target="_blank" rel="noopener"><img id="ws-enhanced" alt="DoG 強化後的白丸切塊"><span id="ws-enhanced-roi" class="ws-roi"></span></a></div>
+        </div>
+        <div class="ws-card">
+            <h3>PatchCore 對照</h3>
+            <p class="ws-note">比較同一個模型對原圖、強化圖的反應。若模型以前沒學過這種強化圖，分數可能一起升高；要看綠框內的白丸是否真的被注意到。本頁結果僅供測試，不更新正式判定。</p>
+            <p id="ws-pc-message" class="ws-note" role="status"></p>
+            <div id="ws-pc-scores" hidden style="overflow-x:auto">
+                <table><thead><tr><th>輸入</th><th>整塊分數</th><th>中心分數（估算）</th><th>門檻</th><th>中心結果</th></tr></thead><tbody id="ws-pc-rows"></tbody></table>
+                <p class="ws-note"><b>整塊分數：</b>看整個裁切區，分數高可能是因為綠框外的其他東西。<br><b>中心分數：</b>估算綠框內的反應，較適合觀察這顆白丸。達門檻代表值得注意，還需要對照圖片確認。<br><b>熱力圖：</b>越偏紅代表模型反應越強；兩張圖用相同顏色範圍，方便比較。此頁尚未做灰塵等後續判定。</p>
+                <details class="ws-guide"><summary>中心分數怎麼算？</summary><p class="ws-help">中心分數 = 整塊分數 × 綠框內最高熱圖值 / 整塊最高熱圖值。這是區域反應的估算值。</p></details>
+            </div>
+            <div id="ws-pc-images" class="ws-images" hidden>
+                <div id="ws-original-pc-card" hidden><h4>原圖 PC 熱力圖</h4><a id="ws-original-pc-link" class="ws-image-wrap" target="_blank" rel="noopener"><img id="ws-original-pc" alt="原圖的 PC 熱力圖"></a></div>
+                <div id="ws-enhanced-pc-card" hidden><h4>強化圖 PC 熱力圖</h4><a id="ws-enhanced-pc-link" class="ws-image-wrap" target="_blank" rel="noopener"><img id="ws-enhanced-pc" alt="強化圖的 PC 熱力圖"></a></div>
+            </div>
+        </div>
+    </div>
+</div>

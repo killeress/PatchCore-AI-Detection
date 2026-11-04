@@ -1054,6 +1054,7 @@
         <button class="tab-btn" onclick="switchTab('tab-side-white', this)">📷 側拍白畫面</button>
         <button class="tab-btn" onclick="switchTab('tab-dot-detection', this)">⚫ 點圖偵測</button>
         <button class="tab-btn" onclick="switchTab('tab-preprocess-lab', this)">🧪 影像預處理實驗室</button>
+        <button class="tab-btn" onclick="switchTab('tab-white-spot', this)">⚪ 白丸檢測</button>
         <button class="tab-btn" onclick="switchTab('tab-coord', this)">📍 座標推論</button>
         <button class="tab-btn" onclick="switchTab('tab-edge-light-leak', this)">💡 邊緣漏光檢測</button>
         <button class="tab-btn" onclick="switchTab('tab-edge', this)">📐 邊緣檢測 (整邊)</button>
@@ -1064,6 +1065,7 @@
     </div>
 
     {% include "_debug_side_white.html" %}
+    {% include "_debug_white_spot.html" %}
 
     <!-- ═══ 單圖推論頁籤 ═══ -->
     <div id="tab-single" class="tab-content active">
@@ -2334,6 +2336,7 @@
     const dotCalibrationSource = {{ dot_calibration_source|tojson }};
     let dotActiveDetectionConfig = {};
     {% include "_debug_side_white.js" %}
+    {% include "_debug_white_spot.js" %}
 
     // Tab switching logic
     function switchTab(tabId, btn) {

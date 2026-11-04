@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from capi_dust_review import review_low_coverage_regions
+from capi_dust_review import build_aoi_roi_core_mask, review_low_coverage_regions
 
 
 def _scene():
@@ -304,3 +304,99 @@ def test_missing_or_misaligned_evidence_keeps_original_ng(invalid_input):
     assert updated[0]["feature_review_reason"] == "missing_evidence"
     assert updated[0]["coverage"] == regions[0]["coverage"]
     assert features == []
+
+
+def _displaced_core_scene():
+    image = np.full((256, 256), 100, np.uint8)
+    precise = np.zeros_like(image)
+    roi = np.zeros_like(image)
+    roi[32:224, 32:224] = 1
+    _spot(image, (124, 132), contrast=-18, radius=18)
+    _dust(precise, (124, 132), radius=23)
+    yy, xx = np.mgrid[:256, :256]
+    support = np.exp(-((xx - 124) ** 2 + (yy - 96) ** 2) / (2 * 24.0 ** 2)).astype(np.float32)
+    support[(roi == 0) | (support < 0.34)] = 0
+    core = build_aoi_roi_core_mask(support, support > 0, roi, 0.4)
+    _, labels = cv2.connectedComponents(core, connectivity=8)
+    anomaly = np.where(core > 0, support, 0)
+    return image, precise, roi, support, labels, anomaly
+
+
+@pytest.mark.parametrize("map_scale", [1, 2])
+def test_displaced_top_point_four_core_matches_bubble_without_changing_coverage(map_scale):
+    image, precise, roi, support, labels, anomaly = _displaced_core_scene()
+    if map_scale == 2:
+        support = cv2.resize(support, (128, 128), interpolation=cv2.INTER_AREA)
+        core = build_aoi_roi_core_mask(support, support > 0, roi, 0.4)
+        _, labels = cv2.connectedComponents(core, connectivity=8)
+        anomaly = np.where(core > 0, support, 0)
+    dust_in_map = cv2.resize(precise, (anomaly.shape[1], anomaly.shape[0]),
+                              interpolation=cv2.INTER_NEAREST)
+    regions = _regions(labels, dust_in_map, anomaly)
+    before = [array.copy() for array in (image, precise, roi, support, labels, anomaly)]
+
+    updated, features = review_low_coverage_regions(
+        image, precise, anomaly, labels, regions, coverage_threshold=0.1,
+        evaluation_mask=roi, support_anomaly_map=support,
+    )
+
+    assert len(regions) == 1
+    assert regions[0]["dust_overlap"] == 0
+    assert updated[0]["is_dust"] is True
+    assert updated[0]["feature_review_scope"] == "half_peak_component"
+    assert updated[0]["feature_review_scope_pixels"] > regions[0]["area"]
+    assert features and all(feature["is_dust"] for feature in features)
+    for key in ("area", "dust_overlap", "metric_denominator", "coverage", "peak_yx"):
+        assert updated[0][key] == regions[0][key]
+    assert regions[0]["is_dust"] is False
+    for array, original in zip((image, precise, roi, support, labels, anomaly), before):
+        np.testing.assert_array_equal(array, original)
+
+
+@pytest.mark.parametrize("reason", [
+    "missing_support", "invalid_support", "no_feature", "disconnected_dust",
+    "independent_feature", "outside_roi", "clipped_feature",
+])
+def test_displaced_core_requires_connected_complete_matched_image_evidence(reason):
+    image, precise, roi, support, labels, anomaly = _displaced_core_scene()
+    regions = _regions(labels, precise, anomaly)
+    if reason == "missing_support":
+        support = None
+    elif reason == "invalid_support":
+        support = support[:128, :128]
+    elif reason == "no_feature":
+        image[:] = 100
+    elif reason == "disconnected_dust":
+        support[108:114] = 0  # There is no continuous response joining core and bubble.
+    elif reason == "independent_feature":
+        _spot(image, (145, 100), contrast=-10, radius=4)
+    elif reason == "outside_roi":
+        roi[108:] = 0
+    elif reason == "clipped_feature":
+        roi[135:] = 0
+
+    updated, _ = review_low_coverage_regions(
+        image, precise, anomaly, labels, regions, coverage_threshold=0.1,
+        evaluation_mask=roi, support_anomaly_map=support,
+    )
+
+    assert updated[0]["is_dust"] is False
+    assert updated[0]["coverage"] == 0
+
+
+def test_shared_response_cannot_use_one_bubble_to_clear_another_hot_core():
+    image, precise, roi, support, labels, anomaly = _displaced_core_scene()
+    # Two separate strongest cores share a lower-temperature bridge. Only the
+    # first has an actual bubble, so neither can borrow the other's evidence.
+    support[92:101, 166:175] = 1
+    support[92:101, 132:166] = 0.6
+    labels[92:101, 166:175] = 2
+    anomaly = np.where(labels > 0, support, 0)
+    regions = _regions(labels, precise, anomaly)
+
+    updated, _ = review_low_coverage_regions(
+        image, precise, anomaly, labels, regions, coverage_threshold=0.1,
+        evaluation_mask=roi, support_anomaly_map=support,
+    )
+
+    assert all(not region["is_dust"] for region in updated)

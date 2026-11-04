@@ -41,6 +41,11 @@ def _case(monkeypatch, *, independent=False, original=True, two_stage=False):
         return True, precise.copy(), 0.01, "TEST_OMIT"
 
     monkeypatch.setattr(worker, "check_dust_or_scratch_feature", mask)
+    # These cases isolate coverage/feature routing. Dedicated residual tests
+    # exercise predictions that retain weak or unresolved defects.
+    monkeypatch.setattr(worker, "_get_inferencer_for_zone", lambda *a: object())
+    monkeypatch.setattr(worker, "predict_tile", lambda probe, **kw: (
+        .1, np.full(probe.image.shape[:2], .1, np.float32)))
     return worker, tile, result, precise, calls
 
 
@@ -109,3 +114,28 @@ def test_non_roi_tile_retains_existing_coverage_decision(monkeypatch):
     assert tile.is_suspected_dust_or_scratch is False
     assert 0 not in calls
     assert tile.dust_low_coverage_features is None
+
+
+def test_excluded_gap_cannot_reconnect_bubble_through_cached_display_map(monkeypatch):
+    worker, tile, result, omit, calls = _case(monkeypatch)
+    worker.config.dust_heatmap_top_percent = 0.4
+    yy, xx = np.mgrid[:128, :128]
+    display_map = np.exp(-((xx - 40) ** 2 + (yy - 32) ** 2) / (2 * 16.0 ** 2)).astype(np.float32)
+    display_map[tile.aoi_roi_mask == 0] = 0
+    tile.aoi_roi_full_map = display_map
+    result.anomaly_tiles = [(tile, 0.83, display_map.copy())]
+
+    def exclude_gap(_tile, values, _model_id):
+        limited = values.copy()
+        limited[39:44] = 0
+        return limited, True
+
+    monkeypatch.setattr(worker, "_mask_aoi_exclude_zones_for_dust", exclude_gap)
+    worker._apply_omit_dust_postprocess([result], omit, False, "", cpu_workers=1)
+
+    assert 0 in calls
+    assert "EXCLUDE_ZONE_HEATMAP_ZEROED" in tile.dust_detail_text
+    assert tile.dust_heatmap_iou == 0
+    assert tile.is_suspected_dust_or_scratch is False
+    assert not tile.dust_low_coverage_features
+    assert np.any(tile.aoi_roi_full_map[39:44] > 0)

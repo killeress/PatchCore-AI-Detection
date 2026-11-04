@@ -5,7 +5,7 @@
 {% set p = sw.payload %}
 {% set view = side_white_view(sw, detail) %}
 {% set matches = {'matched':'容錯範圍內有候選 · 保留檢查','guarded':'附近仍有候選 · 位置待確認，保留 NG','mark_suppressed':'MARK → OK','omit_suppressed':'貼紙／表面異物 → OK','tape_suppressed':'易撕貼 → OK','no_anomaly':'AOI 位置無異常 → OK','filtered':'報點候選已排除','unmatched':'AOI 報點未命中候選','unavailable':'無法定位','unverified':'尚未確認'} %}
-{% macro sw_image_url(kind) -%}{% if debug_result %}{{ artifact_urls.get(kind, '') }}{% else %}/api/side-white/image?id={{ sw.id }}&amp;kind={{ kind }}&amp;annotations=4{% endif %}{%- endmacro %}
+{% macro sw_image_url(kind) -%}{% if debug_result %}{{ artifact_urls.get(kind, '') }}{% else %}/api/side-white/image?id={{ sw.id }}&amp;kind={{ kind }}&amp;annotations=5{% endif %}{%- endmacro %}
 {% macro sw_preview_attrs(kind) -%}{% if debug_result %}data-sw-preview-kind="{{ kind }}" data-sw-nearby-url="{{ sw_image_url(kind) }}" data-sw-all-url="{{ artifact_urls.get(kind ~ '_all', artifact_urls.get(kind, '')) }}"{% endif %}{%- endmacro %}
 <section class="sw-card{{ ' sw-embedded' if statistics_result else '' }}" id="side-white-result{% if embedded %}-{{ sw.id }}{% endif %}">
     <div class="sw-head"><h3>側拍處理結果</h3><div class="sw-result-actions">
@@ -41,7 +41,7 @@
     <div class="sw-legend" aria-label="圖片標記圖例">
         {% for item in view.legend %}<span class="sw-legend-item" style="--sw-annotation:{{ item.color }}" title="{{ item.hint }}"><b>{{ item.tag }}</b><span>{{ item.label }}</span></span>{% endfor %}
     </div>
-    <p class="sw-note">AOI 以 64×64 原圖 px 空心細框標示，框內不填色；此框僅定位。新推論另以黃色圓圈標示命中容錯、橙色圓圈標示放行保護範圍，單位均為產品 px。完整 AOI TXT 座標列於下表。側拍位置由面板邊界估算，OMIT 保留原灰階。</p>
+    <p class="sw-note">AOI 以 64×64 原圖 px 空心細框定位；異常候選只畫細輪廓、不填色。藍色直線標出 AOI 到最近保留候選邊界的距離，單位為產品 px；落在候選內時為 0。命中容錯與放行保護門檻列於上方。側拍位置由面板邊界估算，OMIT 保留原灰階。</p>
     <details class="sw-legend-help"><summary>標記說明</summary><dl>{% for item in view.legend %}<dt>{{ item.tag }} · {{ item.label }}</dt><dd>{{ item.hint }}</dd>{% endfor %}</dl></details>
     {% if view.missing_preview_bounds %}<p class="sw-note sw-annotation-warning">此舊紀錄未保存預覽裁切資訊，無法在主圖標出 AOI；請使用 DEBUG 或重新推論更新。</p>{% elif view.legacy_preview %}<p class="sw-note sw-annotation-warning">此舊紀錄未保存乾淨底圖，原有框色仍沿用舊版；紅色 AOI 標記已補上。重新推論後可更新全部顏色與標籤。</p>{% endif %}
     <div class="sw-images">
@@ -50,7 +50,7 @@
         {% endfor %}
     </div>
     <div class="sw-head sw-result-links">
-        <span class="sw-note">黃色標示 AOI 判定距離容錯內仍需保留檢查的候選；灰色候選僅供參考，不影響該點判斷。# 編號沿用原始明細。</span>
+        <span class="sw-note">黃色輪廓為 AOI 命中候選，橙色為放行保護候選；灰色僅供參考。藍線連到最近的保留候選，# 編號對應下方明細。</span>
         <div class="sw-controls">{% set record_id = sw.get('record_id') or detail.get('id') %}{% if record_id and not debug_result %}<a href="/debug?tab=side-white&amp;record_id={{ record_id|string|urlencode }}" target="_blank" rel="noopener">DEBUG 側拍推論 →</a>{% endif %}{% if not embedded %}<a href="/search?glass_id={{ detail.get('glass_id','')|urlencode }}">查詢同片推論紀錄 →</a>{% endif %}</div>
     </div>
     {% if view.comparison.points %}
@@ -63,20 +63,25 @@
                 <tr><td><strong class="sw-aoi-id">□ A{{ a.id }}</strong></td><td><code>{{ a.defect_code }}</code><br><code>{{ a.image_prefix }}</code></td><td>{{ {'product':'產品','image':'圖片'}.get(a.coordinate_space,a.coordinate_space) }} <code>({{ a.source_xy[0] }}, {{ a.source_xy[1] }})</code></td><td>{% if a.get('side_raw_xy') and a.status != 'unavailable' %}<code>({{ a.side_raw_xy[0]|round(1) }}, {{ a.side_raw_xy[1]|round(1) }})</code><br><small>面板邊界估算</small>{% else %}無法定位{% endif %}</td><td class="sw-wrap"><strong>{{ matches.get(a.status,a.status) }}</strong><div class="sw-note">{{ a.reason or a.get('omit',{}).get('reason','') }}</div>{% if a.get('nearest_retained_candidate_id') is not none %}<div class="sw-note" data-sw-candidate-distance>最近保留候選 #{{ a.nearest_retained_candidate_id }}：{{ a.nearest_retained_distance_product_px|round(2) }} 產品 px</div>{% endif %}</td></tr>
             </tbody></table></div>
             {% if not debug_result and a.status != 'unavailable' %}
+            <div class="sw-crop-controls">
+                <span class="sw-note">異常區域候選{% for d in a.retained_candidate_distances %} · #{{ d.candidate_id }}{% else %}：此點附近無保留候選{% endfor %}</span>
+                {% if a.retained_candidate_distances %}<button type="button" class="sw-btn" data-sw-candidates-toggle aria-pressed="true">隱藏候選與距離</button>{% endif %}
+            </div>
             <div class="sw-point-crops">
                 {% for kind,label in [('front','正拍'),('side','側拍'),('omit','OMIT')] %}
                 <figure><figcaption>{{ label }}局部圖 · A{{ a.id }}</figcaption>
                     {% if p.get('artifacts',{}).get(kind) %}
-                    {% set crop_url = '/api/ric/side-stats/image?id=' ~ sw.id ~ '&kind=' ~ kind ~ '&tolerance=' ~ view.comparison.tolerance ~ '&point=' ~ a.id %}
-                    <a class="sw-crop-open" href="{{ crop_url }}" data-sw-image data-sw-title="{{ label }}局部圖 · A{{ a.id }}" data-sw-frame-ratio="{{ 64 / a.crop_size }}" style="--sw-frame-size:{{ 6400 / a.crop_size }}%" aria-label="放大{{ label }}局部圖 A{{ a.id }}">
-                        <img loading="lazy" src="{{ crop_url }}" alt="{{ label }} AOI A{{ a.id }} 局部圖" onerror="this.parentElement.classList.add('sw-image-missing');this.replaceWith(document.createTextNode('局部圖已過期或遺失'))">
+                    {% set crop_url = '/api/ric/side-stats/image?id=' ~ sw.id ~ '&kind=' ~ kind ~ '&tolerance=' ~ view.comparison.tolerance ~ '&point=' ~ a.id ~ '&annotations=5' %}
+                    {% set marked_url = crop_url ~ '&candidates=1' %}
+                    <a class="sw-crop-open" href="{{ marked_url }}" data-sw-image data-sw-title="{{ label }}局部圖 · A{{ a.id }}" data-sw-clean-url="{{ crop_url }}" data-sw-marked-url="{{ marked_url }}" data-sw-frame-ratio="{{ 64 / a.crop_size }}" style="--sw-frame-size:{{ 6400 / a.crop_size }}%" aria-label="放大{{ label }}局部圖 A{{ a.id }}">
+                        <img loading="lazy" src="{{ marked_url }}" alt="{{ label }} AOI A{{ a.id }} 異常候選與距離局部圖" onerror="this.parentElement.classList.add('sw-image-missing');this.replaceWith(document.createTextNode('局部圖已過期或遺失'))">
                         <span class="sw-aoi-frame" aria-hidden="true"></span>
                     </a>
                     {% else %}<div class="sw-crop-missing">未保存{{ label }}影像</div>{% endif %}
                 </figure>
                 {% endfor %}
             </div>
-            <p class="sw-note">三圖同尺寸，以 AOI 為中心；原圖不縮放、不調亮，超出邊界補黑。點圖可放大並切換標記；原圖遺失時使用保存預覽。</p>
+            <p class="sw-note">三圖同尺寸，以 AOI 為中心；原圖不縮放、不調亮，超出邊界補黑。候選細輪廓與藍色距離線同步顯示於局部圖，可隱藏並點圖放大；正拍為側拍輪廓的估算投影，OMIT 為同相機位置對照。原圖遺失時使用保存預覽。</p>
             {% endif %}
         </div>
         {% endfor %}
@@ -85,7 +90,7 @@
     <details class="sw-technical"><summary>檢測明細 · {{ p.get('candidates',[])|length }} 個原始候選</summary>
         {% if p.get('inference_decision') and view.panel.state == 'retained' and p.inference_decision.reason != view.panel.reason %}<p class="sw-note">判定時保存原因：{{ p.inference_decision.reason }}</p>{% endif %}
         {% if view.candidates %}<div class="sw-scroll"><table class="sw-table"><thead><tr><th>候選</th><th>處理結論</th><th>與 AOI 距離（產品 px）</th><th>OMIT 本體覆蓋</th><th>證據</th></tr></thead><tbody>
-        {% for c in view.candidates %}<tr><td>#{{ c.id }}{% if c.aoi_hit %} · AOI 命中{% elif c.guarded %} · 放行保護{% elif c.nearby %} · 附近參考{% endif %}</td><td>{{ c.label }}</td><td>{% for d in c.aoi_distances %}A{{ d.id }}：{{ d.distance|round(2) }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td><td>{{ (c.core_overlap_ratio * 100)|round(1)|string + '%' if c.core_overlap_ratio is not none else '—' }}</td><td>{% if c.composite_key %}<a href="{{ sw_image_url(c.composite_key) }}" target="_blank" rel="noopener">同區域對照圖 ↗</a>{% if not p.get('candidate_comparison_version') %}<small class="sw-note">舊對照圖輪廓顏色僅定位，非命中狀態；重新推論可更新。</small>{% endif %}{% else %}未保存對照圖{% endif %}</td></tr>{% endfor %}
+        {% for c in view.candidates %}<tr><td>#{{ c.id }}{% if c.aoi_hit %} · AOI 命中{% elif c.guarded %} · 放行保護{% elif c.nearby %} · 附近參考{% endif %}</td><td>{{ c.label }}</td><td>{% for d in c.aoi_distances %}A{{ d.id }}：{{ d.distance|round(2) }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td><td>{{ (c.core_overlap_ratio * 100)|round(1)|string + '%' if c.core_overlap_ratio is not none else '—' }}</td><td>{% if c.composite_key %}<a href="{{ sw_image_url(c.composite_key) }}" target="_blank" rel="noopener">同區域對照圖 ↗</a>{% if not p.get('candidate_comparison_version') %}<small class="sw-note">舊對照圖輪廓顏色僅定位，非命中狀態；重新推論可更新。</small>{% elif p.candidate_comparison_version < 3 %}<small class="sw-note">已保存的舊對照圖仍保留原標記，重新推論可更新為距離線；上方局部圖使用新版標記。</small>{% endif %}{% else %}未保存對照圖{% endif %}</td></tr>{% endfor %}
         </tbody></table></div>{% endif %}
         {% if p.get('candidate_display') %}{% set display = p.candidate_display %}{% set nearby_note = 'CSJBL 附近 ' ~ display.tolerance_product_px ~ ' 產品 px · AOI 命中黃框 ' ~ view.yellow_candidates.nearby ~ ' · 保護範圍橙框 ' ~ view.guard_candidates.nearby ~ ' · 灰色參考 ' ~ view.reference_candidates.nearby ~ (' · ' ~ display.reason if display.reason else '') %}
         <p class="sw-note" {% if debug_result %}data-sw-nearby-note="{{ nearby_note }}" data-sw-all-note="全圖 · AOI 命中黃框 {{ view.yellow_candidates.total }} · 保護範圍橙框 {{ view.guard_candidates.total }} · 灰色參考 {{ view.reference_candidates.total }}"{% endif %}>{{ nearby_note }}</p>{% elif not debug_result and p.get('artifacts',{}).get('side') %}<p class="sw-note">舊預覽：重新推論或進入 DEBUG 更新框選。</p>{% endif %}
