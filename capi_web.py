@@ -16047,6 +16047,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             self._capi_server_instance,
         )
         template = self.jinja_env.get_template("train_new/step3_review.html")
+        from capi_image_preprocess_lab import describe_preprocess_pipeline
+        zone_pipelines = job.get("image_preprocess_pipelines") or {}
+        if zone_pipelines:
+            review_preprocess_summary = "；".join(
+                f"{zone.upper()}：{describe_preprocess_pipeline(pipeline)}"
+                for zone, pipeline in zone_pipelines.items()
+            )
+        else:
+            review_preprocess_summary = describe_preprocess_pipeline(job.get("image_preprocess_pipeline") or [])
         scope = job.get("training_scope")
         selected_lightings = self._scope_selected_lightings(scope)
         html = template.render(
@@ -16061,6 +16070,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._train_new_station_adapter(self._capi_server_instance),
             ),
             retry_error=job.get("error_message") or "",
+            review_preprocess_summary=review_preprocess_summary,
         )
         self._send_response(200, html)
 
@@ -17115,6 +17125,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     selected_resolution
                 )
 
+        try:
+            from capi_dog import validate_execution_mode
+            validate_execution_mode(image_preprocess_pipeline, image_preprocess_pipelines,
+                                    after_tiling=preprocess_after_tiling)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
         image_precheck = self._screen_train_new_panel_selection(
             clean_panel_paths, machine_id, grid_canonicalization.get("product_resolution"),
         )
@@ -17447,6 +17465,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         tiles = review_decision_labels(tiles, config)
         auto_review = config.get("split_mode") in ("auto_batch", "auto_panel")
         from capi_review_rules import geometry
+        from capi_train_new import review_original_path
         for tile in tiles:
             tile["review_geometry"] = geometry(tile)
             tile["panel_preview_url"] = self._train_new_thumb_url(tile["review_geometry"].get("preview_path"))
@@ -17455,6 +17474,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             tile["decision_review"] = config.get("split_mode") == "auto_panel"
             tile["thumb_url"] = self._train_new_thumb_url(tile.get("thumb_path"))
             tile["image_url"] = self._train_new_thumb_url(tile.get("source_path"))
+            original = review_original_path(tile["source_path"]) if tile.get("source_path") else None
+            tile["original_image_url"] = (
+                self._train_new_thumb_url(str(original)) if original is not None and original.is_file() else ""
+            )
         if score_from:
             CAPIWebHandler._decorate_tiles_with_scores(tiles, db, score_from, sort_by)
         inherited = {}
@@ -17560,6 +17583,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             }, status=400)
             return
         preview_pipeline = zone_pipelines.get(preview_zone, pipeline)
+        try:
+            from capi_dog import validate_execution_mode
+            validate_execution_mode(pipeline, zone_pipelines, after_tiling=preprocess_after_tiling)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
         tile_stride, err = self._validate_train_tile_stride(data.get("tile_stride"))
         if err:
             self._send_json({"error": err}, status=400)

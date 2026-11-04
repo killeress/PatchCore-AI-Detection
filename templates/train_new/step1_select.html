@@ -369,9 +369,15 @@
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;">
       <button type="button" id="pp-add-step" style="background:#89b4fa;color:#1e1e2e;border:none;border-radius:5px;padding:7px 14px;font-weight:700;">新增步驟</button>
+      <button type="button" id="pp-white-spot-dog" onclick="useWhiteSpotDogPreset()" style="background:#313244;color:#a6e3a1;border:1px solid #a6e3a1;border-radius:5px;padding:7px 14px;font-weight:700;">套用白丸 DoG（取代此區流程）</button>
       <button type="button" id="pp-reset-default" style="background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:7px 14px;font-weight:700;">重設預設</button>
       <button type="button" id="pp-clear-all" style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:7px 14px;font-weight:700;">清空</button>
     </div>
+    <p id="pp-dog-note" hidden style="color:#a6e3a1;font-size:.82rem;line-height:1.7;">
+      DoG 會先減少細碎紋理，再放大白丸與背景的亮暗差。下方六項都有調大／調小的說明。
+      這裡固定先切圖再強化，挑圖的縮圖與放大圖就是模型輸入；參數隨模型保存，正式推論自動沿用。
+      流程會套用到所有選定光源的此區域，請各光源都檢查一次。Debug 白丸頁使用較大的周圍範圍，請以這裡的切圖預覽確認訓練效果。
+    </p>
     <div id="pp-zone-tabs" style="display:none;gap:8px;margin-top:12px;">
       <button type="button" class="pp-zone-tab active" data-zone="inner">INNER</button>
       <button type="button" class="pp-zone-tab" data-zone="edge">EDGE</button>
@@ -823,6 +829,7 @@ function changePipelineParam(stepId, paramKey, rawValue) {
 }
 
 function renderPipelineBuilder() {
+  syncDogTiling();
   const root = document.getElementById('pipeline-builder');
   if (!root) return;
   const steps = pipelineSteps();
@@ -837,12 +844,35 @@ function renderPipelineBuilder() {
 
 function syncPreprocessReadOnly() {
   const readOnly = isPartialTraining();
-  for (const id of ['pp-add-step', 'pp-reset-default', 'pp-clear-all']) {
+  for (const id of ['pp-add-step', 'pp-reset-default', 'pp-clear-all', 'pp-white-spot-dog']) {
     const button = document.getElementById(id);
     if (button) button.disabled = readOnly;
   }
   document.querySelectorAll('#pipeline-builder input, #pipeline-builder select, #pipeline-builder button')
     .forEach(control => { control.disabled = readOnly; });
+}
+
+function hasDogPipeline() {
+  const keys = isSeparatePreprocess() ? ['inner', 'edge'] : ['shared'];
+  return keys.some(key => pipelineSteps(key).some(step => step.method === 'dog'));
+}
+
+function syncDogTiling() {
+  const dog = hasDogPipeline();
+  const afterTiling = document.getElementById('pp-after-tiling');
+  if (afterTiling) {
+    if (dog || isSeparatePreprocess()) afterTiling.checked = true;
+    afterTiling.disabled = dog || isSeparatePreprocess() || isPartialTraining();
+  }
+  const note = document.getElementById('pp-dog-note');
+  if (note) note.hidden = !dog;
+}
+
+function useWhiteSpotDogPreset() {
+  if (isPartialTraining()) return;
+  _pipelineStepsByKey[_activePipelineKey] = [makePipelineStep('dog')];
+  syncDogTiling();
+  renderPipelineBuilder();
 }
 
 function renderPipelineStep(step, idx) {
@@ -927,6 +957,14 @@ function collectImagePreprocessPipeline(key=_activePipelineKey) {
         return {pipeline: null, error: `${spec.label} 的 ${param.name} 必須是 ${param.min} ~ ${param.max} 之間的${param.type === 'int' ? '整數' : '數字'}`};
       }
       params[param.key] = num;
+    }
+    if (step.method === 'dog') {
+      for (const axis of ['x', 'y']) {
+        if (params[`background_sigma_${axis}`] <= params[`signal_sigma_${axis}`]) {
+          const direction = axis === 'x' ? '左右' : '上下';
+          return {pipeline: null, error: `白丸 DoG 的${direction}背景參考範圍，必須大於${direction}去紋強度`};
+        }
+      }
     }
     pipeline.push({method: step.method, params});
   }

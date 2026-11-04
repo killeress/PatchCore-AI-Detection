@@ -209,6 +209,9 @@ class PreprocessConfig:
     raw_gradient_refinement_enabled: bool = False
 
     def __post_init__(self):
+        from capi_dog import validate_execution_mode
+        validate_execution_mode(self.image_preprocess_pipeline, self.image_preprocess_pipelines,
+                                after_tiling=self.preprocess_after_tiling)
         if self.outer_edge_extend is None:
             self.outer_edge_extend = self.tile_size // 2
 
@@ -2035,6 +2038,8 @@ def _generate_tiles(
                 return
         emitted_positions.add((tx, ty))
         tile_img = img[ty:ty + ts, tx:tx + ts].copy()
+        # This stays aligned even when img is already in canonical grid coordinates.
+        before_tile_preprocess = tile_img.copy() if config.preprocess_after_tiling else None
         tile_pipeline = image_preprocess_pipeline_for_zone(config, zone)
         tile_preprocess_steps: List[Dict[str, Any]] = []
         tile_preprocess_total_ms = 0.0
@@ -2056,7 +2061,8 @@ def _generate_tiles(
             zone=zone,
             center_dist_to_edge=dist,
             original_image=(
-                original_img[ty:ty + ts, tx:tx + ts].copy()
+                before_tile_preprocess if before_tile_preprocess is not None
+                else original_img[ty:ty + ts, tx:tx + ts].copy()
                 if original_img is not None else None
             ),
             preprocess_pipeline=(

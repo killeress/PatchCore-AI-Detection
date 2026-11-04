@@ -482,6 +482,46 @@ def test_small_bright_dust_patch_is_not_promoted_to_bubble():
     assert np.count_nonzero(bubble_mask) == 0
 
 
+@pytest.mark.parametrize("background,contrast", [(17, 180), (28, 180), (80, 160), (80, -65)])
+@pytest.mark.parametrize("sigma", [4., 6.])
+def test_isolated_particle_blur_halo_is_not_filled_as_large_bubble(background, contrast, sigma):
+    yy, xx = np.mgrid[:512, :512]
+    image = background + contrast * np.exp(-((xx - 245) ** 2 + (yy - 218) ** 2) / (2 * sigma ** 2))
+    image = np.rint(np.clip(image, 0, 255)).astype(np.uint8)
+    inferencer = _make_inferencer(detect_bubbles=True)
+
+    mask = inferencer._detect_bubble_mask(image, 5, 100000, 0)
+
+    # Broad support of the same polarity may be real, but a particle must not
+    # turn surrounding background into a filled bubble exclusion region.
+    background_pixels = np.abs(image.astype(np.int16) - background) < 1
+    assert not np.any(mask[background_pixels])
+    assert mask[240, 233] == 0
+
+
+def test_particle_halo_mask_cannot_remove_nearby_independent_bright_defect():
+    from capi_inference import TileInfo
+
+    yy, xx = np.mgrid[:512, :512]
+    image = np.rint(28 + 180 * np.exp(-((xx - 245) ** 2 + (yy - 218) ** 2) / (2 * 5. ** 2))).astype(np.uint8)
+    inferencer = _make_inferencer(detect_bubbles=True)
+    inferencer.config.dust_brightness_threshold = 25
+    _, dust, _, detail = inferencer.check_dust_or_scratch_feature(image, extension_override=0)
+    candidates = np.zeros(image.shape, np.float32)
+    cv2.circle(candidates, (245, 218), 3, 1., -1)  # Surface particle visible in OMIT.
+    cv2.circle(candidates, (233, 240), 3, 1., -1)  # Independent black-screen defect.
+    tile = TileInfo(tile_id=0, x=0, y=0, width=512, height=512,
+                    image=np.zeros_like(image), is_bright_spot_detection=True,
+                    bright_spot_min_area=2, bright_spot_area=int(np.count_nonzero(candidates)))
+
+    remaining, _ = inferencer._filter_bright_spot_dust(tile, candidates, dust)
+
+    assert "Bub:0" in detail
+    assert remaining[218, 245] == 0
+    assert remaining[240, 233] == 1
+    assert not tile.is_suspected_dust_or_scratch
+
+
 def test_padded_context_recovers_boundary_clipped_large_bubble():
     panel_image, bubble = _large_rotated_bubble_panel_image()
     inferencer = _make_inferencer(detect_bubbles=True)

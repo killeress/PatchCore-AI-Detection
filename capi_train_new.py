@@ -256,6 +256,14 @@ class TrainingConfig:
     image_preprocess_pipelines: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     validation_config: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        from capi_image_preprocess_lab import normalize_preprocess_pipeline
+        from capi_dog import validate_execution_mode
+        self.image_preprocess_pipeline = normalize_preprocess_pipeline(self.image_preprocess_pipeline)
+        self.image_preprocess_pipelines = normalize_image_preprocess_pipelines(self.image_preprocess_pipelines)
+        validate_execution_mode(self.image_preprocess_pipeline, self.image_preprocess_pipelines,
+                                after_tiling=self.preprocess_after_tiling)
+
 
 # 使用者可從 step1 表單覆寫的 PatchCore 超參數。
 # 同時做為前後端的單一資料來源：capi_web 的請求驗證、
@@ -465,6 +473,22 @@ def generate_job_id(machine_id: str) -> str:
     return f"train_{machine_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{suffix}"
 
 
+def review_original_path(source_path) -> Path:
+    """Sidecar stays beside the job tile, so old jobs need no schema migration."""
+    source_path = Path(source_path)
+    return source_path.parent / "review_original" / source_path.name
+
+
+def _write_review_original(source_path, image) -> None:
+    import cv2
+    if image is None:
+        return
+    path = review_original_path(source_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(path), image):
+        raise OSError(f"無法保存強化前切圖: {path}")
+
+
 def preprocess_panels_to_pool(
     job_id: str,
     cfg: "TrainingConfig",
@@ -616,6 +640,10 @@ def preprocess_panels_to_pool(
                 )
                 tile_path = thumb_dir / "tiles" / tile_filename
                 cv2.imwrite(str(tile_path), tile.image)
+                if preprocess_desc and not (
+                    getattr(preprocess_cfg, "grid_canonicalization_enabled", False) and not preprocess_after_tiling
+                ):
+                    _write_review_original(tile_path, getattr(tile, "original_image", None))
 
                 thumb_path = thumb_dir / "thumb" / tile_filename
                 thumb = cv2.resize(tile.image, (96, 96))
@@ -897,6 +925,7 @@ def sample_ng_tiles(
         tile_x: int,
         tile_y: int,
         error_label: str,
+        original=None,
     ) -> Optional[dict]:
         source_path = work_root / "tiles" / "ng" / lighting / f"{stem}.png"
         source_path.parent.mkdir(parents=True, exist_ok=True)
@@ -904,6 +933,9 @@ def sample_ng_tiles(
             result_stats["invalid_skipped"] += 1
             log(f"  ⚠ {lighting}: {error_label}寫入失敗 {source_path}")
             return None
+
+        if preprocess_desc:
+            _write_review_original(source_path, original)
 
         thumb_path = work_root / "thumb" / "ng" / lighting / f"{stem}.png"
         thumb_path.parent.mkdir(parents=True, exist_ok=True)
@@ -952,6 +984,7 @@ def sample_ng_tiles(
                     log(f"  ⚠ {lighting}: NG 驗證庫 crop 無法讀取或尺寸錯誤 {crop_path}")
                     continue
                 zone = str(sample.get("zone") or "").strip().lower()
+                original_crop = crop.copy()
                 if apply_preprocess_pipeline is not None and preprocess_cfg is not None:
                     try:
                         pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
@@ -960,6 +993,8 @@ def sample_ng_tiles(
                             cached_preprocessed_n += 1
                     except Exception as exc:
                         log(f"  ⚠ {lighting}: NG 快取前處理失敗 {crop_path.name}: {exc}")
+                        result_stats["invalid_skipped"] += 1
+                        continue
 
                 source_image_path = str(sample.get("source_image_path") or "").strip()
                 panel_path = Path(source_image_path) if source_image_path else crop_path
@@ -973,6 +1008,7 @@ def sample_ng_tiles(
                     tile_x=int(sample.get("tile_x") or 0),
                     tile_y=int(sample.get("tile_y") or 0),
                     error_label="NG 快取 crop ",
+                    original=original_crop,
                 )
                 if record is None:
                     continue
@@ -1172,6 +1208,8 @@ def sample_ng_tiles(
                         preprocessed_n += 1
                 except Exception as exc:
                     log(f"  ⚠ {lighting}: NG 前處理失敗 {raw_source_path.name}: {exc}")
+                    result_stats["invalid_skipped"] += 1
+                    continue
 
             record_id = int(candidate.get("inference_record_id") or 0)
             source_result_id = int(candidate.get("source_result_id") or 0)
@@ -1191,6 +1229,7 @@ def sample_ng_tiles(
                 tile_x=tile_x,
                 tile_y=tile_y,
                 error_label="炸彈 crop ",
+                original=raw_crop,
             )
             if record is None:
                 continue
@@ -1756,6 +1795,9 @@ def write_machine_config_yaml(bundle_dir: Path, machine_id: str,
         for zone in ZONES
         if zone in (image_preprocess_pipelines or {})
     }
+    from capi_dog import validate_execution_mode
+    validate_execution_mode(image_preprocess_pipeline, image_preprocess_pipelines,
+                            after_tiling=preprocess_after_tiling)
     tile_stride = int(tile_stride or LEGACY_TRAIN_TILE_STRIDE)
     grid_canonicalization = normalize_grid_canonicalization(
         grid_canonicalization,

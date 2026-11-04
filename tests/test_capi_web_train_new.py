@@ -1040,6 +1040,45 @@ def test_handle_train_new_tiles_requires_params():
     assert h._sent_response[0]["status"] == 400
 
 
+def test_review_original_urls_are_confined_and_older_tiles_remain_usable(tmp_path, monkeypatch):
+    from capi_train_new import review_original_path
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / '.tmp/train_new_thumbs/j1/tiles/new.png'
+    original = review_original_path(source)
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b'png')
+    outside = tmp_path / 'outside/source.png'
+    outside_original = review_original_path(outside)
+    outside_original.parent.mkdir(parents=True)
+    outside_original.write_bytes(b'png')
+    server = MagicMock()
+    server.database.get_training_job.return_value = {'training_params':{}}
+    server.database.list_tile_pool.return_value = [
+        {'id':i,'lighting':'WGF50500','zone':'inner','source':'ok',
+         'decision':'accept','source_path':str(path)}
+        for i,path in enumerate((source,source.with_name('older.png'),outside))
+    ]
+    h = _make_handler_with_server(server,'/api/train/new/tiles?job_id=j1&lighting=WGF50500')
+    h._handle_train_new_tiles()
+    tiles = json.loads(h._sent_response[0]['body'])['tiles']
+    assert tiles[0]['image_url'] == '/api/train/new/thumb/j1/tiles/new.png'
+    assert tiles[0]['original_image_url'] == '/api/train/new/thumb/j1/tiles/review_original/new.png'
+    assert tiles[1]['image_url'].endswith('/older.png')
+    assert tiles[1]['original_image_url'] == tiles[2]['original_image_url'] == ''
+
+
+def test_dog_preview_rejects_preprocessing_before_product_localization():
+    server = MagicMock()
+    h = _make_handler_with_server(server,'/api/train/new/preprocess_pipeline_preview')
+    body = json.dumps({'image_path':'unused.png','image_preprocess_pipeline':[{'method':'dog'}],
+                       'preprocess_after_tiling':False}).encode()
+    h.headers.get = MagicMock(return_value=str(len(body)))
+    h.rfile = io.BytesIO(body)
+    h._handle_train_new_preprocess_pipeline_preview()
+    assert h._sent_response[0]['status'] == 400
+    assert '先切分後處理' in json.loads(h._sent_response[0]['body'])['error']
+
+
 def test_handle_train_new_tiles_decision_updates():
     """正常情境：更新 tile decisions，回傳 ok + updated count。"""
     server = MagicMock()

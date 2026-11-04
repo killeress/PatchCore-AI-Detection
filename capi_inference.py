@@ -4012,9 +4012,9 @@ class CAPIInferencer:
 
         for bubble_source, delta_threshold, mean_threshold in bubble_sources:
             bubble_bg = cv2.GaussianBlur(bubble_source, (blur_k, blur_k), 0)
-            for delta in (
-                bubble_bg.astype(np.int16) - bubble_source.astype(np.int16),
-                bubble_source.astype(np.int16) - bubble_bg.astype(np.int16),
+            for polarity, delta in (
+                (-1, bubble_bg.astype(np.int16) - bubble_source.astype(np.int16)),
+                (1, bubble_source.astype(np.int16) - bubble_bg.astype(np.int16)),
             ):
                 delta[gray == 0] = 0
                 bubble_binary = (delta >= delta_threshold).astype(np.uint8) * 255
@@ -4140,6 +4140,27 @@ class CAPIInferencer:
                     filled_area = int(np.count_nonzero(bubble_mask > 0))
                     if filled_area < bubble_min_area or filled_area > bubble_fill_max_area:
                         continue
+
+                    # A small bright particle raises the Gaussian background,
+                    # creating a false dark ring (and vice versa for a dark
+                    # particle). Its convex hull then masks unrelated pixels.
+                    # Require the whole filled region to support the detected
+                    # contrast polarity, rather than trusting only that ring.
+                    if float(np.mean(delta[bubble_mask > 0])) <= 0.0:
+                        # A nearby bright substrate edge can bias the Gaussian
+                        # background of a real partial bubble. Confirm its sign
+                        # against local background above that edge instead.
+                        ring = cv2.dilate(
+                            bubble_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)),
+                        ) > 0
+                        ring &= (bubble_mask == 0) & (gray > 0)
+                        if surface_edge_y is not None:
+                            ring[surface_edge_y:, :] = False
+                        if (not np.any(ring) or polarity * (
+                            float(np.mean(bubble_source[bubble_mask > 0]))
+                            - float(np.median(bubble_source[ring]))
+                        ) <= 0.0):
+                            continue
 
                     if extension > 0:
                         bubble_dilate = cv2.getStructuringElement(

@@ -555,6 +555,12 @@ class CAPIConfig:
             for zone in ("inner", "edge")
             if zone in raw_zone_pipelines
         }
+        from capi_dog import validate_execution_mode
+        image_preprocess_pipeline = normalize_preprocess_pipeline(data.get("image_preprocess_pipeline", []))
+        validate_execution_mode(
+            image_preprocess_pipeline,
+            image_preprocess_pipelines, after_tiling=data.get("preprocess_after_tiling", False),
+        )
 
         # 解析排除區域
         exclusion_zones = []
@@ -587,9 +593,7 @@ class CAPIConfig:
             otsu_offset=data.get("otsu_offset", 5),
             otsu_bottom_crop=data.get("otsu_bottom_crop", 1000),
             enable_panel_polygon=data.get("enable_panel_polygon", True),
-            image_preprocess_pipeline=normalize_preprocess_pipeline(
-                data.get("image_preprocess_pipeline", [])
-            ),
+            image_preprocess_pipeline=image_preprocess_pipeline,
             image_preprocess_pipelines=image_preprocess_pipelines,
             preprocess_after_tiling=data.get("preprocess_after_tiling", False),
             grid_canonicalization_enabled=grid_cfg["enabled"],

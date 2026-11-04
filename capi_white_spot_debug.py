@@ -14,14 +14,10 @@ import uuid
 
 import cv2
 import numpy as np
+from capi_dog import DEFAULT_PARAMS, normalize_params, dog_residual, render_dog
 
 logger = logging.getLogger("capi.white_spot_debug")
 
-DEFAULT_PARAMS = {
-    "signal_sigma_x": 20.0, "signal_sigma_y": 6.0,
-    "background_sigma_x": 96.0, "background_sigma_y": 32.0,
-    "gain": 40.0, "offset": 128.0,
-}
 PRESETS = {
     "recommended": {"label": "白丸：背景抑制", "params": dict(DEFAULT_PARAMS)},
     "balanced": {"label": "白丸：保留對比", "params": {**DEFAULT_PARAMS, "signal_sigma_x": 16.0}},
@@ -50,25 +46,6 @@ def _number(value, name, minimum, maximum, *, integer=False):
     return int(number) if integer else number
 
 
-def normalize_params(params=None):
-    if params is None:
-        params = {}
-    if not isinstance(params, dict):
-        raise ValueError("params 必須是物件")
-    if set(params) - set(DEFAULT_PARAMS):
-        raise ValueError("包含不支援的 DoG 參數")
-    limits = {
-        "signal_sigma_x": (.5, 64), "signal_sigma_y": (.5, 64),
-        "background_sigma_x": (1, 192), "background_sigma_y": (1, 192),
-        "gain": (1, 100), "offset": (0, 255),
-    }
-    result = {k: _number(params.get(k, v), k, *limits[k]) for k, v in DEFAULT_PARAMS.items()}
-    for axis in ("x", "y"):
-        if result[f"background_sigma_{axis}"] <= result[f"signal_sigma_{axis}"]:
-            raise ValueError(f"背景 sigma {axis.upper()} 必須大於平滑 sigma {axis.upper()}")
-    return result
-
-
 def prepare_white_spot(gray, center=None, tile_size=512, params=None):
     """Filter padded context, then return aligned raw/enhanced tiles and geometry."""
     params = normalize_params(params)
@@ -92,12 +69,8 @@ def prepare_white_spot(gray, center=None, tile_size=512, params=None):
     bx2, by2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
     work = gray[by1:by2, bx1:bx2].astype(np.float32)
     start = time.perf_counter()
-    signal = cv2.GaussianBlur(work, (0, 0), sigmaX=params["signal_sigma_x"],
-                              sigmaY=params["signal_sigma_y"], borderType=cv2.BORDER_REFLECT_101)
-    background = cv2.GaussianBlur(work, (0, 0), sigmaX=params["background_sigma_x"],
-                                  sigmaY=params["background_sigma_y"], borderType=cv2.BORDER_REFLECT_101)
-    residual = (signal - background)[y1-by1:y2-by1, x1-bx1:x2-bx1].copy()
-    enhanced = np.rint(np.clip(params["offset"] + params["gain"] * residual, 0, 255)).astype(np.uint8)
+    residual = dog_residual(work, params)[y1-by1:y2-by1, x1-bx1:x2-bx1].copy()
+    enhanced = render_dog(residual, params)
     return {
         "original": gray[y1:y2, x1:x2].copy(), "enhanced": enhanced, "residual": residual,
         "params": params, "center": [cx, cy], "center_in_tile": [cx-x1, cy-y1],

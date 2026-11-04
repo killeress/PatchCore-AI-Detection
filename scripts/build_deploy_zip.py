@@ -44,6 +44,7 @@ CODE_FILES = [
     "capi_image_orientation.py",
     "capi_image_naming.py",
     "capi_image_preprocess_lab.py",
+    "capi_dog.py",
     "capi_white_spot_debug.py",
     "capi_grid_canonicalization.py",
     "capi_inference.py",

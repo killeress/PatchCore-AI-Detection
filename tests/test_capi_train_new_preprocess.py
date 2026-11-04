@@ -799,7 +799,9 @@ def test_sample_ng_tiles_crops_line_bomb_at_segment_midpoint(tmp_path, multi_seg
     )
 
     assert stats["sampled"] == (2 if multi_segment else 1)
-    crop_path = Path(db.tiles[0]["source_path"])
+    # Sampling shuffles candidates; inspect segment 0 without relying on order.
+    crop_path = next(Path(t["source_path"]) for t in db.tiles
+                     if Path(t["source_path"]).name.endswith("_line0.png"))
     crop = cv2.imread(str(crop_path), cv2.IMREAD_GRAYSCALE)
     assert crop is not None
     assert crop.shape == (512, 512)

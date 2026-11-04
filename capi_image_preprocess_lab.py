@@ -1,4 +1,4 @@
-"""Image preprocessing functions for the debug preprocessing lab."""
+"""Shared image preprocessing for training, inference and the debug lab."""
 
 from __future__ import annotations
 
@@ -9,6 +9,10 @@ from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
+from capi_dog import (
+    DEFAULT_PARAMS as DOG_DEFAULT_PARAMS, PARAM_LIMITS as DOG_PARAM_LIMITS,
+    normalize_params as normalize_dog_params, dog_residual, render_dog,
+)
 
 
 METHOD_SPECS: List[Dict[str, Any]] = [
@@ -47,6 +51,23 @@ METHOD_SPECS: List[Dict[str, Any]] = [
         "params": [
             {"name": "窗口大小", "detail": "奇數，限制平滑影響範圍；通常 3/5/7 足夠做初步實驗。"},
             {"name": "Sigma", "detail": "高斯權重強度；越大越平滑，細節越容易變淡。"},
+        ],
+    },
+    {
+        "id": "dog",
+        "label": "白丸 DoG：去紋＋亮暗差強化",
+        "purpose": "先減少細碎紋理，再扣掉大片背景，讓淡白丸較容易看見；挑圖時看到的就是這份模型輸入。",
+        "noise_types": ["淡白丸", "低對比亮斑", "大片亮度起伏與細碎紋理"],
+        "risk": "去紋太強會抹淡白丸，放大太強也會放大背景；正常圖與缺陷圖都需用同一組參數。",
+        "suggested": "起始設定：去紋左右20／上下6，背景左右96／上下32，增益40，灰階128。",
+        "mix": "先單獨使用 DoG，確認白丸仍清楚再考慮其他步驟。採先切分後處理；參數隨模型保存，推論自動沿用。",
+        "params": [
+            {"name": "左右去紋強度", "detail": "調大：左右顆粒較平順，但白丸可能變寬、變淡。調小：保留輪廓，也保留較多背景紋理。"},
+            {"name": "上下去紋強度", "detail": "調大：水平細紋較淡，但白丸上下輪廓也可能被抹掉。調小：細節較多，條紋也較明顯。"},
+            {"name": "左右背景參考範圍", "detail": "調大：較寬的白丸較容易留下，但大片亮度起伏也可能留下。調小：背景較平，白丸可能一起被扣掉。須大於左右去紋強度。"},
+            {"name": "上下背景參考範圍", "detail": "調大：較高的白丸較容易留下，但寬橫帶也可能留下。調小：更貼近上下背景，白丸也可能變淡。須大於上下去紋強度。"},
+            {"name": "明暗差放大倍數", "detail": "調大：白丸更亮，背景差異也更強；太大會一片白或黑。調小：畫面較柔和，但淡白丸較難看。"},
+            {"name": "整張圖的基準亮度", "detail": "沒有亮暗差時顯示的灰階；128為灰。調大整張變亮，調小整張變暗，不能只凸顯白丸。"},
         ],
     },
     {
@@ -138,6 +159,11 @@ METHOD_SPECS: List[Dict[str, Any]] = [
 
 
 PARAM_SPECS: Dict[str, List[Dict[str, Any]]] = {
+    "dog": [
+        {"key": key, "type": "float", "default": value,
+         "min": DOG_PARAM_LIMITS[key][0], "max": DOG_PARAM_LIMITS[key][1], "step": .5}
+        for key, value in DOG_DEFAULT_PARAMS.items()
+    ],
     "median": [
         {"key": "kernel_size", "type": "int", "default": 5, "min": 3, "max": 31, "step": 2},
     ],
@@ -227,6 +253,8 @@ def sanitize_preprocess_params(method: str, params: Dict[str, Any] | None = None
     """Validate one method's params and return the clamped params actually used."""
     params = params or {}
     method = str(method or "").strip().lower()
+    if method == "dog":
+        return normalize_dog_params(params)
     if method == "median":
         return {"kernel_size": _odd_int(params.get("kernel_size"), 3, 31, 5)}
     if method == "mean":
@@ -427,6 +455,9 @@ def apply_preprocess_method(
         sigma = applied_params["sigma"]
         processed = cv2.GaussianBlur(work, (ksize, ksize), sigmaX=sigma)
         notes.append("高斯平滑適合近似高斯分布的 sensor/光電轉換雜訊。")
+    elif method == "dog":
+        processed = render_dog(dog_residual(work, applied_params), applied_params)
+        notes.append("先去紋、再扣除背景並放大亮暗差；訓練與推論須使用相同參數及切圖順序。")
     elif method == "bilateral":
         diameter = applied_params["diameter"]
         sigma_color = applied_params["sigma_color"]

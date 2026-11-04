@@ -47,7 +47,7 @@
 
   <div class="process-panel">
     <div class="process-copy">
-      <div class="process-title">前處理預覽</div>
+      <div class="process-title">原圖上的切圖位置</div>
       <div class="process-meta">
         <span class="legend panel"></span>前景/panel 邊界
         <span class="legend inner"></span>inner tile
@@ -56,6 +56,14 @@
     </div>
     <button class="batch-btn" onclick="openProcessPreview()">放大查看</button>
     <img id="process-preview" alt="preprocess preview" onclick="openProcessPreview()">
+  </div>
+
+  <div class="review-input-note">
+    <strong>下方挑圖顯示：模型實際輸入</strong>
+    <div>啟用 DoG 時，縮圖與點開的放大圖都是強化後的圖片。放大後可切換「強化前」對照，切換只影響顯示。</div>
+    <div>目前流程：{{ review_preprocess_summary|default('未記錄前處理設定') }}</div>
+    <div>發現白丸或其他缺陷時，請從正常訓練圖中排除；不要讓模型把它學成正常。</div>
+    <div>若使用預篩模型，也要確認它採用相同前處理；原圖模型對 DoG 圖的高分不能直接當成缺陷。</div>
   </div>
 
   <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;">
@@ -99,6 +107,11 @@
         <button onclick="closePreview()">關閉 (Esc)</button>
       </div>
     </div>
+    <div id="modal-input-controls" class="modal-input-controls" hidden>
+      <button type="button" id="modal-processed-btn" onclick="setTileImageMode('processed')" aria-pressed="true">模型輸入／強化後</button>
+      <button type="button" id="modal-original-btn" onclick="setTileImageMode('original')" aria-pressed="false">強化前</button>
+      <span id="modal-input-label"></span>
+    </div>
     <img id="modal-img" alt="preview">
   </div>
   <button class="modal-nav prev" id="modal-prev" onclick="modalNavigate(-1)" aria-label="上一張">‹</button>
@@ -112,6 +125,13 @@
 </div>
 
 <style>
+  .review-input-note { margin:12px 0;padding:12px 14px;border:1px solid #45475a;border-radius:8px;color:#a6adc8;font-size:.82rem;line-height:1.7;overflow-wrap:anywhere; }
+  .review-input-note strong { color:#a6e3a1; }
+  .modal-input-controls { padding:8px 12px;border-bottom:1px solid #313244;color:#a6adc8;font-size:.78rem; }
+  .modal-input-controls button { background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:5px;padding:5px 10px;cursor:pointer; }
+  .modal-input-controls button[aria-pressed="true"] { background:#89b4fa;color:#1e1e2e; }
+  .modal-input-controls button:disabled { opacity:.4;cursor:not-allowed; }
+  #modal-input-controls:not([hidden]) ~ #modal-img { max-height:calc(94vh - 135px); }
   .lighting-tab.active { background:#89b4fa;color:#1e1e2e;font-weight:700; }
   .process-panel { position:relative;background:#181c2f;border:1px solid #45475a;border-radius:8px;margin:0 0 14px 0;min-height:260px;overflow:hidden;display:flex;align-items:flex-start;gap:12px;padding:12px;box-shadow:inset 0 0 0 1px rgba(137,180,250,.16); }
   .process-panel img { position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.96;cursor:zoom-in; }
@@ -203,6 +223,7 @@ let _lastClickedId = null;
 let _clickTimer = null;
 let _focusedTileId = null;   // 鍵盤焦點所在 tile
 let _modalTileId = null;     // modal 顯示的 tile（null = 顯示前處理預覽 / 已關閉）
+let _tileImageMode = 'processed';
 
 // ── Prefilter (用既有 bundle 對當前 tile pool 算分) ─────────────
 let _prefilterBundleId = null;
@@ -683,18 +704,40 @@ function toggleTile(el, event) {
 function openTilePreview(id) {
   const tile = (_tilesByLighting[_currentLighting] || []).find(t => t.id === id);
   if (!tile) return;
+  _tileImageMode = 'processed';
   modalShowTile(id);
+}
+
+function renderTileImage(tile) {
+  const original = _tileImageMode === 'original' && !!tile.original_image_url;
+  document.getElementById('modal-img').src = original
+    ? tile.original_image_url : (tile.image_url || tile.thumb_url || '');
+  document.getElementById('modal-img').alt = original ? '強化前的同位置切圖' : '模型實際輸入';
+  document.getElementById('modal-input-controls').hidden = false;
+  document.getElementById('modal-processed-btn').setAttribute('aria-pressed', String(!original));
+  document.getElementById('modal-original-btn').setAttribute('aria-pressed', String(original));
+  document.getElementById('modal-original-btn').disabled = !tile.original_image_url;
+  document.getElementById('modal-input-label').textContent = original
+    ? '強化前切圖；訓練仍使用模型輸入'
+    : tile.original_image_url ? '與訓練使用的圖片相同' : '模型輸入；此張未保存強化前切圖';
+}
+
+function setTileImageMode(mode) {
+  const tile = (_tilesByLighting[_currentLighting] || []).find(t => t.id === _modalTileId);
+  if (!tile || !['processed', 'original'].includes(mode)) return;
+  if (mode === 'original' && !tile.original_image_url) return;
+  _tileImageMode = mode;
+  renderTileImage(tile);
 }
 
 function modalShowTile(id) {
   const tile = (_tilesByLighting[_currentLighting] || []).find(t => t.id === id);
   if (!tile) return;
   _modalTileId = id;
-  const src = tile.image_url || tile.thumb_url || '';
   const zone = tile.source === 'ng'
     ? (tile.zone ? `NG·${tile.zone}` : 'NG·共用')
     : (tile.zone || '');
-  document.getElementById('modal-img').src = src;
+  renderTileImage(tile);
   document.getElementById('modal-title').textContent = `${lightingLabels[_currentLighting] || _currentLighting} / ${zone} / tile #${tile.id}`;
   const dec = document.getElementById('modal-decision');
   dec.style.display = '';
@@ -720,12 +763,13 @@ function modalShowTile(id) {
 
 function openProcessPreview() {
   const src = document.getElementById('process-preview').src;
-  openPreview(src, `${_currentLighting} 前處理預覽`);
+  openPreview(src, `${_currentLighting} 原圖上的切圖位置`);
 }
 
 function openPreview(src, title) {
   if (!src) return;
   _modalTileId = null;
+  document.getElementById('modal-input-controls').hidden = true;
   document.getElementById('modal-img').src = src;
   document.getElementById('modal-title').textContent = title || '';
   document.getElementById('modal-decision').style.display = 'none';
