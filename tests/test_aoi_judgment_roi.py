@@ -122,6 +122,119 @@ def test_five_logged_aoi_bombs_ignore_spreading_heat(version, source, monkeypatc
                for r in t.bomb_region_diagnostics['regions'])
 
 
+@pytest.mark.parametrize('version', ['v1', 'v2'])
+@pytest.mark.parametrize('source', ['client', 'config'])
+@pytest.mark.parametrize('roi_enabled', [False, True])
+def test_logged_neighbor_bomb_keeps_aoi_four_ng_and_five_bomb(
+    version, source, roi_enabled, monkeypatch,
+):
+    from capi_server import _normalize_machine_judgment_for_bomb_only_panel
+    from capi_station_adapter import create_station_adapter
+
+    inf, result, _ = case([], enabled=roi_enabled)
+    inf.station_adapter = create_station_adapter('aapi')
+    inf.config.aoi_judgment_radius_px = 64
+    inf.config.dust_heatmap_top_percent = .4
+    bomb = (1000, 555)
+    inf.config.bomb_defects = (
+        [BombDefect('W0F00000', 'B01', 'point', [bomb])]
+        if source == 'config' else []
+    )
+    result.image_path = Path('YQ71BD204C43W0F00000204558.tif')
+    result.report_image_prefix = 'W0F00000'
+    result.raw_bounds = result.otsu_bounds = (824, 272, 5984, 3494)
+    result.panel_polygon = np.array([
+        [821.2, 268.6], [5988.1, 267.8], [5981.6, 3496.4], [822.3, 3494.5],
+    ], dtype=np.float32)
+    result.tiles, result.anomaly_tiles = [], []
+    bomb_image = inf._map_aoi_coords(*bomb, result.raw_bounds, RESOLUTION,
+                                     result.panel_polygon)
+    # Reproduce the logged AOI #4/#5 coordinates, crops and model scores.
+    for index, product, anchor, score in [
+        (3, (943, 559), (3358, 1772), .6655),
+        (4, (999, 556), (3509, 1764), .6486),
+    ]:
+        tile = make_tile(index, product, anchor)
+        tile.score_threshold = .35
+        amap = np.full((512, 512), .01, dtype=np.float32)
+        px, py = bomb_image[0] - tile.x, bomb_image[1] - tile.y
+        amap[py - 12:py + 13, px - 12:px + 13] = score * .98
+        amap[py, px] = score
+        if index == 3:
+            # The real AOI defect passes the model threshold but is weaker
+            # than the neighboring bomb and falls outside the Top 0.4% core.
+            amap[254:259, 254:259] = .4
+        if not roi_enabled:
+            # Also cover a cached dust-stage core containing only the bomb.
+            tile.dust_heatmap_binary = (amap >= score * .98).astype(np.uint8) * 255
+            tile.dust_region_details = [dict(
+                label_id=1, area=625, is_dust=False, max_score=score,
+                peak_yx=(py, px),
+            )]
+        result.tiles.append(tile)
+        result.anomaly_tiles.append((tile, score, amap))
+    result.processed_tile_count = 2
+    bomb_info = dict(image_prefix='W0F00000', defect_type='point', coordinates=[bomb])
+    if version == 'v2':
+        inf._apply_aoi_judgment_roi([result], RESOLUTION)
+
+    apply_bomb_postprocess(inf, result, bomb_info if source == 'client' else None,
+                           version, monkeypatch)
+
+    real, simulated = result.tiles
+    assert inf.config.bomb_match_tolerance == 20
+    assert not real.is_bomb
+    assert real.bomb_defect_code == ''
+    assert simulated.is_bomb
+    assert simulated.bomb_defect_code == ('UNKNOWN' if source == 'client' else 'B01')
+    assert (real.aoi_product_x, real.aoi_product_y) == (943, 559)
+    stored = results_to_db_data([result], {})[0]
+    assert stored['is_ng'] == 1
+    assert [row['is_bomb'] for row in stored['tiles']] == [0, 1]
+    assert _normalize_machine_judgment_for_bomb_only_panel('NG', [result]) == 'NG'
+    records = _iter_qjpg_defect_records([result], RESOLUTION, inf.config)
+    assert [record for record in records if record.startswith('PCDK2')] == [
+        'PCDK20094300559W0F00000',
+    ]
+    bomb_records = [record for record in records if record.startswith('PCDK3')]
+    assert len(bomb_records) == 1
+    if roi_enabled:
+        assert bomb_records == ['PCDK30099900556W0F00000']
+
+
+@pytest.mark.parametrize('version', ['v1', 'v2'])
+@pytest.mark.parametrize('offset,expected', [
+    ((20, 0), True), ((0, 20), True), ((20, 20), True),
+    ((21, 0), False), ((0, 21), False),
+])
+def test_aoi_bomb_tolerance_uses_original_coordinate_with_neighbor_heat(
+    version, offset, expected, monkeypatch,
+):
+    bomb = (256 - offset[0], 256 - offset[1])
+    inf, result, tile = case([(*bomb, .8)], bombs=[bomb])
+    inf.config.aoi_judgment_radius_px = 64
+    if version == 'v2':
+        inf._apply_aoi_judgment_roi([result], RESOLUTION)
+
+    apply_bomb_postprocess(inf, result, None, version, monkeypatch)
+
+    assert tile.is_bomb is expected
+    assert results_to_db_data([result], {})[0]['is_ng'] == int(not expected)
+
+
+@pytest.mark.parametrize('version', ['v1', 'v2'])
+def test_grid_tile_still_matches_bomb_heat_without_aoi_coordinate_guard(version, monkeypatch):
+    inf, result, tile = case([(200, 256, .8)], bombs=[(200, 256)])
+    tile.is_aoi_coord_tile = False
+    if version == 'v2':
+        inf._apply_aoi_judgment_roi([result], RESOLUTION)
+
+    apply_bomb_postprocess(inf, result, None, version, monkeypatch)
+
+    assert tile.is_bomb
+    assert results_to_db_data([result], {})[0]['is_ng'] == 0
+
+
 @pytest.mark.parametrize('bomb_x,prefix,expected', [
     (236, 'STANDARD', True),  # Inclusive 20 px tolerance.
     (235, 'STANDARD', False),

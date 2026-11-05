@@ -10014,13 +10014,13 @@ class CAPIInferencer:
         product_resolution: Optional[Tuple[int, int]],
         geometry_cache: Dict[str, list],
     ) -> Optional[Tuple[bool, str]]:
-        """Prefer an AOI-coordinate bomb match in ROI mode, else inspect hot cores.
+        """Require an original AOI-coordinate match before suppressing a tile.
 
         A crop can contain a neighboring bomb even though its AOI anchor is
-        elsewhere. Only suppress it when the entire non-dust core fits the
-        known point-bomb tolerance areas. Keep weaker AOI-seed regions and
-        hot pixels outside those areas as NG. Without overlapping bomb-core
-        evidence, retain the existing AOI-coordinate fallback and guard.
+        elsewhere. A hot core alone must never suppress that unrelated AOI
+        defect. Hot cores can refine report positions but cannot clear an
+        unmatched AOI coordinate. Matching coordinates have priority in ROI
+        mode; otherwise retain non-dust pixels outside bomb areas as NG.
         """
         tile.bomb_region_diagnostics = None
         if (
@@ -10037,15 +10037,26 @@ class CAPIInferencer:
         if amap.ndim != 2 or amap.size == 0 or not np.isfinite(amap).all() or np.max(amap) <= 0:
             return None
         img_prefix = self._get_image_prefix(result.image_path.name)
-        if tile.aoi_roi_mask is not None and min(tile.aoi_product_x, tile.aoi_product_y) >= 0:
-            # AOI-scoped judgment gives the reported coordinate priority over
-            # heatmap extent. A bomb's diffuse heat must not turn it back into NG.
-            matched, code = self.check_bomb_match(
+        aoi_matches_bomb = None
+        if min(tile.aoi_product_x, tile.aoi_product_y) >= 0:
+            aoi_matches_bomb, code = self.check_bomb_match(
                 img_prefix, tile.aoi_image_x, tile.aoi_image_y, result.raw_bounds,
                 product_resolution=product_resolution, bomb_list=active_bombs,
                 product_coords=(tile.aoi_product_x, tile.aoi_product_y),
             )
-            if matched:
+            if not aoi_matches_bomb:
+                # Top% can retain only a stronger neighboring bomb while
+                # dropping a weaker real AOI defect. Never use that core to
+                # override the original coordinate's failed bomb match.
+                logger.info(
+                    "[AOI_BOMB_COORD] image=%s tile=%s aoi=(%s,%s) tolerance=%s "
+                    "result=KEEP_NG reason=outside_bomb_tolerance heat_regions=CANNOT_OVERRIDE",
+                    result.image_path.name, tile.tile_id, tile.aoi_product_x,
+                    tile.aoi_product_y, self.config.bomb_match_tolerance,
+                )
+            elif tile.aoi_roi_mask is not None:
+                # AOI-scoped judgment gives the reported coordinate priority
+                # over diffuse heat extending beyond the bomb tolerance.
                 if tile.is_bright_spot_detection or tile.is_half_spot_detection:
                     _real, _peak, _iou, details, binary, _labels = self.check_dust_per_region(
                         np.zeros(amap.shape, dtype=np.uint8), amap, top_percent=100.0,
@@ -10210,6 +10221,19 @@ class CAPIInferencer:
             ))
         tile.bomb_remaining_points = [(x, y) for _score, x, y in sorted(remaining_points)]
         is_bomb = not np.any(remaining)
+        if is_bomb and aoi_matches_bomb is False:
+            # A bomb-only Top% core does not explain an unmatched AOI defect.
+            # Keep its original report position instead of reporting the
+            # neighboring bomb again as a real defect from cached dust cores.
+            tile.anomaly_peak_x, tile.anomaly_peak_y = (
+                (tile.aoi_image_x, tile.aoi_image_y)
+                if min(tile.aoi_image_x, tile.aoi_image_y) >= 0 else
+                self._map_aoi_coords(tile.aoi_product_x, tile.aoi_product_y,
+                                     result.raw_bounds, product_resolution, result.panel_polygon)
+            )
+            tile.anomaly_peak_source = "aoi_report_fallback"
+            tile.bomb_region_diagnostics["aoi_coordinate_retained"] = True
+            return False, ""
         selected_core = real_core if is_bomb else remaining
         current_x = int((tile.anomaly_peak_x - tile.x) * map_w / tile.width)
         current_y = int((tile.anomaly_peak_y - tile.y) * map_h / tile.height)

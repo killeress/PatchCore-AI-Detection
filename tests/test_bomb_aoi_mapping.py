@@ -370,7 +370,7 @@ def make_overlapping_point_bomb_case(source, map_size=512):
 @pytest.mark.parametrize("source", ["client", "config"])
 @pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("map_size", [128, 512])
-def test_overlapping_aoi_crops_with_only_point_bomb_hotspot_are_bombs(
+def test_overlapping_aoi_crops_require_original_point_bomb_coordinate(
     source, version, map_size, monkeypatch, capsys, caplog,
 ):
     from capi_server import _normalize_machine_judgment_for_bomb_only_panel, results_to_db_data
@@ -384,17 +384,18 @@ def test_overlapping_aoi_crops_with_only_point_bomb_hotspot_are_bombs(
 
     apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
 
-    assert all(tile.is_bomb for tile in result.tiles)
+    assert [tile.is_bomb for tile in result.tiles] == [False, True]
     code = "UNKNOWN" if source == "client" else "B01"
-    assert all(tile.bomb_defect_code == code for tile in result.tiles)
+    assert [tile.bomb_defect_code for tile in result.tiles] == ["", code]
     stored = results_to_db_data([result], {})[0]
-    assert stored["is_ng"] == 0
-    assert stored["is_bomb"] == 1
-    assert _target_tiles_for_within_spec(stored) == []
-    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "OK"
+    assert stored["is_ng"] == 1
+    assert stored["is_bomb"] == 0
+    assert _target_tiles_for_within_spec(stored) == [stored["tiles"][0]]
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "NG"
     log = capsys.readouterr().out
+    assert "result=KEEP_NG reason=outside_bomb_tolerance" in caplog.text
     assert "BOMB_REGIONS" in caplog.text
-    assert f"{code}×2" in log
+    assert f"{code}×1" in log
 
 
 @pytest.mark.parametrize("source", ["client", "config"])
@@ -477,7 +478,7 @@ def test_connected_hot_region_extending_past_point_bomb_tolerance_keeps_ng(versi
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
-def test_point_bomb_regions_follow_polygon_corrected_coordinates(version, monkeypatch):
+def test_point_bomb_regions_cannot_override_unmatched_polygon_corrected_aoi(version, monkeypatch):
     inferencer = make_inferencer()
     anchor = inferencer._map_aoi_coords(445, 269, RAW_BOUNDS, RESOLUTION, POLYGON)
     bomb_anchor = inferencer._map_aoi_coords(350, 231, RAW_BOUNDS, RESOLUTION, POLYGON)
@@ -491,8 +492,9 @@ def test_point_bomb_regions_follow_polygon_corrected_coordinates(version, monkey
 
     apply_bomb_postprocess(inferencer, result, bomb_info, version, monkeypatch)
 
-    assert tile.is_bomb is True
-    assert tile.anomaly_peak_source == "bomb_region"
+    assert tile.is_bomb is False
+    assert tile.bomb_defect_code == ""
+    assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == anchor
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
@@ -515,7 +517,7 @@ def test_point_bomb_regions_do_not_suppress_two_stage_rescued_defect(version, mo
 ])
 def test_point_bomb_region_coverage_keeps_product_pixel_tolerance(version, offset, expected, monkeypatch):
     inferencer = make_inferencer()
-    tile = make_tile(0, (104, 49), (104, 49))
+    tile = make_tile(0, (11, 11), (11, 11))
     tile.x = tile.y = 0
     amap = np.zeros((512, 512), dtype=np.float32)
     amap[11, 11] = 0.8
@@ -543,6 +545,9 @@ def test_point_bomb_heatmap_displays_final_region_decisions(
 
     inferencer, result, bomb_info = make_overlapping_point_bomb_case("client")
     tile, score, amap = result.anomaly_tiles[0]
+    # Original AOI coordinates must qualify for bomb-region exclusion.
+    tile.aoi_product_x, tile.aoi_product_y = (11, 11)
+    tile.aoi_image_x, tile.aoi_image_y = (861, 917)
     if case == "mixed":
         amap[300:307, 300:307] = score
     elif case == "partial":
