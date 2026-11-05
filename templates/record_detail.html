@@ -296,7 +296,13 @@
         </tr>
         <tr>
             <th>機檢判定</th>
-            <td>{{ detail.machine_judgment }}</td>
+            <td>{{ detail.machine_judgment }}
+                {% set machine_note = detail | machine_judgment_note %}
+                {% if machine_note %}
+                <div data-machine-judgment-note style="margin-top:6px;font-size:12px;color:#B45309;"
+                     title="AOI 原始判定為 NG，此處顯示套用炸彈排除規則後的結果。">{{ machine_note | e }}</div>
+                {% endif %}
+            </td>
         </tr>
         <tr>
             <th>AI 判定</th>

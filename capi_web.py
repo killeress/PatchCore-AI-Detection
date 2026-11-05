@@ -703,6 +703,14 @@ def mj_badge(machine_judgment):
     else:
         return "badge-ng"
 
+def machine_judgment_note(record):
+    if record.get("machine_judgment") != "OK":
+        return ""
+    from capi_server import _original_machine_judgment_for_record
+    if _original_machine_judgment_for_record(record) == "NG":
+        return "原始 NG → OK（炸彈排除）"
+    return ""
+
 def img_status_info(img):
     if img.get("is_dust_only"): return "灰塵 (DUST)", "badge-err"
     if img.get("is_bomb"): return "炸彈 (BOMB)", "badge-err"
@@ -3603,6 +3611,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             cls.jinja_env.filters['ai_simple'] = ai_simple
             cls.jinja_env.filters['ai_badge'] = ai_badge
             cls.jinja_env.filters['mj_badge'] = mj_badge
+            cls.jinja_env.filters['machine_judgment_note'] = machine_judgment_note
             cls.jinja_env.filters['img_status_info'] = img_status_info
             cls.jinja_env.filters['tile_info'] = tile_info
             cls.jinja_env.filters['get_img_stem'] = get_img_stem
@@ -10935,6 +10944,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     edge_threshold_px=self.inferencer.config.edge_threshold_px,
                     image_preprocess_pipeline=getattr(self.inferencer.config, "image_preprocess_pipeline", []),
                     image_preprocess_pipelines=configured_zone_pipelines,
+                    preprocess_after_tiling=preprocess_after_tiling,
                     product_resolution=(product_w, product_h),
                     grid_canonicalization_enabled=grid_enabled,
                     grid_samples_per_cell=getattr(
@@ -14283,7 +14293,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         from capi_server import (
             results_to_db_data, aggregate_judgment, append_cv_edge_to_judgment,
             InferenceLogCapture, WITHIN_SPEC_LOGS_URL,
-            _stored_machine_judgment_for_record, _white_frame_image_result,
+            _stored_machine_judgment_for_record, _original_machine_judgment_for_record,
+            _white_frame_image_result,
             _serialize_aoi_machine_coords, parse_request, resolve_front_judgment,
             _white_frame_aoi_kwargs,
             build_qjpg_response, AOI_PASSTHROUGH_CODES, apply_side_white_inference,
@@ -14322,6 +14333,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+            machine_judgment = _original_machine_judgment_for_record(detail)
             aoi_report_override = None
             client_request_text = str(detail.get("client_request_text") or "").strip()
             if client_request_text:
@@ -14336,7 +14348,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     aoi_report_override = inferencer._parse_aoi_report_txt(
                         panel_dir,
                         glass_id=detail.get("glass_id", ""),
-                        machine_judgment=stored_request.get("machine_judgment", detail.get("machine_judgment", "")),
+                        machine_judgment=machine_judgment,
                         report_payload=report_payload,
                     )
 
@@ -14420,7 +14432,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     machine_no=detail.get("machine_no"),
                     glass_id=detail.get("glass_id"),
                     aoi_report_override=aoi_report_override,
-                    machine_judgment=detail.get("machine_judgment"),
+                    machine_judgment=machine_judgment,
                 )
 
             processing_seconds = _time.time() - start_time
@@ -14468,7 +14480,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     "glass_id": detail.get("glass_id", ""),
                     "model_id": model_id,
                     "machine_no": detail.get("machine_no", ""),
-                    "machine_judgment": detail.get("machine_judgment", ""),
+                    "machine_judgment": machine_judgment,
                 }
                 if server_inst is not None and hasattr(server_inst, "_evaluate_within_spec_for_inference"):
                     within_spec_info = server_inst._evaluate_within_spec_for_inference(
@@ -14588,7 +14600,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             total_images = len(image_results_data)
             ng_images = sum(1 for d in image_results_data if d.get("is_ng"))
             stored_machine_judgment = _stored_machine_judgment_for_record(
-                detail.get("machine_judgment", ""),
+                machine_judgment,
                 results,
                 aoi_report,
             )

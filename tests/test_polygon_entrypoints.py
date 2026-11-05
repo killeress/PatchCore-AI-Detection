@@ -31,7 +31,8 @@ def raw_boundary(request, monkeypatch):
     return profile, calls, polygon
 
 
-def test_image_abnormal_precheck_uses_station_raw_boundary(tmp_path, raw_boundary):
+@pytest.mark.parametrize("dog", [False, True])
+def test_image_abnormal_precheck_uses_station_raw_boundary(tmp_path, raw_boundary, dog):
     from capi_server import check_image_abnormal_precheck
 
     profile, calls, _ = raw_boundary
@@ -43,6 +44,8 @@ def test_image_abnormal_precheck_uses_station_raw_boundary(tmp_path, raw_boundar
         image_abnormal_detection_enabled=True,
         image_abnormal_w0f00000_mean_lower=70,
         image_abnormal_w0f00000_mean_upper=90,
+        image_preprocess_pipeline=[{"method": "dog"}] if dog else [],
+        preprocess_after_tiling=dog,
     )
     assert check_image_abnormal_precheck(
         tmp_path, cfg, [path], report_prefixes=["W0F00000"],
@@ -90,7 +93,8 @@ def test_ng_crop_detects_raw_boundary_before_model_filter(tmp_path, raw_boundary
 
 
 @pytest.mark.parametrize("grid", [False, True])
-def test_coord_debug_uses_raw_boundary(tmp_path, monkeypatch, raw_boundary, grid):
+@pytest.mark.parametrize("dog", [False, True])
+def test_coord_debug_uses_raw_boundary(tmp_path, monkeypatch, raw_boundary, grid, dog):
     from capi_web import CAPIWebHandler
 
     profile, calls, _ = raw_boundary
@@ -101,7 +105,10 @@ def test_coord_debug_uses_raw_boundary(tmp_path, monkeypatch, raw_boundary, grid
     cfg = CAPIConfig(
         machine_id="GN140HCAAD70S", enable_panel_polygon=True,
         model_mapping={"G0F00000": {"inner": "inner.pt", "edge": "edge.pt"}},
-        image_preprocess_pipeline=[{"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}}],
+        image_preprocess_pipeline=[{"method": "dog"}] if dog else [
+            {"method": "gaussian", "params": {"kernel_size": 3, "sigma": 1.0}},
+        ],
+        preprocess_after_tiling=dog,
     )
     cfg.grid_canonicalization_enabled = grid
     cfg.grid_product_resolution = (1920, 1080)

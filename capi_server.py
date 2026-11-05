@@ -839,6 +839,8 @@ def _image_abnormal_preprocess_config(
         otsu_offset=int(getattr(config, "otsu_offset", 5)),
         enable_panel_polygon=bool(getattr(config, "enable_panel_polygon", True)),
         image_preprocess_pipeline=getattr(config, "image_preprocess_pipeline", []) or [],
+        image_preprocess_pipelines=getattr(config, "image_preprocess_pipelines", {}) or {},
+        preprocess_after_tiling=getattr(config, "preprocess_after_tiling", False),
         generate_grid_tiles=False,
         product_resolution=product_resolution,
         rotate_180=rotate_180,
@@ -1939,30 +1941,35 @@ def _normalize_machine_judgment_for_bomb_only_panel(
     machine_judgment: str,
     results: List[ImageResult],
 ) -> str:
-    """Store AOI NG as OK only for pure bomb-only panels."""
+    """Convert machine NG only when every reported point is a confirmed bomb."""
     if str(machine_judgment or "").upper() != "NG" or not results:
         return machine_judgment
 
     has_bomb = False
-    has_excluded_zone = False
     for result in results:
         if _is_white_frame_ng(result):
             return machine_judgment
-        if _white_frame_payload(result).get("bomb_excluded_count"):
+        frame = _white_frame_payload(result)
+        if any(not tile.get("is_bomb") for tile in frame.get("aoi_tiles", [])):
+            return machine_judgment
+        if frame.get("bomb_excluded_count"):
             has_bomb = True
+        # AOI points remain machine NG even if AI filters them as dust, scratch,
+        # or below threshold. Include tracking tiles absent from anomaly_tiles.
+        if any(
+            getattr(tile, "is_aoi_coord_tile", False)
+            and (
+                not getattr(tile, "is_bomb", False)
+                or getattr(tile, "is_in_exclude_zone", False)
+            )
+            for tile in getattr(result, "tiles", []) or []
+        ):
+            return machine_judgment
         for tile, _score, _anomaly_map in getattr(result, "anomaly_tiles", []) or []:
-            if getattr(tile, "is_aoi_coord_below_threshold", False):
-                continue
             if getattr(tile, "is_in_exclude_zone", False):
-                has_excluded_zone = True
-                continue
+                return machine_judgment
             if getattr(tile, "is_bomb", False):
                 has_bomb = True
-                continue
-            if (
-                getattr(tile, "is_suspected_dust_or_scratch", False)
-                or getattr(tile, "scratch_filtered", False)
-            ):
                 continue
             return machine_judgment
 
@@ -1970,14 +1977,9 @@ def _normalize_machine_judgment_for_bomb_only_panel(
             if getattr(edge, "is_bomb", False):
                 has_bomb = True
                 continue
-            if (
-                getattr(edge, "is_suspected_dust_or_scratch", False)
-                or getattr(edge, "is_cv_ok", False)
-            ):
-                continue
             return machine_judgment
 
-    return "OK" if has_bomb and not has_excluded_zone else machine_judgment
+    return "OK" if has_bomb else machine_judgment
 
 
 def _aoi_report_has_defects(aoi_report: Optional[Dict]) -> bool:
@@ -2041,7 +2043,7 @@ def _stored_machine_judgment_for_record(
     if str(machine_judgment or "").upper() == "OK":
         return machine_judgment
     if str(machine_judgment or "").upper() != "HY" and _aoi_report_has_defects(aoi_report):
-        # AOI 報點先採 NG，仍須依整片推論結果套用全炸彈轉 OK。
+        # AOI 報點先採 NG；非炸彈報點即使被 AI 放行，仍須保留機檢 NG。
         machine_judgment = "NG"
         # CSJBL 不進入一般切片判定，不能因其他切片全是炸彈而一併排除。
         if any(
@@ -2051,6 +2053,26 @@ def _stored_machine_judgment_for_record(
         ):
             return machine_judgment
     return _normalize_machine_judgment_for_bomb_only_panel(machine_judgment, results)
+
+
+def _original_machine_judgment_for_record(record: Dict[str, Any]) -> str:
+    """Recover the Client judgment before any bomb-only DB conversion."""
+    request_text = str(record.get("client_request_text") or "").strip()
+    if request_text.startswith("AOI@"):
+        # Read only the fixed header: full protocol parsing logs bomb details
+        # and is unnecessary when rendering a table of historical records.
+        fields = request_text[4:].split(";", 5)
+        if len(fields) == 6 and fields[4] in {"OK", "NG", "HY"}:
+            return fields[4]
+
+    # Older records may retain only the legacy AOI response, whose machine
+    # judgment field also preserves the original Client value.
+    response_text = str(record.get("client_response_text") or "").strip()
+    if response_text.startswith("AOI@"):
+        fields = response_text.splitlines()[0][4:].split(";")
+        if len(fields) == 5 and fields[3] in {"OK", "NG", "HY"}:
+            return fields[3]
+    return str(record.get("machine_judgment") or "")
 
 
 # ── 主伺服器 ──────────────────────────────────────────

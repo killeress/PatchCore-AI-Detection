@@ -4,6 +4,7 @@ import pytest
 
 from capi_server import (
     _normalize_machine_judgment_for_bomb_only_panel,
+    _original_machine_judgment_for_record,
     _stored_machine_judgment_for_record,
 )
 
@@ -130,3 +131,92 @@ def test_record_machine_judgment_preserves_hy_with_bombs_and_report():
     aoi_report = {"WINDOWS_BG": [SimpleNamespace(defect_code="CDK2")]}
 
     assert _stored_machine_judgment_for_record("HY", [result], aoi_report) == "HY"
+
+
+@pytest.mark.parametrize("non_bomb", [
+    pytest.param(_tile(is_dust=True), id="dust"),
+    pytest.param(_tile(is_scratch_filtered=True), id="scratch"),
+    pytest.param(_tile(is_below_threshold=True), id="below-threshold"),
+    pytest.param(_tile(is_excluded=True), id="excluded"),
+])
+@pytest.mark.parametrize("other_lighting", [False, True])
+def test_non_bomb_point_keeps_machine_ng_even_when_ai_filters_it(non_bomb, other_lighting):
+    bomb = _tile(is_bomb=True)
+    results = ([_result(tiles=[bomb]), _result(tiles=[non_bomb])] if other_lighting
+               else [_result(tiles=[bomb, non_bomb])])
+    report = {"W0F00000": [SimpleNamespace(defect_code="CM00")],
+              "B0F00000": [SimpleNamespace(defect_code="CDB6")]}
+
+    assert _stored_machine_judgment_for_record("NG", results, report) == "NG"
+
+
+@pytest.mark.parametrize("edge", [_edge(is_dust=True), _edge(is_cv_ok=True)])
+def test_non_bomb_edge_keeps_machine_ng_even_when_ai_filters_it(edge):
+    result = _result(tiles=[_tile(is_bomb=True)], edges=[edge])
+
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "NG"
+
+
+def test_non_bomb_aoi_tracking_tile_cannot_disappear_from_machine_judgment():
+    result = _result(tiles=[_tile(is_bomb=True)])
+    tracking = _tile(is_below_threshold=True)
+    tracking.is_aoi_coord_tile = True
+    result.tiles = [tracking]
+
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == "NG"
+
+
+@pytest.mark.parametrize("is_bomb,expected", [(False, "NG"), (True, "OK")])
+def test_white_frame_aoi_ok_does_not_replace_confirmation_of_bomb(is_bomb, expected):
+    result = SimpleNamespace(white_frame_result={
+        "status": "OK", "bomb_excluded_count": 1,
+        "aoi_tiles": [{"status": "OK", "is_bomb": is_bomb}],
+    })
+
+    assert _normalize_machine_judgment_for_bomb_only_panel("NG", [result]) == expected
+
+
+def test_logged_six_w0f_bombs_and_b8f_dust_keep_machine_ng_but_ai_ok():
+    from capi_config import CAPIConfig
+    from capi_inference import AOIReportDefect
+    from capi_server import aggregate_judgment, build_qjpg_response
+    from test_qjpg_report_response import _image_result, _tile as real_tile
+
+    white = _image_result("YQ71CU218C23W0F00000081649.tif", mark_text="KA")
+    black = _image_result("YQ71CU218C23B8F00000081654.tif", mark_text="")
+    points = [(9, 210), (1904, 311), (10, 606), (1904, 607), (597, 1184), (602, 1184)]
+    for index, (x, y) in enumerate(points):
+        tile = real_tile(index, x, y)
+        tile.is_bomb = tile.is_aoi_coord_tile = True
+        tile.aoi_product_x, tile.aoi_product_y = x, y
+        white.anomaly_tiles.append((tile, 0.9, None))
+    dust = real_tile(0, 1789, 619)
+    dust.is_aoi_coord_tile = dust.is_suspected_dust_or_scratch = True
+    black.anomaly_tiles = [(dust, 1.0, None)]
+    report = {
+        "W0F00000": [AOIReportDefect("CM00", x, y, "W0F00000") for x, y in points],
+        "B0F00000": [AOIReportDefect("CDB6", 1789, 619, "B0F00000")],
+    }
+
+    results = [white, black]
+    ai_judgment, _ = aggregate_judgment(results)
+    assert ai_judgment == "OK"
+    assert _stored_machine_judgment_for_record("NG", results, report) == "NG"
+    response = build_qjpg_response({"glass_id": "YQ71CU218C23"}, ai_judgment, results, CAPIConfig())
+    assert response.startswith("@QJPG-YQ71CU218C23;OK;KA;NG")
+    assert response.count("PCDK3") == 6
+
+
+@pytest.mark.parametrize("record,expected", [
+    ({"machine_judgment": "OK", "client_request_text":
+      "AOI@G1;M1;AAPI2612;1920,1200;NG;/images"}, "NG"),
+    ({"machine_judgment": "OK", "client_response_text":
+      "AOI@G1;M1;AAPI2612;NG;OK\r\n@QJPG-G1;OK;KA;NG,"}, "NG"),
+    ({"machine_judgment": "OK", "client_request_text":
+      "AOI@G1;M1;AAPI2612;1920,1200;OK;/images",
+      "client_response_text": "AOI@G1;M1;AAPI2612;NG;OK"}, "OK"),
+    ({"machine_judgment": "NG", "client_request_text": "malformed"}, "NG"),
+    ({"machine_judgment": "OK", "client_response_text": "@QJPG-G1;NG;00;OK,"}, "OK"),
+])
+def test_original_machine_judgment_uses_preserved_client_protocol(record, expected):
+    assert _original_machine_judgment_for_record(record) == expected

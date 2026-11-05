@@ -110,7 +110,12 @@
                 <td>{{ r.glass_id }}</td>
                 <td>{{ r.model_id }}</td>
                 <td>{{ r.machine_no }}</td>
-                <td><span class="badge {{ r.machine_judgment | mj_badge }}">{{ r.machine_judgment }}</span></td>
+                <td><span class="badge {{ r.machine_judgment | mj_badge }}">{{ r.machine_judgment }}</span>
+                    {% set machine_note = r | machine_judgment_note %}
+                    {% if machine_note %}
+                    <div data-machine-judgment-note style="margin-top:4px;font-size:12px;color:#B45309;">{{ machine_note | e }}</div>
+                    {% endif %}
+                </td>
                 <td>
                     {% if r.ai_judgment == 'OK-s' %}
                     <a href="/record/{{ r.id }}#side-white-result" title="側拍轉 OK：查看 AOI 各點放行原因與距離容錯">

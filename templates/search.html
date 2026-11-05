@@ -247,7 +247,12 @@
                 <td><a href="/record/{{ r.id }}">{{ r.id }}</a></td>
                 <td>{{ r.glass_id }}</td>
                 <td>{{ r.machine_no }}</td>
-                {% if cross_filter %}<td><span class="badge {% if r.machine_judgment and r.machine_judgment != 'OK' %}badge-ng{% else %}badge-ok{% endif %}">{{ r.machine_judgment or 'OK' }}</span></td>{% endif %}
+                {% if cross_filter %}<td><span class="badge {% if r.machine_judgment and r.machine_judgment != 'OK' %}badge-ng{% else %}badge-ok{% endif %}">{{ r.machine_judgment or 'OK' }}</span>
+                    {% set machine_note = r | machine_judgment_note %}
+                    {% if machine_note %}
+                    <div data-machine-judgment-note style="margin-top:4px;font-size:12px;color:#B45309;">{{ machine_note | e }}</div>
+                    {% endif %}
+                </td>{% endif %}
                 <td>{% if r.ai_judgment == 'OK-s' %}<a href="/record/{{ r.id }}#side-white-result" title="側拍轉 OK：查看各 AOI 點放行原因與距離容錯"><span class="badge badge-ok-s">OK-s</span></a>{% else %}<span class="badge {{ r.ai_judgment | ai_badge }}">{{ r.ai_judgment | ai_simple }}</span>{% endif %}</td>
                 <td>{{ r.processing_seconds | round(1) }}s</td>
                 <td>{{ r.created_at }}</td>

@@ -107,6 +107,32 @@ def test_context_load_uses_white_polygon_and_same_orientation(worker, tmp_path, 
     np.testing.assert_array_equal(loaded, cv2.rotate(omit, cv2.ROTATE_180) if rotate else omit)
 
 
+@pytest.mark.parametrize("separate", [False, True])
+def test_dog_model_omit_context_preserves_raw_reference_and_exposure(worker, tmp_path, separate):
+    paths, _, omit = _write_panel(tmp_path)
+    baseline = worker._load_omit_context(
+        tmp_path, image_files=paths, product_resolution=(1920, 1080),
+    )
+    recipe = [{"method": "dog", "params": {"gain": 27, "offset": 117}}]
+    worker.config = CAPIConfig.from_dict({
+        **worker.config.to_dict(),
+        "image_preprocess_pipeline": [] if separate else recipe,
+        "image_preprocess_pipelines": {"inner": recipe, "edge": []} if separate else {},
+        "preprocess_after_tiling": True,
+    })
+    with patch("capi_image_preprocess_lab.apply_preprocess_pipeline") as apply_pipeline:
+        actual = worker._load_omit_context(
+            tmp_path, image_files=paths, product_resolution=(1920, 1080),
+        )
+    apply_pipeline.assert_not_called()
+    assert actual[1] is baseline[1] is False
+    assert actual[2] == baseline[2]
+    assert "Scope:product_polygon" in actual[2]
+    assert "Reference:W0F00000_134458.tif" in actual[2]
+    np.testing.assert_array_equal(actual[0], baseline[0])
+    np.testing.assert_array_equal(actual[3], omit)
+
+
 def test_white_reference_selected_before_other_lighting_and_latest_retake(worker, tmp_path):
     paths, white, omit = _write_panel(tmp_path)
     old = tmp_path / "W0F00000_130000.tif"
@@ -142,8 +168,11 @@ def test_unusable_reference_fallback_is_visible(worker, tmp_path, failure):
 
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
-def test_production_paths_pass_reference_files_to_exposure_check(worker, tmp_path, monkeypatch, version):
+@pytest.mark.parametrize("dog", [False, True])
+def test_production_paths_pass_reference_files_to_exposure_check(worker, tmp_path, monkeypatch, version, dog):
     _write_panel(tmp_path)
+    worker.config.image_preprocess_pipeline = [{"method": "dog"}] if dog else []
+    worker.config.preprocess_after_tiling = dog
     worker.config.aoi_coord_inspection_enabled = False
     worker.config.exclusion_zones = []
     worker.config.should_skip_file = lambda *args: True

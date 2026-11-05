@@ -4633,6 +4633,8 @@ class CAPIInferencer:
             otsu_offset=self.config.otsu_offset,
             enable_panel_polygon=self.config.enable_panel_polygon,
             image_preprocess_pipeline=getattr(self.config, "image_preprocess_pipeline", []),
+            image_preprocess_pipelines=getattr(self.config, "image_preprocess_pipelines", {}),
+            preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
             generate_grid_tiles=False,
             recover_failed_raw_boundary=bool(

@@ -14,10 +14,12 @@ _AAPI_REQUEST = (
 
 @pytest.mark.parametrize("use_gpu_lock", [False, True])
 @pytest.mark.parametrize(
-    ("machine_judgment", "client_request_text", "expected_report_payload"),
+    ("machine_judgment", "client_request_text", "expected_report_payload", "filtered_non_bomb"),
     [
-        ("OK", "", None),
-        ("NG", _AAPI_REQUEST, _AAPI_PAYLOAD),
+        ("OK", "", None, False),
+        ("NG", _AAPI_REQUEST, _AAPI_PAYLOAD, False),
+        ("OK", _AAPI_REQUEST, _AAPI_PAYLOAD, False),
+        ("OK", _AAPI_REQUEST, _AAPI_PAYLOAD, True),
     ],
 )
 def test_rerun_passes_stored_request_context_to_inference(
@@ -27,6 +29,7 @@ def test_rerun_passes_stored_request_context_to_inference(
     machine_judgment,
     client_request_text,
     expected_report_payload,
+    filtered_non_bomb,
 ):
     import capi_server
     from capi_config import CAPIConfig
@@ -39,6 +42,10 @@ def test_rerun_passes_stored_request_context_to_inference(
     bomb.is_bomb = bomb.is_aoi_coord_tile = True
     bomb.aoi_product_x, bomb.aoi_product_y = 1481, 346
     result.anomaly_tiles = [(bomb, .818, None)]
+    if filtered_non_bomb:
+        dust = _tile(2, 100, 200)
+        dust.is_aoi_coord_tile = dust.is_suspected_dust_or_scratch = True
+        result.anomaly_tiles.append((dust, .9, None))
     inferencer = MagicMock()
     inferencer.config = CAPIConfig()
     inferencer.config.side_white_detection_enabled = False
@@ -105,7 +112,8 @@ def test_rerun_passes_stored_request_context_to_inference(
         },
     )
 
-    assert inferencer.process_panel.call_args.kwargs["machine_judgment"] == machine_judgment
+    original_judgment = "NG" if client_request_text else machine_judgment
+    assert inferencer.process_panel.call_args.kwargs["machine_judgment"] == original_judgment
     if expected_report_payload is not None:
         inferencer._parse_aoi_report_txt.assert_called_once_with(
             tmp_path,
@@ -122,7 +130,8 @@ def test_rerun_passes_stored_request_context_to_inference(
     assert CAPIWebHandler._rerun_tasks[7]["status"] == "done"
     db.update_record_for_rerun.assert_called_once()
     saved = db.update_record_for_rerun.call_args.kwargs
-    assert saved["machine_judgment"] == "OK"
+    assert saved["machine_judgment"] == ("NG" if filtered_non_bomb else "OK")
+    assert saved["ai_judgment"] == "OK"
     assert "client_response_text" not in saved
     assert "[RERUN_RESPONSE_PREVIEW]" in saved["inference_log"]
     assert "未傳送 Client" in saved["inference_log"]
