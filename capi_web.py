@@ -81,6 +81,7 @@ CENTRAL_ACCOUNT_LOCATION_PARAM = "central_account_location"
 CENTRAL_ACCOUNT_DEFAULT_IPS = {
     "MOD1": "10.172.25.105",
     "MOD2": "10.174.37.81",
+    "CARUX": "10.170.25.65",
 }
 CENTRAL_ACCOUNT_LOCATION_DESCRIPTION = (
     "中央帳號中心位置；依廠區帶入預設 IP，IP 可依現場需求修改"
@@ -174,7 +175,7 @@ def _normalize_central_account_location(value: Any) -> Dict[str, str]:
 
     facility = str(value.get("facility") or "").strip().upper()
     if facility not in CENTRAL_ACCOUNT_DEFAULT_IPS:
-        raise ValueError("中心廠區只能選擇 MOD1 或 MOD2")
+        raise ValueError("中心廠區只能選擇 MOD1、MOD2 或 CARUX")
 
     ip_text = str(value.get("ip") or "").strip()
     try:
