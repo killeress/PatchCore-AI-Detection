@@ -956,6 +956,8 @@ def build_feature_zoom_panels(
                 tag = "DUST-HALO"
             elif is_dust and dust_reason == "zone_dominated":
                 tag = "DUST-ZONE"
+            elif is_dust and dust_reason == "small_core_residual":
+                tag = "DUST-VERIFIED"
             tag_color = (0, 200, 255) if is_dust else (0, 0, 255)
             outline_color = (255, 255, 0) if is_dust else (0, 0, 255)
             zoom_scale = tile_size / max(1, crop_sz)
@@ -1020,6 +1022,10 @@ def build_feature_zoom_panels(
                 final_color = (0, 200, 255) if "DUST" in final_label else (0, 100, 255)
                 cv2.putText(panel, f"Final: {final_label}", (10, text_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, final_color, 1)
+                text_y += 25
+            if feat.get("residual_confirmed"):
+                cv2.putText(panel, "Verified: raw core + whole ROI", (10, text_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
 
             legend_y = tile_size - 15
             cv2.putText(panel, "BG: W=Heat Y=Dust G=Heat&Dust", (10, legend_y - 18),

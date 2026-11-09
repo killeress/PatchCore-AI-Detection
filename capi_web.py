@@ -310,6 +310,7 @@ def _coord_debug_two_stage_payload(
     dust_reason_labels = {
         "feature_overlap": "特徵本身與灰塵重疊",
         "association_halo": "緊鄰灰塵核心的亮／暗暈圈",
+        "small_core_residual": "小灰塵核心經原圖確認，整個 ROI 兩次模型複檢皆通過",
         "zone_dominated": "所在熱區主要由灰塵／氣泡構成",
         "clean": "未被灰塵覆蓋",
     }

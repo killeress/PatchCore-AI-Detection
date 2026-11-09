@@ -372,7 +372,8 @@ def test_v1_black_dust_uses_shared_filter_and_final_panel_judgment(tmp_path, kee
     worker.check_dust_two_stage.assert_not_called()
 
 
-def test_black_bomb_matching_uses_surviving_pixels_without_reintroducing_label():
+@pytest.mark.parametrize("aoi_xy, expected_match", [((8, 5), True), ((3, 4), False)])
+def test_black_bomb_matching_uses_surviving_pixels_without_reintroducing_label(aoi_xy, expected_match):
     amap = np.zeros((16, 16), np.float32)
     amap[4:8, 3:7] = 1
     amap[4:6, 7:9] = 1  # one connected component before dust filtering
@@ -381,8 +382,8 @@ def test_black_bomb_matching_uses_surviving_pixels_without_reintroducing_label()
     worker, result, tile = make_case(amap, dust)
     tile.is_aoi_coord_tile = True
     tile.aoi_roi_mask = np.full((16, 16), 255, np.uint8)
-    tile.aoi_image_x = tile.aoi_product_x = 3
-    tile.aoi_image_y = tile.aoi_product_y = 4
+    tile.aoi_image_x = tile.aoi_product_x = aoi_xy[0]
+    tile.aoi_image_y = tile.aoi_product_y = aoi_xy[1]
     result.raw_bounds = (0, 0, 16, 16)
     worker.config.bomb_match_tolerance = 1
 
@@ -398,11 +399,16 @@ def test_black_bomb_matching_uses_surviving_pixels_without_reintroducing_label()
         (16, 16), {},
     )
 
-    assert matched == (True, "B01")
+    # The 11/5 coordinate guard requires the original AOI point to match too;
+    # a neighboring bomb cannot override an unrelated original coordinate.
+    assert matched == ((True, "B01") if expected_match else (False, ""))
     assert tile.bomb_remaining_points == []
     np.testing.assert_array_equal(
         tile.bomb_region_diagnostics["heatmap_binary"] > 0, filtered_map > 0,
     )
+    if not expected_match:
+        assert tile.bomb_region_diagnostics["aoi_coordinate_retained"] is True
+        assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == aoi_xy
 
 
 def _fragmented_faint_defect(shape=(64, 64), origin=(10, 10), rows=4, cols=6, step=6):

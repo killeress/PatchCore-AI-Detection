@@ -3671,6 +3671,8 @@ class CAPIInferencer:
         image: np.ndarray,
         extension_override: Optional[int] = None,
         product_resolution: Optional[Tuple[int, int]] = None,
+        *,
+        preserve_small_cores: bool = False,
     ) -> tuple:
         """
         進階灰塵/刮痕偵測 — 使用 CLAHE 增強 + Otsu 自適應閾值 + 形態學 + 面積篩選
@@ -3686,6 +3688,7 @@ class CAPIInferencer:
             image: OMIT 圖片裁切區域 (BGR 或灰階)
             extension_override: 覆寫 Config 中的 dust_extension 設定
             product_resolution: 保留呼叫相容性；像素紋理平滑不再依產品解析度限制
+            preserve_small_cores: AOI 整區複檢保留已通過外擴面積篩選的小顆粒核心
             
         Returns:
             (is_dust, dust_mask, bright_ratio, detail_text)
@@ -3702,6 +3705,16 @@ class CAPIInferencer:
         area_min = self.config.dust_area_min
         area_max = self.config.dust_area_max
         extension = self.config.dust_extension if extension_override is None else extension_override
+        small_core_count = 0
+
+        def small_core_ids(binary, labels, maximum):
+            if not preserve_small_cores or extension_override != 0 or self.config.dust_extension <= 0:
+                return set()
+            from capi_dust_review import recover_small_particle_cores
+            recovered = recover_small_particle_cores(
+                binary, area_min, maximum, self.config.dust_extension,
+            )
+            return set(int(value) for value in np.unique(labels[recovered > 0]) if value > 0)
         
         # Step 1: 轉灰階
         if len(image.shape) == 3:
@@ -3818,6 +3831,7 @@ class CAPIInferencer:
         
         # Step 5: Connected Components 面積篩選
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+        recovered_ids = small_core_ids(binary, labels, area_max)
         dust_mask = np.zeros_like(binary)
         particle_count = 0
         scratch_count = 0
@@ -3829,12 +3843,13 @@ class CAPIInferencer:
             h = stats[i, cv2.CC_STAT_HEIGHT]
             
             # 面積篩選
-            if area < area_min or area > area_max:
+            if (area < area_min and i not in recovered_ids) or area > area_max:
                 continue
             
             # 寫入灰塵遮罩
             dust_mask[labels == i] = 255
             total_dust_area += area
+            small_core_count += int(i in recovered_ids)
             
             # 形態分類：寬高比 > 5 → 刮傷，否則 → 顆粒
             aspect = max(w, h) / (min(w, h) + 1e-5)
@@ -3853,8 +3868,9 @@ class CAPIInferencer:
             if extension > 0:
                 bright_binary = cv2.dilate(bright_binary, dilate_kernel, iterations=1)
             b_num, b_labels, b_stats, _ = cv2.connectedComponentsWithStats(bright_binary)
+            recovered_bright_ids = small_core_ids(bright_binary, b_labels, None)
             for i in range(1, b_num):
-                if b_stats[i, cv2.CC_STAT_AREA] < area_min:
+                if b_stats[i, cv2.CC_STAT_AREA] < area_min and i not in recovered_bright_ids:
                     continue
                 component = b_labels == i
                 added_area = int(np.count_nonzero(component & (dust_mask == 0)))
@@ -3863,6 +3879,7 @@ class CAPIInferencer:
                 dust_mask[component] = 255
                 total_dust_area += added_area
                 bright_rescue_count += 1
+                small_core_count += int(i in recovered_bright_ids)
         
         # Step 6: 暗色顆粒偵測 — 偵測暗色 MARK 等暗色圖案
         # 某些機種 MARK 樣式偏黑，在 OMIT 圖上呈現暗色顆粒
@@ -3897,18 +3914,20 @@ class CAPIInferencer:
                         
                         # Connected Components 面積篩選
                         d_num_labels, d_labels, d_stats, _ = cv2.connectedComponentsWithStats(dark_binary)
+                        recovered_dark_ids = small_core_ids(dark_binary, d_labels, area_max)
                         
                         for i in range(1, d_num_labels):
                             d_area = d_stats[i, cv2.CC_STAT_AREA]
                             d_w = d_stats[i, cv2.CC_STAT_WIDTH]
                             d_h = d_stats[i, cv2.CC_STAT_HEIGHT]
                             
-                            if d_area < area_min or d_area > area_max:
+                            if (d_area < area_min and i not in recovered_dark_ids) or d_area > area_max:
                                 continue
                             
                             # 合併至灰塵遮罩
                             dust_mask[d_labels == i] = 255
                             dark_total_area += d_area
+                            small_core_count += int(i in recovered_dark_ids)
                             
                             d_aspect = max(d_w, d_h) / (min(d_w, d_h) + 1e-5)
                             if d_aspect > 5:
@@ -3953,6 +3972,8 @@ class CAPIInferencer:
             detail_text += f" PxGridBlur:{pixel_grid_blur_kernel}"
         if bright_rescue_count:
             detail_text += f" BrightRescue:{bright_rescue_count}"
+        if small_core_count:
+            detail_text += f" SmallCore:{small_core_count}"
         
         return is_dust, dust_mask, bright_ratio, detail_text
 
@@ -4473,17 +4494,20 @@ class CAPIInferencer:
         context_shift: int = 96,
         focus_x: Optional[int] = None,
         product_resolution: Optional[Tuple[int, int]] = None,
+        preserve_small_cores: bool = False,
     ) -> tuple:
         """Supplement boundary-clipped bubbles from horizontally shifted tiles."""
+        core_kwargs = {"preserve_small_cores": True} if preserve_small_cores else {}
         if product_resolution is None:
             is_dust, dust_mask, bright_ratio, detail_text = \
-                self.check_dust_or_scratch_feature(omit_crop, extension_override)
+                self.check_dust_or_scratch_feature(omit_crop, extension_override, **core_kwargs)
         else:
             is_dust, dust_mask, bright_ratio, detail_text = \
                 self.check_dust_or_scratch_feature(
                     omit_crop,
                     extension_override,
                     product_resolution=product_resolution,
+                    **core_kwargs,
                 )
         if not getattr(self.config, 'dust_detect_bubbles_enabled', False):
             return is_dust, dust_mask, bright_ratio, detail_text
@@ -5139,6 +5163,7 @@ class CAPIInferencer:
             omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
             extension_override=0, focus_x=focus_x,
             product_resolution=product_resolution,
+            preserve_small_cores=True,
         )
         reviewed, features = review_low_coverage_regions(
             tile.original_image, precise_mask, anomaly_map, region_labels,
@@ -5167,14 +5192,30 @@ class CAPIInferencer:
         CV evidence proposes an edit, never an OK verdict. Missing evidence or
         an unsuccessful/abnormal residual prediction leaves the tile NG.
         """
-        if (tile.aoi_roi_mask is None or not tile.is_suspected_dust_or_scratch
-                or tile.is_bright_spot_detection or tile.is_half_spot_detection
+        if (tile.aoi_roi_mask is None or tile.is_bright_spot_detection or tile.is_half_spot_detection
                 or getattr(tile, "is_aoi_coord_below_threshold", False)):
             return ""
-        from capi_dust_review import confirmed_roi_surface_mask, surface_removed_images
+        from capi_dust_review import confirmed_roi_surface_mask, small_particle_core_mask, surface_removed_images
+
+        # A small native core can explain a dark spot while preprocessing leaves
+        # opposite-sign halo features marked REAL. Let the existing full-ROI
+        # model review decide, only after the raw image confirms the same core.
+        small_hint = small_particle_core_mask(
+            getattr(tile, "dust_two_stage_dust_mask", None), self.config.dust_area_min,
+        )
+        small_core_review = bool(
+            not tile.is_suspected_dust_or_scratch
+            and tile.dust_two_stage_features
+            and tile.dust_region_details
+            and all(region["is_dust"] for region in tile.dust_region_details)
+            and small_hint is not None and np.any(small_hint)
+        )
+        if not tile.is_suspected_dust_or_scratch and not small_core_review:
+            return ""
 
         snapshot = dict(scope="whole_roi", status="unconfirmed", checks=[],
-                        threshold=tile.score_threshold, method="surface_removed_model_v1")
+                        threshold=tile.score_threshold, method="surface_removed_model_v1",
+                        small_core_review=small_core_review)
         tile.decision_context = dict(tile.decision_context or {}, aoi_dust_residual=snapshot)
         tile.is_suspected_dust_or_scratch = False
 
@@ -5183,6 +5224,13 @@ class CAPIInferencer:
             tile.is_suspected_dust_or_scratch = status == "clear"
             if status != "clear":
                 tile.scratch_filtered = False
+            elif small_core_review:
+                for feature in tile.dust_two_stage_features:
+                    feature["pre_residual_is_dust"] = bool(feature["is_dust"])
+                    feature["pre_residual_dust_reason"] = feature.get("dust_reason", "")
+                    feature["is_dust"] = True
+                    feature["dust_reason"] = "small_core_residual"
+                    feature["residual_confirmed"] = True
             if peak_image is None and status != "clear" and snapshot.get("remaining_image_xy"):
                 peak_image = tuple(snapshot["remaining_image_xy"])
             if peak_image is not None:
@@ -5214,9 +5262,15 @@ class CAPIInferencer:
             _, precise, _, _ = self._check_dust_or_scratch_feature_with_context(
                 omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
                 extension_override=0, focus_x=focus_x, product_resolution=product_resolution,
+                preserve_small_cores=True,
             )
+            small_cores = small_particle_core_mask(precise, self.config.dust_area_min)
+            snapshot["small_core_pixels"] = int(np.count_nonzero(small_cores)) if small_cores is not None else 0
+            if small_core_review and not snapshot["small_core_pixels"]:
+                return finish("unconfirmed", "missing_small_core")
             edit_mask, features, reason = confirmed_roi_surface_mask(
                 tile.original_image, precise, tile.aoi_roi_mask, support_map,
+                small_core_mask=small_cores,
             )
             tile.dust_low_coverage_features = features
             if edit_mask is None:
@@ -8533,6 +8587,8 @@ class CAPIInferencer:
                                                 extension_override=0,
                                                 focus_x=context_focus_x,
                                                 product_resolution=product_resolution,
+                                                **({"preserve_small_cores": True}
+                                                   if tile.aoi_roi_mask is not None else {}),
                                             )
                                     ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                         self.check_dust_two_stage(
@@ -9636,6 +9692,8 @@ class CAPIInferencer:
                                         extension_override=0,
                                         focus_x=context_focus_x,
                                         product_resolution=product_resolution,
+                                        **({"preserve_small_cores": True}
+                                           if tile.aoi_roi_mask is not None else {}),
                                     )
                             ts_has_real, ts_peak_yx, ts_features, ts_detail = \
                                 self.check_dust_two_stage(

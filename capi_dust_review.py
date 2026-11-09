@@ -8,6 +8,45 @@ import cv2
 import numpy as np
 
 
+def recover_small_particle_cores(binary, area_min, area_max, extension):
+    """Keep native pixels of small particles accepted by the expanded detector.
+
+    Expansion establishes eligibility only. Never return its surrounding pixels
+    as precise surface evidence, or lower the threshold for unrelated specks.
+    """
+    source = (np.asarray(binary) > 0).astype(np.uint8)
+    recovered = np.zeros_like(source)
+    if extension <= 0 or area_min <= 3 or not np.any(source):
+        return recovered
+    _, native_labels, native_stats, _ = cv2.connectedComponentsWithStats(source, connectivity=8)
+    small = (native_stats[:, cv2.CC_STAT_AREA] >= 3) & (native_stats[:, cv2.CC_STAT_AREA] < area_min)
+    small[0] = False
+    if not np.any(small):
+        return recovered
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (extension * 2 + 1, extension * 2 + 1))
+    expanded = cv2.dilate(source, kernel)
+    _, expanded_labels, expanded_stats, _ = cv2.connectedComponentsWithStats(expanded, connectivity=8)
+    accepted = expanded_stats[:, cv2.CC_STAT_AREA] >= area_min
+    if area_max is not None:
+        accepted &= expanded_stats[:, cv2.CC_STAT_AREA] <= area_max
+    accepted[0] = False
+    recovered[small[native_labels] & accepted[expanded_labels]] = 255
+    return recovered
+
+
+def small_particle_core_mask(precise_dust_mask, area_min):
+    """Identify accepted, unexpanded components below the candidate area limit."""
+    if precise_dust_mask is None:
+        return None
+    source = np.asarray(precise_dust_mask)
+    if source.ndim != 2 or not source.size:
+        return None
+    _, labels, stats, _ = cv2.connectedComponentsWithStats((source > 0).astype(np.uint8), connectivity=8)
+    small = (stats[:, cv2.CC_STAT_AREA] >= 3) & (stats[:, cv2.CC_STAT_AREA] < area_min)
+    small[0] = False
+    return small[labels].astype(np.uint8) * 255
+
+
 def build_aoi_roi_core_mask(anomaly_map, heatmap_binary, roi_mask, top_percent):
     """Select the ROI Top% core shared by formal dust judgment and rendering."""
     percent = float(top_percent)
@@ -37,6 +76,7 @@ def review_low_coverage_regions(
     coverage_threshold,
     evaluation_mask=None,
     support_anomaly_map=None,
+    small_core_mask=None,
 ):
     """Return copied region decisions and feature evidence in image coordinates.
 
@@ -84,6 +124,16 @@ def review_low_coverage_regions(
         allowed = cv2.resize(evaluation.astype(np.uint8), (width, height),
                              interpolation=cv2.INTER_NEAREST) > 0
     dust = dust > 0
+    small_labels = small_stats = small_boundary = None
+    if small_core_mask is not None:
+        small = np.asarray(small_core_mask)
+        if small.shape != dust.shape or np.any((small > 0) & ~dust):
+            return regions, []
+        _, small_labels, small_stats, _ = cv2.connectedComponentsWithStats(
+            (small > 0).astype(np.uint8), connectivity=8)
+        # Allow only a one-pixel segmentation boundary for matching. These
+        # pixels are never added to the surface edit/inpainting mask.
+        small_boundary = cv2.dilate((small > 0).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
     support = None
     allowed_map = None
     if support_anomaly_map is not None:
@@ -176,6 +226,18 @@ def review_low_coverage_regions(
                 significant_residual = np.isin(residual_labels, residual_ids)
                 has_residual = bool(np.any(significant_residual))
                 matched = not clipped and ratio >= 0.80 and not has_residual
+                small_boundary_match = False
+                if not matched and not clipped and small_labels is not None and ratio >= 0.5:
+                    core_ids = np.unique(small_labels[component])
+                    core_ids = core_ids[core_ids > 0]
+                    if len(core_ids) == 1:
+                        core_id = int(core_ids[0])
+                        core_overlap = int(np.count_nonzero(component & (small_labels == core_id)))
+                        small_boundary_match = bool(
+                            core_overlap >= 0.80 * small_stats[core_id, cv2.CC_STAT_AREA]
+                            and not np.any(component & ~dust & ~small_boundary)
+                        )
+                        matched = small_boundary_match
                 ys, xs = np.where(component)
                 contours, _ = cv2.findContours(component.astype(np.uint8),
                                                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -190,7 +252,8 @@ def review_low_coverage_regions(
                     "dust_overlap": overlap,
                     "dust_ratio": ratio,
                     "is_dust": matched,
-                    "dust_reason": "precise_overlap" if matched else "clipped" if clipped else "unmatched",
+                    "dust_reason": ("small_core_boundary" if small_boundary_match else
+                                    "precise_overlap" if matched else "clipped" if clipped else "unmatched"),
                     "unmatched_area": int(np.count_nonzero(significant_residual)),
                     "contrast": local_contrast,
                     "contrast_threshold": contrast_threshold,
@@ -223,7 +286,7 @@ def review_low_coverage_regions(
     return regions, features
 
 
-def confirmed_roi_surface_mask(original_image, precise_dust_mask, roi_mask, support_map):
+def confirmed_roi_surface_mask(original_image, precise_dust_mask, roi_mask, support_map, *, small_core_mask=None):
     """Confirm surface components using all active ROI pixels, without Top%/half-peak cuts.
 
     The result is only an edit mask for residual inference. It is never itself
@@ -257,6 +320,7 @@ def confirmed_roi_surface_mask(original_image, precise_dust_mask, roi_mask, supp
     reviewed, features = review_low_coverage_regions(
         image, dust, support, labels, [region], coverage_threshold=1.01,
         evaluation_mask=roi,
+        small_core_mask=small_core_mask,
     )
     if not reviewed[0].get("is_dust"):
         return None, features, reviewed[0].get("feature_review_reason", "missing_evidence")
