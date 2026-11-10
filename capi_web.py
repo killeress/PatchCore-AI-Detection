@@ -591,6 +591,56 @@ def _read_disk_status(path: Any) -> Dict[str, Any]:
     }
 
 
+class _RAMCapacityMonitor:
+    """Persist RAM capacity independently of dashboard requests, every 30 seconds."""
+
+    def __init__(self, db):
+        self.db = db
+        self.hostname = _get_host_identity()
+        self._lock = threading.Lock()
+        self._next_check = 0.0
+        self._payload = {"available": False, "active": False, "latest_change": None}
+
+    def poll(self) -> Dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next_check:
+                return dict(self._payload)
+            self._next_check = now + _HARDWARE_STATUS_CACHE_SECONDS
+            if not callable(getattr(self.db, "record_ram_capacity_observation", None)):
+                return dict(self._payload)
+            try:
+                memory = _read_memory_status()
+                total = _metric_float(memory.get("total_gb"))
+                available = total is not None and 0 < total < float("inf")
+                if available:
+                    state = self.db.record_ram_capacity_observation(self.hostname, total)
+                else:
+                    # 查詢失敗不當成 0 GB，也不覆寫前一次有效讀值或異動提醒。
+                    state = self.db.get_ram_capacity_status(self.hostname)
+                self._payload = {
+                    **state, "available": available,
+                    "active": state.get("latest_change") is not None,
+                }
+            except Exception:
+                self._payload = {**self._payload, "available": False}
+                logger.exception("Failed to monitor RAM capacity for %s", self.hostname)
+            return dict(self._payload)
+
+
+class _RAMMonitoredHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+    def __init__(self, server_address, handler_class, db):
+        super().__init__(server_address, handler_class)
+        self.ram_capacity_monitor = _RAMCapacityMonitor(db)
+        self.ram_capacity_monitor.poll()
+
+    def service_actions(self):
+        super().service_actions()
+        self.ram_capacity_monitor.poll()
+
+
 def _collect_hardware_status(disk_path: Any) -> Dict[str, Any]:
     return {
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -5628,6 +5678,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             else:
                 disk_path = getattr(self, "heatmap_base_dir", None) or Path.cwd()
             status["hardware"] = _get_cached_hardware_status(disk_path)
+            monitor = getattr(getattr(self, "server", None), "ram_capacity_monitor", None)
+            status["ram_capacity_alert"] = monitor.poll() if monitor else {
+                "available": False, "active": False, "latest_change": None,
+            }
             requested, devices = _inference_devices(
                 self._capi_server_instance, getattr(self, "inferencer", None)
             )
@@ -21558,10 +21612,7 @@ def create_web_server(
     CAPIWebHandler._reconcile_train_new_artifacts(db)
     CAPIWebHandler.init_jinja()
 
-    class ReusableThreadingHTTPServer(ThreadingHTTPServer):
-        allow_reuse_address = True
-
-    server = ReusableThreadingHTTPServer((host, port), CAPIWebHandler)
+    server = _RAMMonitoredHTTPServer((host, port), CAPIWebHandler, db)
     return server
 
 

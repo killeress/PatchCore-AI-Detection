@@ -1205,6 +1205,8 @@
         const update = asObject(raw.update);
         const lineActivity = asObject(raw.line_activity);
         const modelSwitchAlert = asObject(raw.model_switch_alert);
+        const ramCapacityAlert = asObject(raw.ram_capacity_alert);
+        const ramCapacityChange = asObject(ramCapacityAlert.latest_change);
         const training = asObject(raw.training);
 
         return {
@@ -1275,6 +1277,14 @@
                 severity: gpuHealth.severity === "critical" ? "critical" : "warning",
                 title: textValue(gpuHealth.title),
                 message: textValue(gpuHealth.message)
+            },
+            ramCapacity: {
+                active: ramCapacityAlert.active === true,
+                hostname: textValue(ramCapacityChange.hostname || ramCapacityAlert.hostname),
+                previousTotalGb: optionalNumber(ramCapacityChange.previous_total_gb),
+                newTotalGb: optionalNumber(ramCapacityChange.new_total_gb),
+                lastSeenAt: textValue(ramCapacityChange.last_seen_at),
+                detectedAt: textValue(ramCapacityChange.detected_at)
             },
             lineActivity: {
                 available: raw.line_activity !== undefined && raw.line_activity !== null,
@@ -1888,6 +1898,21 @@
                 severity: data.gpuHealth.severity,
                 summary: data.gpuHealth.title,
                 message: `${data.gpuHealth.title}：${data.gpuHealth.message}`
+            });
+        }
+
+        const capacity = data.ramCapacity;
+        if (capacity && capacity.active && capacity.previousTotalGb > 0 &&
+            capacity.newTotalGb > 0 && capacity.previousTotalGb !== capacity.newTotalGb) {
+            const decreased = capacity.newTotalGb < capacity.previousTotalGb;
+            const direction = decreased ? "減少" : "增加";
+            const change = `${formatDecimal(capacity.previousTotalGb, 2)} → ${formatDecimal(capacity.newTotalGb, 2)} GB`;
+            alerts.push({
+                severity: decreased ? "critical" : "warning",
+                summary: `RAM 總容量${direction} ${change}`,
+                message: `${capacity.hostname ? capacity.hostname + '：' : ''}RAM 總容量${direction} ${change}；` +
+                    `上次確認 ${capacity.lastSeenAt || '—'}；首次偵測 ${capacity.detectedAt || '—'}。` +
+                    "請依此時間區間調閱監視器並確認記憶體配置；時間為系統偵測時間。"
             });
         }
 

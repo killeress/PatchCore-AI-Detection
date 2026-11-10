@@ -91,3 +91,56 @@ test('overview anomaly cell renders the alert and removes it after recovery', ()
     assert.equal(badges.children.length, 0);
     assert.equal(row.dataset.health, 'normal');
 });
+
+function ramChange(previous, current) {
+    return {active: true, available: true, latest_change: {
+        hostname: 'CAPI02', previous_total_gb: previous, new_total_gb: current,
+        last_seen_at: '2026-11-10T10:00:30+08:00', detected_at: '2026-11-10T10:01:00+08:00',
+    }};
+}
+
+test('RAM decrease appears in anomaly summary and includes the investigation interval', () => {
+    const app = loadDashboard();
+    const data = app.normalizeStatus({ram_capacity_alert: ramChange(62.3, 30.3),
+        hardware: {memory: {used_gb: 6.1, total_gb: 30.3, used_percent: 20}}});
+    const alerts = app.getLineAlerts(data);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].severity, 'critical');
+    assert.match(alerts[0].summary, /RAM 總容量減少 62\.30 → 30\.30 GB/);
+    assert.match(alerts[0].message, /CAPI02.*上次確認 2026-11-10T10:00:30\+08:00.*首次偵測 2026-11-10T10:01:00\+08:00/);
+    const state = {processZone: 'capi', status: 'halted', line: {line: 'CAPI02', factory: 'MOD2'},
+        overviewRow: app.node(), data};
+    app.renderOverviewRow(state);
+    assert.equal(state.overviewRow.dataset.health, 'critical');
+    const badge = state.overviewRow.querySelector('[data-field="overview-alerts"]').children[0];
+    assert.match(badge.textContent, /RAM 總容量減少/);
+    assert.match(badge.title, /調閱監視器/);
+    app.lineStates.set('line', state);
+    app.renderAlerts();
+    assert.match(app.elements['alert-list'].children[0].textContent, /MOD2 \/ CAPI02.*首次偵測/);
+});
+
+test('RAM increases remain visible, including restoration and unavailable current readings', () => {
+    const app = loadDashboard();
+    const change = ramChange(30.3, 62.3);
+    change.available = false;
+    const alerts = app.getLineAlerts(app.normalizeStatus({ram_capacity_alert: change}));
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].severity, 'warning');
+    assert.match(alerts[0].summary, /RAM 總容量增加/);
+});
+
+test('old payloads, first samples and invalid capacities do not invent RAM change alerts', () => {
+    const app = loadDashboard();
+    for (const raw of [{}, {ram_capacity_alert: {active: false}},
+        {ram_capacity_alert: ramChange(null, 30.3)},
+        {ram_capacity_alert: ramChange(62.3, 0)},
+        {ram_capacity_alert: ramChange(62.3, 62.3)},
+        {hardware: {memory: {used_gb: 6.1, total_gb: 62.3, used_percent: 10}}}]) {
+        assert.equal(app.getLineAlerts(app.normalizeStatus(raw)).length, 0);
+    }
+    const state = {status: 'offline', line: {line: 'CAPI02'}, overviewRow: app.node(),
+        data: app.normalizeStatus({ram_capacity_alert: ramChange(62.3, 30.3)})};
+    app.renderOverviewRow(state);
+    assert.equal(state.overviewRow.querySelector('[data-field="overview-alerts"]').children.length, 0);
+});

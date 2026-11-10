@@ -18,6 +18,7 @@ import os
 import logging
 import hashlib
 import hmac
+import math
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any, Tuple
@@ -859,6 +860,25 @@ class CAPIDatabase:
                     ON model_switch_events(machine_no, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_model_switch_events_time
                     ON model_switch_events(switched_at DESC);
+
+                -- RAM 容量基準與異動稽核，獨立於推論資料保留政策。
+                CREATE TABLE IF NOT EXISTS ram_capacity_state (
+                    hostname TEXT PRIMARY KEY,
+                    baseline_total_gb REAL NOT NULL CHECK (baseline_total_gb > 0),
+                    current_total_gb REAL NOT NULL CHECK (current_total_gb > 0),
+                    first_observed_at TEXT NOT NULL,
+                    last_observed_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ram_capacity_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hostname TEXT NOT NULL,
+                    previous_total_gb REAL NOT NULL,
+                    new_total_gb REAL NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    detected_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_ram_capacity_events_host
+                    ON ram_capacity_events(hostname, id DESC);
             """)
             
             # Migration for adding missing columns to existing database
@@ -2698,6 +2718,92 @@ class CAPIDatabase:
             result["shift_name"] = shift_name
             result["time_range"] = time_range_label
             return result
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _ram_capacity_status(conn: sqlite3.Connection, hostname: str) -> Dict[str, Any]:
+        state = conn.execute(
+            "SELECT * FROM ram_capacity_state WHERE hostname = ?", (hostname,)
+        ).fetchone()
+        event = conn.execute(
+            """SELECT * FROM ram_capacity_events
+               WHERE hostname = ? ORDER BY id DESC LIMIT 1""", (hostname,)
+        ).fetchone()
+        return {
+            **(dict(state) if state else {"hostname": hostname}),
+            "latest_change": dict(event) if event else None,
+        }
+
+    def get_ram_capacity_status(self, hostname: str) -> Dict[str, Any]:
+        """讀取持久化基準與最新異動；提醒不會因重啟或經過時間而消失。"""
+        conn = self._get_conn()
+        try:
+            return self._ram_capacity_status(conn, hostname)
+        finally:
+            conn.close()
+
+    def record_ram_capacity_observation(
+        self, hostname: str, total_gb: float, observed_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """首次建立基準，之後僅於總容量異動時寫入事件，並保存偵測區間。"""
+        if isinstance(total_gb, bool):
+            raise ValueError("RAM 總容量必須為正數")
+        try:
+            total = round(float(total_gb), 2)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("RAM 總容量必須為正數") from exc
+        if not math.isfinite(total) or total <= 0:
+            raise ValueError("RAM 總容量必須為正數")
+        checked_at = observed_at or datetime.now().astimezone().isoformat(timespec="seconds")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                # 同一 DB 的不同實例／程序也必須先鎖定再讀取，避免重複事件。
+                conn.execute("BEGIN IMMEDIATE")
+                state = conn.execute(
+                    "SELECT * FROM ram_capacity_state WHERE hostname = ?", (hostname,)
+                ).fetchone()
+                if state is None:
+                    conn.execute(
+                        """INSERT INTO ram_capacity_state
+                           (hostname, baseline_total_gb, current_total_gb,
+                            first_observed_at, last_observed_at) VALUES (?, ?, ?, ?, ?)""",
+                        (hostname, total, total, checked_at, checked_at),
+                    )
+                else:
+                    if total != state["current_total_gb"]:
+                        conn.execute(
+                            """INSERT INTO ram_capacity_events
+                               (hostname, previous_total_gb, new_total_gb,
+                                last_seen_at, detected_at) VALUES (?, ?, ?, ?, ?)""",
+                            (hostname, state["current_total_gb"], total,
+                             state["last_observed_at"], checked_at),
+                        )
+                    conn.execute(
+                        """UPDATE ram_capacity_state
+                           SET current_total_gb = ?, last_observed_at = ? WHERE hostname = ?""",
+                        (total, checked_at, hostname),
+                    )
+                result = self._ram_capacity_status(conn, hostname)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def get_ram_capacity_history(self, hostname: str, limit: int = 100) -> List[Dict]:
+        """依新增順序回傳容量異動歷史（最新在前）。"""
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                """SELECT * FROM ram_capacity_events
+                   WHERE hostname = ? ORDER BY id DESC LIMIT ?""",
+                (hostname, max(1, min(int(limit), 1000))),
+            ).fetchall()
+            return [dict(row) for row in rows]
         finally:
             conn.close()
 
