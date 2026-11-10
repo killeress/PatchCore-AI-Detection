@@ -322,6 +322,7 @@ def _detect_panel_relative_mark(
                     gray[y1:y2, x1:x2], x1, y1, width, height, roi_name, profile_index,
                     low_contrast=low_contrast,
                     refine_low_contrast=True,
+                    connected_gap_ratio=0.03,
                 )
                 if candidate is not None:
                     candidate["search_pass"] = search_pass
@@ -506,6 +507,7 @@ def _detect_roi(
     *,
     low_contrast: bool = False,
     refine_low_contrast: bool = False,
+    connected_gap_ratio: float = 0.05,
 ) -> Optional[Dict[str, Any]]:
     filtered = (
         _low_contrast_stroke_mask(roi, min(full_width, full_height))
@@ -514,6 +516,7 @@ def _detect_roi(
     )
     groups = _find_mark_groups(
         filtered, offset_x, offset_y, full_width, full_height, allow_connected_chars=True,
+        connected_gap_ratio=connected_gap_ratio,
     )
     if not groups:
         return None
@@ -527,6 +530,7 @@ def _detect_roi(
                 full_width,
                 full_height,
                 allow_connected_chars=True,
+                connected_gap_ratio=connected_gap_ratio,
             )
         )
 
@@ -539,12 +543,22 @@ def _detect_roi(
             refined = _refine_mark_groups(
                 roi, [group], offset_x, offset_y, full_width, full_height,
                 allow_connected_chars=True,
+                connected_gap_ratio=connected_gap_ratio,
             )
             refined_groups.extend(refined or [group])
         groups = refined_groups
 
     best: Optional[Dict[str, Any]] = None
+    roi_right, roi_bottom = offset_x + roi.shape[1], offset_y + roi.shape[0]
     for group in groups:
+        # A partial glyph at an internal search edge can still resemble two
+        # valid characters. Keep retrying in the actual panel's corner ROI.
+        box = group["bbox"]
+        if ((offset_x > 0 and box["x"] <= offset_x + 1)
+                or (offset_y > 0 and box["y"] <= offset_y + 1)
+                or (roi_right < full_width and box["x"] + box["width"] >= roi_right - 1)
+                or (roi_bottom < full_height and box["y"] + box["height"] >= roi_bottom - 1)):
+            continue
         for recognized in _recognize_group_variants(group["mask"], profile_index):
             char_scores = [ch["score"] for ch in recognized["chars"]]
             mean_score = float(np.mean(char_scores)) if char_scores else 0.0
@@ -940,6 +954,7 @@ def _refine_mark_groups(
     full_height: int,
     *,
     allow_connected_chars: bool = False,
+    connected_gap_ratio: float = 0.05,
 ) -> List[Dict[str, Any]]:
     """Re-threshold coarse candidates locally so the full dot matrix is retained."""
     refined: List[Dict[str, Any]] = []
@@ -968,6 +983,7 @@ def _refine_mark_groups(
             full_width,
             full_height,
             allow_connected_chars=allow_connected_chars,
+            connected_gap_ratio=connected_gap_ratio,
         )
         refined.extend(
             candidate
@@ -1218,8 +1234,9 @@ def _recognize_char(
         a_score = next((score for score, char in scores if char == "A"), None)
         if (best_char == "0" and a_score is not None
                 and best_score - a_score <= 0.04
-                and densities[0, 2] > 0.5 and densities[2, 2] < 0.2
-                and densities[4, 1:4].min() > 0.5
+                and densities[0, 2] > max(0.35, float(densities[0, [0, 4]].max()) + 0.15)
+                and densities[1:3, 2].max() < 0.2
+                and densities[4, 1:4].min() > 0.25
                 and densities[5:7, 2].max() < 0.15):
             scores = [
                 (best_score + 0.001, char) if char == "A" else (score, char)

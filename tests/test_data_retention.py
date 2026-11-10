@@ -212,8 +212,8 @@ def test_zero_heatmap_days_keeps_legacy_no_image_cleanup_semantics():
     assert normalize_retention_policy(policy)["heatmap_retain_days"] == 0
 
 
-def run_scheduler(monkeypatch, db, on_wait, *, max_waits=8):
-    clock = SimpleNamespace(now=datetime(2026, 10, 26, 1, 59))
+def run_scheduler(monkeypatch, db, on_wait, *, max_waits=8, start=None, on_cleanup=None):
+    clock = SimpleNamespace(now=start or datetime(2026, 10, 26, 1, 59))
     calls = []
     waits = []
     server = SimpleNamespace(
@@ -232,7 +232,9 @@ def run_scheduler(monkeypatch, db, on_wait, *, max_waits=8):
             assert 0 < seconds <= 60
             waits.append(seconds)
             clock.now += timedelta(seconds=seconds)
-            on_wait(len(waits), clock.now)
+            delayed_wakeup = on_wait(len(waits), clock.now)
+            if delayed_wakeup is not None:
+                clock.now = delayed_wakeup
             if len(waits) >= max_waits:
                 server._running = False
             return not server._running
@@ -246,6 +248,8 @@ def run_scheduler(monkeypatch, db, on_wait, *, max_waits=8):
 
     def cleanup(*args, **kwargs):
         calls.append((clock.now, args))
+        if on_cleanup is not None:
+            on_cleanup(len(calls), clock)
         return defaultdict(int)
 
     server._cleanup_stop_event = Event()
@@ -256,7 +260,7 @@ def run_scheduler(monkeypatch, db, on_wait, *, max_waits=8):
     return calls
 
 
-def test_scheduler_uses_latest_retention_at_execution_and_runs_once_per_day(tmp_path, monkeypatch):
+def test_scheduler_uses_latest_retention_and_runs_again_after_time_change(tmp_path, monkeypatch):
     db = make_db(tmp_path)
 
     def change(wait, now):
@@ -266,7 +270,118 @@ def test_scheduler_uses_latest_retention_at_execution_and_runs_once_per_day(tmp_
             db.update_config_param(RETENTION_PARAM, {**saved_policy(db), "schedule_time": "02:03"}, "update time")
 
     calls = run_scheduler(monkeypatch, db, change)
-    assert calls == [(datetime(2026, 10, 26, 2, 0), (240, 180, 15, False, 90))]
+    assert calls == [
+        (datetime(2026, 10, 26, 2, 0), (240, 180, 15, False, 90)),
+        (datetime(2026, 10, 26, 2, 3), (240, 180, 15, False, 90)),
+    ]
+
+
+@pytest.mark.parametrize("second_change", [None, {"heatmap_retain_days": 2}])
+def test_unchanged_schedule_runs_once_despite_retention_edits(tmp_path, monkeypatch, second_change):
+    db = make_db(tmp_path)
+
+    def change(wait, now):
+        if wait == 2 and second_change:
+            db.update_config_param(RETENTION_PARAM, {**saved_policy(db), **second_change}, "days only")
+
+    calls = run_scheduler(monkeypatch, db, change)
+    assert [time for time, _ in calls] == [datetime(2026, 10, 26, 2, 0)]
+
+
+@pytest.mark.parametrize("seconds", [0, 10])
+def test_new_time_is_caught_up_when_first_poll_is_at_or_after_deadline(tmp_path, monkeypatch, seconds):
+    db = make_db(tmp_path)
+
+    def change(wait, now):
+        if wait == 1:
+            # The setting changes during the scheduler's 60-second wait.
+            db.update_config_param(
+                RETENTION_PARAM,
+                {**saved_policy(db), "schedule_time": "11:19", "heatmap_retain_days": 2},
+                "run in one minute",
+            )
+
+    calls = run_scheduler(
+        monkeypatch, db, change, start=datetime(2026, 11, 10, 11, 18, seconds),
+    )
+    assert calls == [(datetime(2026, 11, 10, 11, 19, seconds), (180, 180, 15, False, 2))]
+
+
+def test_new_time_catches_up_after_today_already_ran(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+
+    def change(wait, now):
+        if wait == 2:
+            db.update_config_param(RETENTION_PARAM, {**saved_policy(db), "schedule_time": "02:01"}, "run again")
+
+    calls = run_scheduler(monkeypatch, db, change)
+    assert [time for time, _ in calls] == [
+        datetime(2026, 10, 26, 2, 0), datetime(2026, 10, 26, 2, 1),
+    ]
+
+
+def test_new_time_can_retry_after_cleanup_failure(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+
+    def change(wait, now):
+        if wait == 2:
+            db.update_config_param(RETENTION_PARAM, {**saved_policy(db), "schedule_time": "02:03"}, "retry")
+
+    def fail_first_cleanup(count, clock):
+        if count == 1:
+            raise OSError("database or disk is full")
+
+    calls = run_scheduler(monkeypatch, db, change, on_cleanup=fail_first_cleanup)
+    assert [time for time, _ in calls] == [
+        datetime(2026, 10, 26, 2, 0), datetime(2026, 10, 26, 2, 3),
+    ]
+
+
+def test_failed_cleanup_does_not_repeat_without_time_change(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+
+    def fail_cleanup(count, clock):
+        raise OSError("database or disk is full")
+
+    calls = run_scheduler(monkeypatch, db, lambda count, now: None, on_cleanup=fail_cleanup)
+    assert [time for time, _ in calls] == [datetime(2026, 10, 26, 2, 0)]
+
+
+def test_polling_catch_up_across_midnight_preserves_next_daily_run(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+
+    def change(wait, now):
+        if wait == 1:
+            db.update_config_param(RETENTION_PARAM, {**saved_policy(db), "schedule_time": "23:59"}, "late poll")
+            return datetime(2026, 11, 11, 0, 0, 10)
+        if wait == 2:
+            return datetime(2026, 11, 11, 23, 59)
+
+    calls = run_scheduler(
+        monkeypatch, db, change, start=datetime(2026, 11, 10, 23, 58, 30), max_waits=4,
+    )
+    assert [time for time, _ in calls] == [
+        datetime(2026, 11, 11, 0, 0, 10), datetime(2026, 11, 11, 23, 59),
+    ]
+
+
+def test_time_already_past_before_polling_interval_waits_until_tomorrow(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+
+    def change(wait, now):
+        if wait == 1:
+            db.update_config_param(RETENTION_PARAM, {**saved_policy(db), "schedule_time": "11:19"}, "past time")
+
+    assert run_scheduler(
+        monkeypatch, db, change, start=datetime(2026, 11, 10, 11, 20),
+    ) == []
+
+
+def test_scheduler_start_after_daily_time_does_not_backfill(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+    assert run_scheduler(
+        monkeypatch, db, lambda count, now: None, start=datetime(2026, 10, 26, 3),
+    ) == []
 
 
 def test_scheduler_can_enable_then_reschedule_without_restart(tmp_path, monkeypatch):

@@ -19,12 +19,14 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 _PATTERNS = {
     "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
     "B": ("01110", "11111", "11010", "11110", "11011", "11111", "11110"),
     "C": ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
     "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
     "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
     "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
     "J": ("01111", "01111", "00110", "00110", "00110", "11110", "11100"),
+    "K": ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
     "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
     "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
     "P": ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
@@ -119,6 +121,61 @@ def test_panel_relative_mark_search_for_small_displaced_panel(rotated, monkeypat
     expected_x, expected_y = (1004, 1008) if rotated else (1997, 997)
     assert result["bbox"]["x"] == pytest.approx(expected_x, abs=3)
     assert result["bbox"]["y"] == pytest.approx(expected_y, abs=3)
+
+
+@pytest.mark.parametrize("x,y", [(2200, 820), (2216, 900), (2200, 900)])
+def test_panel_relative_search_recovers_mark_clipped_by_camera_roi(x, y):
+    image = np.zeros((2048, 3072), dtype=np.uint8)
+    image[700:1900, 400:2300] = 160
+    # Cross the fixed top-right ROI's left edge, bottom edge, or both.
+    _draw_mark(image, "KA", x, y, cell=6, gap=3, radius=3, pixel_value=130)
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "KA"
+    assert result["search_pass"].startswith("panel_relative")
+    assert result["orientation"] == "normal"
+    assert result["bbox"] == {"x": x - 3, "y": y - 3, "width": 64, "height": 43}
+
+
+@pytest.mark.parametrize(
+    "roi_bounds",
+    [(800, 100, 950, 260), (780, 100, 873, 260), (780, 170, 950, 260), (780, 100, 950, 195)],
+)
+def test_clipped_glyphs_cannot_return_a_valid_but_wrong_pair(roi_bounds):
+    image = np.full((768, 1024), 160, dtype=np.uint8)
+    _draw_mark(image, "EJ", 790, 150)
+    x1, y1, x2, y2 = roi_bounds
+
+    # These partial glyphs previously passed recognition as ZJ, EZ, LU or FJ.
+    result = mark_detector._detect_roi(
+        image[y1:y2, x1:x2], x1, y1, 1024, 768, "top_right", {},
+    )
+
+    assert result is None
+
+
+@pytest.mark.parametrize("misaligned", [False, True])
+def test_panel_relative_narrow_gap_still_requires_aligned_glyphs(misaligned):
+    mask = np.zeros((110, 100), dtype=np.uint8)
+    cv2.line(mask, (10, 10), (10, 70), 255, 5)
+    cv2.polylines(mask, [np.int32([[34, 10], [10, 40], [34, 70]])], False, 255, 5)
+    shift = 20 if misaligned else 0
+    cv2.polylines(
+        mask, [np.int32([[44, 70 + shift], [56, 10 + shift], [68, 70 + shift]])],
+        False, 255, 5,
+    )
+    cv2.line(mask, (49, 45 + shift), (63, 45 + shift), 255, 5)
+
+    assert mark_detector._find_mark_groups(
+        mask, 0, 0, 3072, 2048, allow_connected_chars=True,
+    ) == []
+    groups = mark_detector._find_mark_groups(
+        mask, 0, 0, 3072, 2048, allow_connected_chars=True, connected_gap_ratio=0.03,
+    )
+
+    assert len(groups) == (0 if misaligned else 1)
 
 
 @pytest.mark.parametrize("has_panel", [False, True])
@@ -338,6 +395,29 @@ def test_recognize_char_uses_five_structure_when_j_and_five_are_tied(monkeypatch
     assert result["char"] == "5"
 
 
+@pytest.mark.parametrize("closed_bottom,expected", [(False, "A"), (True, "0")])
+def test_faint_low_crossbar_a_stays_distinct_from_closed_zero(monkeypatch, closed_bottom, expected):
+    # Captured from 091451 after recovering the complete, faint glyph.
+    densities = np.array([
+        [0.000, 0.209, 0.453, 0.530, 0.077],
+        [0.201, 0.415, 0.009, 0.329, 0.615],
+        [0.397, 0.312, 0.000, 0.282, 0.782],
+        [0.299, 0.265, 0.043, 0.308, 0.684],
+        [0.504, 0.368, 0.329, 0.615, 0.410],
+        [0.585, 0.402, 0.000, 0.585, 0.547],
+        [0.521, 0.380, 0.000, 0.590, 0.534],
+    ], dtype=np.float32)
+    if closed_bottom:
+        densities[6, 2] = 0.55
+    monkeypatch.setattr(mark_detector, "_grid_densities", lambda _mask: densities)
+
+    result = mark_detector._recognize_char(
+        np.zeros((1, 1), dtype=np.uint8), mark_detector._SECOND_CHARS, char_index=1,
+    )
+
+    assert result["char"] == expected
+
+
 def test_remove_tiny_components_drops_isolated_noise():
     mask = np.zeros((40, 80), dtype=np.uint8)
     cv2.rectangle(mask, (5, 5), (14, 14), 255, -1)
@@ -437,6 +517,53 @@ def test_real_narrow_mark_crop_avoids_opposite_corner_texture(rotated):
         cv2.IMREAD_UNCHANGED,
     )
     expected_crop = cv2.rotate(source[3427:3532, 884:1094], cv2.ROTATE_180)
+    np.testing.assert_array_equal(crop, expected_crop)
+
+
+@pytest.mark.parametrize("rotated", [False, True])
+@pytest.mark.parametrize(
+    "filename,expected_bbox",
+    [
+        ("W0F00000_091451.tif", (4701, 1919, 139, 126)),
+        ("W0F00000_093519.tif", (4633, 1909, 142, 141)),
+    ],
+)
+def test_capi04_clipped_faint_ka_and_raw_paddle_crop(filename, expected_bbox, rotated):
+    import base64
+    from capi_mark_shadow import build_mark_shadow_payload
+
+    path = _ROOT / filename
+    if not path.exists():
+        pytest.skip(f"real mark fixture not available: {path}")
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    assert image is not None
+    x, y, width, height = expected_bbox
+    if rotated:
+        x, y = image.shape[1] - x - width, image.shape[0] - y - height
+        image = cv2.rotate(image, cv2.ROTATE_180)
+
+    result = detect_panel_mark(image)
+
+    assert result["found"] is True
+    assert result["text"] == "KA"
+    assert result["search_pass"] == "panel_relative_low_contrast"
+    assert result["roi"] == ("bottom_left" if rotated else "top_right")
+    assert result["orientation"] == ("rot180" if rotated else "normal")
+    for key, expected in zip(("x", "y", "width", "height"), (x, y, width, height)):
+        assert result["bbox"][key] == pytest.approx(expected, abs=3)
+
+    payload = build_mark_shadow_payload(image, result, path)
+    box = payload["crop_bbox"]
+    cx, cy, cw, ch = (box[key] for key in ("x", "y", "width", "height"))
+    assert cx <= x - 4 and cy <= y - 4
+    assert cx + cw >= x + width + 4 and cy + ch >= y + height + 4
+    crop = cv2.imdecode(
+        np.frombuffer(base64.b64decode(payload["image_png_base64"]), dtype=np.uint8),
+        cv2.IMREAD_UNCHANGED,
+    )
+    expected_crop = image[cy:cy + ch, cx:cx + cw]
+    if rotated:
+        expected_crop = cv2.rotate(expected_crop, cv2.ROTATE_180)
     np.testing.assert_array_equal(crop, expected_crop)
 
 

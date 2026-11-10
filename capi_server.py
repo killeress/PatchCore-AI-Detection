@@ -3079,11 +3079,13 @@ class CAPIServer:
             scheduled_time = None
             last_run_date = None
             previous_policy = None
+            last_policy_check = None
             while self._running:
                 if self._cleanup_stop_event.is_set():
                     return
                 # Re-read the persisted policy even while disabled. Settings
                 # changes take effect without restarting or loading ML models.
+                policy_check_time = datetime.now()
                 try:
                     db = getattr(self, "db", None)
                     saved = db.get_config_param(RETENTION_PARAM) if db else None
@@ -3095,17 +3097,32 @@ class CAPIServer:
                     next_run = None
                     self._cleanup_stop_event.wait(60)
                     continue
+                previous_check = last_policy_check
+                last_policy_check = policy_check_time
+                was_enabled = previous_policy is not None and previous_policy["enabled"]
                 if policy != previous_policy:
                     logger.info("[Cleanup] Active policy: %s", policy)
                     previous_policy = policy
+                schedule_changed = scheduled_time != policy["schedule_time"]
+                if schedule_changed:
+                    scheduled_time = policy["schedule_time"]
+                    # A new daily time is a new schedule, even after today's
+                    # earlier cleanup completed or failed.
+                    last_run_date = None
+                    next_run = None
                 if not policy["enabled"]:
                     next_run = None
                     self._cleanup_stop_event.wait(60)
                     continue
                 now = datetime.now()
-                if next_run is None or scheduled_time != policy["schedule_time"]:
-                    scheduled_time = policy["schedule_time"]
-                    next_run = next_cleanup_time(now, scheduled_time, last_run_date)
+                if next_run is None:
+                    reference_time = now
+                    if schedule_changed or not was_enabled:
+                        # Anchor changes before this polling interval so a
+                        # newly due time is caught up instead of skipped.
+                        reference_time = previous_check or policy_check_time
+                    next_run = next_cleanup_time(reference_time, scheduled_time, last_run_date)
+                    logger.info("[Cleanup] Next scheduled cleanup: %s", next_run)
                 sleep_secs = (next_run - now).total_seconds()
                 if sleep_secs > 0:
                     self._cleanup_stop_event.wait(min(sleep_secs, 60))
@@ -3142,7 +3159,9 @@ class CAPIServer:
                 except Exception as e:
                     logger.error(f"[Cleanup] Failed: {e}")
                 finally:
-                    last_run_date = now.date()
+                    # A late run across midnight consumes its scheduled date,
+                    # leaving the following day's normal occurrence available.
+                    last_run_date = next_run.date()
                     next_run = None
 
         self._cleanup_thread = threading.Thread(
