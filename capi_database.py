@@ -875,7 +875,9 @@ class CAPIDatabase:
                     previous_total_gb REAL NOT NULL,
                     new_total_gb REAL NOT NULL,
                     last_seen_at TEXT NOT NULL,
-                    detected_at TEXT NOT NULL
+                    detected_at TEXT NOT NULL,
+                    acknowledged_by TEXT NOT NULL DEFAULT '',
+                    acknowledged_at TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_ram_capacity_events_host
                     ON ram_capacity_events(hostname, id DESC);
@@ -887,6 +889,9 @@ class CAPIDatabase:
                 columns = [row[1] for row in cursor.fetchall()]
                 if column not in columns:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {def_type}")
+
+            add_column_if_not_exists("ram_capacity_events", "acknowledged_by", "TEXT NOT NULL DEFAULT ''")
+            add_column_if_not_exists("ram_capacity_events", "acknowledged_at", "TEXT NOT NULL DEFAULT ''")
 
             # 舊規則保留為前綴比對；唯一鍵改為名稱 + 比對方式。
             rule_columns = {row[1] for row in conn.execute("PRAGMA table_info(auto_model_switch_rules)")}
@@ -2736,7 +2741,7 @@ class CAPIDatabase:
         }
 
     def get_ram_capacity_status(self, hostname: str) -> Dict[str, Any]:
-        """讀取持久化基準與最新異動；提醒不會因重啟或經過時間而消失。"""
+        """讀取持久化基準與最新異動，包含人工確認資訊。"""
         conn = self._get_conn()
         try:
             return self._ram_capacity_status(conn, hostname)
@@ -2794,14 +2799,53 @@ class CAPIDatabase:
             finally:
                 conn.close()
 
-    def get_ram_capacity_history(self, hostname: str, limit: int = 100) -> List[Dict]:
+    def acknowledge_ram_capacity_event(
+        self, hostname: str, event_id: int, acknowledged_by: str,
+    ) -> Dict[str, Any]:
+        """僅確認指定事件，保留歷史；重送不覆寫首次確認人員與時間。"""
+        if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0:
+            raise ValueError("RAM 異動紀錄編號無效")
+        actor = str(acknowledged_by or "").strip()[:64]
+        if not actor:
+            raise ValueError("缺少確認人員")
+        with self._lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                event = conn.execute(
+                    "SELECT id FROM ram_capacity_events WHERE hostname = ? AND id = ?",
+                    (hostname, event_id),
+                ).fetchone()
+                if event is None:
+                    raise KeyError("找不到 RAM 異動紀錄")
+                conn.execute(
+                    """UPDATE ram_capacity_events SET acknowledged_by = ?, acknowledged_at = ?
+                       WHERE hostname = ? AND id = ? AND acknowledged_at = ''""",
+                    (actor, datetime.now().astimezone().isoformat(timespec="seconds"), hostname, event_id),
+                )
+                result = self._ram_capacity_status(conn, hostname)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def get_ram_capacity_history(
+        self, hostname: str, limit: int = 100, *, before_id: Optional[int] = None,
+    ) -> List[Dict]:
         """依新增順序回傳容量異動歷史（最新在前）。"""
         conn = self._get_conn()
         try:
+            condition = " AND id < ?" if before_id is not None else ""
+            params = [hostname]
+            if before_id is not None:
+                params.append(int(before_id))
+            params.append(max(1, min(int(limit), 1000)))
             rows = conn.execute(
-                """SELECT * FROM ram_capacity_events
-                   WHERE hostname = ? ORDER BY id DESC LIMIT ?""",
-                (hostname, max(1, min(int(limit), 1000))),
+                "SELECT * FROM ram_capacity_events WHERE hostname = ?" + condition + " ORDER BY id DESC LIMIT ?",
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
         finally:

@@ -29,6 +29,7 @@
     let activeMode = "realtime";
     let historyInitialized = false;
     let historyShift = "day";
+    let ramHistorySession = null;
 
     document.addEventListener("DOMContentLoaded", initialize);
 
@@ -67,6 +68,7 @@
             settingsLink.hidden = directFileMode;
         }
         initializeModeTabs();
+        initializeRamHistory();
 
         const activeLines = config.lines.filter((line) => line.enabled !== false);
         if (activeLines.length === 0) {
@@ -200,6 +202,9 @@
         setField(card, "line-name", line.line || "未設定線體");
 
         configureLink(card, "dashboard", line.dashboardUrl || deriveBaseUrl(line.apiUrl));
+        card.querySelector('[data-action="ram-history"]').addEventListener(
+            "click", () => openRamHistory(lineStates.get(line.id))
+        );
 
         lineGrid.appendChild(card);
         lineStates.set(line.id, {
@@ -1139,6 +1144,7 @@
     }
 
     async function refreshLine(state) {
+        const ramVersion = state.ramAcknowledgementVersion || 0;
         const controller = new AbortController();
         const timeoutId = window.setTimeout(
             () => controller.abort(),
@@ -1163,7 +1169,12 @@
                 throw new Error("API 回傳內容不是 JSON 物件");
             }
 
-            state.data = normalizeStatus(rawData);
+            const normalized = normalizeStatus(rawData);
+            if (ramVersion !== (state.ramAcknowledgementVersion || 0) &&
+                state.data?.ramCapacity?.eventId >= normalized.ramCapacity.eventId) {
+                normalized.ramCapacity = state.data.ramCapacity;
+            }
+            state.data = normalized;
             if (!state.data.running) {
                 state.status = "warning";
                 state.error = "API 可連線，但服務回報未運行。";
@@ -1206,7 +1217,6 @@
         const lineActivity = asObject(raw.line_activity);
         const modelSwitchAlert = asObject(raw.model_switch_alert);
         const ramCapacityAlert = asObject(raw.ram_capacity_alert);
-        const ramCapacityChange = asObject(ramCapacityAlert.latest_change);
         const training = asObject(raw.training);
 
         return {
@@ -1278,14 +1288,7 @@
                 title: textValue(gpuHealth.title),
                 message: textValue(gpuHealth.message)
             },
-            ramCapacity: {
-                active: ramCapacityAlert.active === true,
-                hostname: textValue(ramCapacityChange.hostname || ramCapacityAlert.hostname),
-                previousTotalGb: optionalNumber(ramCapacityChange.previous_total_gb),
-                newTotalGb: optionalNumber(ramCapacityChange.new_total_gb),
-                lastSeenAt: textValue(ramCapacityChange.last_seen_at),
-                detectedAt: textValue(ramCapacityChange.detected_at)
-            },
+            ramCapacity: normalizeRamCapacity(ramCapacityAlert),
             lineActivity: {
                 available: raw.line_activity !== undefined && raw.line_activity !== null,
                 windowMinutes: optionalNumber(lineActivity.window_minutes),
@@ -1310,6 +1313,22 @@
 
     function asObject(value) {
         return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    }
+
+    function normalizeRamCapacity(value) {
+        const alert = asObject(value);
+        const change = asObject(alert.latest_change);
+        return {
+            active: alert.active === true,
+            historySupported: alert.history_supported === true,
+            acknowledgeSupported: alert.acknowledge_supported === true,
+            eventId: optionalNumber(change.id),
+            hostname: textValue(change.hostname || alert.hostname),
+            previousTotalGb: optionalNumber(change.previous_total_gb),
+            newTotalGb: optionalNumber(change.new_total_gb),
+            lastSeenAt: textValue(change.last_seen_at),
+            detectedAt: textValue(change.detected_at)
+        };
     }
 
     function textValue(value) {
@@ -1418,6 +1437,7 @@
         const card = state.card;
         const data = state.data;
         renderOverviewRow(state);
+        renderRamHistoryButton(state);
         card.dataset.state = state.status;
         const healthAlerts = data && state.status !== "offline"
             ? getLineAlerts(data)
@@ -1552,9 +1572,155 @@
             badge.className = `overview-alert overview-alert-${alert.severity}`;
             badge.textContent = `⚠ ${alert.summary}`;
             badge.title = alert.message;
+            if (alert.kind === "ram-capacity" && data.ramCapacity.acknowledgeSupported &&
+                Number.isInteger(alert.eventId) && alert.eventId > 0) {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "ram-action";
+                button.textContent = state.ramAcknowledging ? "確認中…" : "已確認";
+                button.disabled = Boolean(state.ramAcknowledging) || window.location.protocol === "file:";
+                button.title = window.location.protocol === "file:"
+                    ? "請透過中控 Web 服務登入後確認"
+                    : "解除本次 RAM 提醒並保留歷史紀錄";
+                button.addEventListener("click", () => acknowledgeRamCapacity(state, alert.eventId));
+                badge.appendChild(button);
+            }
             alertContainer.appendChild(badge);
         }
         alertCell.classList.toggle("is-empty", healthAlerts.length === 0);
+    }
+
+    function renderRamHistoryButton(state) {
+        const button = state.card?.querySelector('[data-action="ram-history"]');
+        if (!button) return;
+        const supported = state.data?.ramCapacity?.historySupported;
+        button.disabled = !supported || state.status === "offline" || state.status === "checking";
+        button.title = state.status === "offline" ? "設備離線，暫時無法讀取歷史" :
+            supported ? "查看 RAM 容量變動及確認紀錄" : "請更新線體程式以支援 RAM 變動紀錄";
+    }
+
+    function initializeRamHistory() {
+        const dialog = document.getElementById("ram-history-dialog");
+        document.getElementById("ram-history-close").addEventListener("click", () => dialog.close());
+        dialog.addEventListener("close", () => {
+            ramHistorySession?.controller?.abort();
+            ramHistorySession = null;
+        });
+        document.getElementById("ram-history-more").addEventListener("click", () => {
+            if (ramHistorySession) return loadRamHistory(ramHistorySession);
+        });
+    }
+
+    async function openRamHistory(state) {
+        if (!state?.data?.ramCapacity?.historySupported || state.status === "offline") return;
+        ramHistorySession?.controller?.abort();
+        const session = {state, beforeId: null, loading: false, loaded: 0, controller: null};
+        ramHistorySession = session;
+        const dialog = document.getElementById("ram-history-dialog");
+        setText(document.getElementById("ram-history-device"),
+            [state.line.factory, state.line.line || state.line.id, state.data.hostname || state.line.pcName]
+                .filter(Boolean).join(" / "));
+        document.getElementById("ram-history-rows").replaceChildren();
+        document.getElementById("ram-history-more").hidden = true;
+        if (!dialog.open) dialog.showModal();
+        await loadRamHistory(session);
+    }
+
+    async function loadRamHistory(session) {
+        if (session !== ramHistorySession || session.loading) return;
+        session.loading = true;
+        const more = document.getElementById("ram-history-more");
+        const message = document.getElementById("ram-history-message");
+        more.disabled = true;
+        setText(message, "正在讀取 RAM 變動紀錄…");
+        const controller = new AbortController();
+        session.controller = controller;
+        const timeout = window.setTimeout(() => controller.abort(), config.requestTimeoutSeconds * 1000);
+        try {
+            const url = new URL("/api/ram-capacity/history", session.state.line.apiUrl);
+            url.searchParams.set("limit", "50");
+            if (session.beforeId !== null) url.searchParams.set("beforeId", session.beforeId);
+            const response = await fetch(url.href, {
+                headers: {"Accept": "application/json"}, cache: "no-store",
+                credentials: "omit", signal: controller.signal
+            });
+            if (response.status === 404) throw new Error("線體尚未支援歷史查閱，請更新線體程式");
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+            if (!Array.isArray(payload.events)) throw new Error("RAM 歷史資料格式錯誤");
+            if (session !== ramHistorySession) return;
+            const rows = document.getElementById("ram-history-rows");
+            for (const event of payload.events) {
+                const row = document.createElement("tr");
+                row.dataset.direction = event.new_total_gb < event.previous_total_gb ? "decrease" : "increase";
+                const values = [
+                    `${formatDecimal(event.previous_total_gb, 2)} → ${formatDecimal(event.new_total_gb, 2)} GB`,
+                    textValue(event.last_seen_at).replace("T", " ") || "—",
+                    textValue(event.detected_at).replace("T", " ") || "—",
+                    event.acknowledged_at ? "已確認" : "未確認",
+                    textValue(event.acknowledged_by) || "—",
+                    textValue(event.acknowledged_at).replace("T", " ") || "—"
+                ];
+                for (const value of values) {
+                    const cell = document.createElement("td");
+                    cell.textContent = value;
+                    row.appendChild(cell);
+                }
+                rows.appendChild(row);
+            }
+            session.loaded += payload.events.length;
+            session.beforeId = Number.isInteger(payload.nextBeforeId) && payload.nextBeforeId > 0
+                ? payload.nextBeforeId : null;
+            more.hidden = session.beforeId === null;
+            more.textContent = "載入較早紀錄";
+            setText(message, session.loaded ? `已載入 ${session.loaded} 筆變動紀錄` : "目前沒有 RAM 容量變動紀錄。");
+        } catch (error) {
+            if (session !== ramHistorySession) return;
+            setText(message, `無法讀取歷史：${readableFetchError(error)}`);
+            more.hidden = false;
+            more.textContent = "重試";
+        } finally {
+            clearTimeout(timeout);
+            session.loading = false;
+            if (session === ramHistorySession) more.disabled = false;
+        }
+    }
+
+    async function acknowledgeRamCapacity(state, eventId) {
+        if (state.ramAcknowledging || !Number.isInteger(eventId) || eventId <= 0 ||
+            window.location.protocol === "file:") return;
+        state.ramAcknowledging = true;
+        renderOverviewRow(state);
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), (config.requestTimeoutSeconds + 3) * 1000);
+        try {
+            const response = await fetch("/api/central-dashboard/ram-capacity/acknowledge", {
+                method: "POST", credentials: "same-origin",
+                signal: controller.signal,
+                headers: {"Accept": "application/json", "Content-Type": "application/json"},
+                body: JSON.stringify({lineId: state.line.id, eventId})
+            });
+            if (response.status === 401) {
+                window.location.href = "/settings/login?next=%2Fcentral_dashboard%2F";
+                return;
+            }
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+            if (payload.success !== true || !payload.ram_capacity_alert) throw new Error("設備未回傳 RAM 確認結果");
+            const capacity = normalizeRamCapacity(payload.ram_capacity_alert);
+            if ((capacity.eventId || 0) >= (state.data.ramCapacity.eventId || 0)) {
+                state.data.ramCapacity = capacity;
+            }
+            state.ramAcknowledgementVersion = (state.ramAcknowledgementVersion || 0) + 1;
+            renderLineCard(state);
+            renderAlerts();
+        } catch (error) {
+            window.alert(`無法確認 RAM 異動：${error.message || error}`);
+        } finally {
+            clearTimeout(timeout);
+            state.ramAcknowledging = false;
+            renderOverviewRow(state);
+        }
     }
 
     function renderOverviewUpdate(state) {
@@ -1909,6 +2075,8 @@
             const change = `${formatDecimal(capacity.previousTotalGb, 2)} → ${formatDecimal(capacity.newTotalGb, 2)} GB`;
             alerts.push({
                 severity: decreased ? "critical" : "warning",
+                kind: "ram-capacity",
+                eventId: capacity.eventId,
                 summary: `RAM 總容量${direction} ${change}`,
                 message: `${capacity.hostname ? capacity.hostname + '：' : ''}RAM 總容量${direction} ${change}；` +
                     `上次確認 ${capacity.lastSeenAt || '—'}；首次偵測 ${capacity.detectedAt || '—'}。` +

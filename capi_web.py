@@ -92,6 +92,8 @@ CENTRAL_UPDATE_AUTH_HEADER = "X-CAPI-Central-Update"
 CENTRAL_UPDATE_USER_HEADER = "X-CAPI-Central-User"
 CENTRAL_UPDATE_APPLY_PATH = "/api/update/apply-central"
 CENTRAL_UPDATE_TIMEOUT_SECONDS = 8.0
+CENTRAL_RAM_ACK_HEADER = "X-CAPI-Central-RAM-Ack"
+CENTRAL_RAM_ACK_PATH = "/api/ram-capacity/acknowledge-central"
 
 
 def _build_edge_light_leak_debug_config(
@@ -599,7 +601,23 @@ class _RAMCapacityMonitor:
         self.hostname = _get_host_identity()
         self._lock = threading.Lock()
         self._next_check = 0.0
-        self._payload = {"available": False, "active": False, "latest_change": None}
+        self._payload = {
+            "available": False, "active": False, "latest_change": None,
+            "history_supported": True, "acknowledge_supported": True,
+        }
+
+    def _update_state(self, state: Dict[str, Any]):
+        event = state.get("latest_change") or {}
+        self._payload = {
+            **self._payload, **state,
+            "active": bool(event) and not bool(event.get("acknowledged_at")),
+        }
+
+    def acknowledge(self, event_id: int, user: str) -> Dict[str, Any]:
+        with self._lock:
+            state = self.db.acknowledge_ram_capacity_event(self.hostname, event_id, user)
+            self._update_state(state)
+            return dict(self._payload)
 
     def poll(self) -> Dict[str, Any]:
         with self._lock:
@@ -618,10 +636,8 @@ class _RAMCapacityMonitor:
                 else:
                     # 查詢失敗不當成 0 GB，也不覆寫前一次有效讀值或異動提醒。
                     state = self.db.get_ram_capacity_status(self.hostname)
-                self._payload = {
-                    **state, "available": available,
-                    "active": state.get("latest_change") is not None,
-                }
+                self._update_state(state)
+                self._payload["available"] = available
             except Exception:
                 self._payload = {**self._payload, "available": False}
                 logger.exception("Failed to monitor RAM capacity for %s", self.hostname)
@@ -4077,6 +4093,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._handle_api_stats(query)
             elif path == "/api/status":
                 self._handle_api_status()
+            elif path == "/api/ram-capacity/history":
+                self._handle_api_ram_capacity_history(query)
             elif path == "/api/shift_report":
                 self._handle_api_shift_report(query)
             elif path == "/api/shift_report/series":
@@ -4335,6 +4353,12 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             elif path == "/api/central-dashboard/watch-models":
                 if self._require_settings_user(api=True):
                     self._handle_api_central_dashboard_watch_models_update()
+            elif path == "/api/central-dashboard/ram-capacity/acknowledge":
+                user = self._require_settings_user(api=True)
+                if user:
+                    self._handle_api_central_dashboard_ram_acknowledge(user)
+            elif path == CENTRAL_RAM_ACK_PATH:
+                self._handle_api_central_ram_acknowledge()
             elif path == "/api/central-dashboard/update/apply":
                 user = self._require_settings_user(api=True, admin=True)
                 if user:
@@ -5703,6 +5727,123 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 status=500,
                 headers=cors_headers,
             )
+
+    def _handle_api_ram_capacity_history(self, query):
+        """Read-only history, available to the same cross-origin viewers as status."""
+        headers = {"Access-Control-Allow-Origin": "*"}
+        try:
+            limit = int((query.get("limit") or ["50"])[0])
+            before = (query.get("beforeId") or [""])[0]
+            before_id = int(before) if before else None
+            if limit <= 0 or (before_id is not None and before_id <= 0):
+                raise ValueError
+            limit = min(limit, 100)
+        except (TypeError, ValueError):
+            self._send_json({"error": "歷史查詢參數無效"}, status=400, headers=headers)
+            return
+        if not self.db:
+            self._send_json({"error": "RAM 歷史紀錄服務尚未就緒"}, status=503, headers=headers)
+            return
+        try:
+            hostname = _get_host_identity()
+            rows = self.db.get_ram_capacity_history(hostname, limit + 1, before_id=before_id)
+            events = rows[:limit]
+            self._send_json({
+                "hostname": hostname, "events": events,
+                "nextBeforeId": events[-1]["id"] if len(rows) > limit else None,
+            }, headers=headers)
+        except Exception:
+            logger.exception("Failed to read RAM capacity history")
+            self._send_json({"error": "無法讀取 RAM 變動紀錄"}, status=503, headers=headers)
+
+    def _handle_api_central_ram_acknowledge(self):
+        """Only the configured central host may confirm an event for its logged-in user."""
+        source_ip = str(getattr(self, "client_address", ("", 0))[0] or "").strip()
+        center_ip = str(self._load_central_account_location().get("ip") or "").strip()
+        trusted = self.headers.get(CENTRAL_RAM_ACK_HEADER, "")
+        actor = urllib.parse.unquote(self.headers.get(CENTRAL_UPDATE_USER_HEADER, "")).strip()[:64]
+        if not source_ip or source_ip != center_ip or trusted != "1" or not actor:
+            self._send_json({"error": "不允許的 RAM 異動確認來源"}, status=403)
+            return
+        data = self._read_json_body()
+        if data is None:
+            return
+        event_id = data.get("eventId") if isinstance(data, dict) else None
+        if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0:
+            self._send_json({"error": "RAM 異動紀錄編號無效"}, status=400)
+            return
+        monitor = getattr(getattr(self, "server", None), "ram_capacity_monitor", None)
+        if monitor is None:
+            self._send_json({"error": "RAM 監控服務尚未就緒"}, status=503)
+            return
+        try:
+            alert = monitor.acknowledge(event_id, actor)
+            self._send_json({"success": True, "ram_capacity_alert": alert})
+        except KeyError:
+            self._send_json({"error": "找不到 RAM 異動紀錄", "code": "ram_event_not_found"}, status=404)
+        except Exception:
+            logger.exception("Failed to acknowledge RAM capacity event %s", event_id)
+            self._send_json({"error": "無法確認 RAM 異動，請稍後再試"}, status=503)
+
+    def _handle_api_central_dashboard_ram_acknowledge(self, user: Dict[str, Any]):
+        """Forward one event ID to a configured device; never accept an arbitrary target URL."""
+        data = self._read_json_body()
+        if data is None:
+            return
+        event_id = data.get("eventId") if isinstance(data, dict) else None
+        line_id = str(data.get("lineId") or "").strip() if isinstance(data, dict) else ""
+        if not line_id or isinstance(event_id, bool) or not isinstance(event_id, int) or event_id <= 0:
+            self._send_json({"error": "缺少線體或有效的 RAM 異動紀錄編號"}, status=400)
+            return
+        config = self.db.get_central_dashboard_config(self._load_central_dashboard_file_config())
+        line = next((item for item in config.get("lines") or []
+                     if item.get("id") == line_id and item.get("enabled") is not False), None)
+        if not line:
+            self._send_json({"error": "找不到已啟用的線體設定"}, status=404)
+            return
+        try:
+            parsed = urllib.parse.urlparse(str(line.get("apiUrl") or ""))
+            target_ip = ipaddress.ip_address(parsed.hostname or "")
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if parsed.scheme not in {"http", "https"} or target_ip.version != 4 or target_ip.packed[0] != 10:
+                raise ValueError
+        except (TypeError, ValueError):
+            self._send_json({"error": "RAM 確認目標必須是 10.x.x.x 的 HTTP(S) 位址"}, status=400)
+            return
+        prefix = self._central_dashboard_network_prefix(self._detect_central_dashboard_webserver_ip())
+        if prefix and self._central_dashboard_network_prefix(str(target_ip)) != prefix:
+            self._send_json({"error": "設備不屬於此中控看板網段"}, status=403)
+            return
+        actor = str(user.get("username") or "").strip()[:64]
+        if not actor:
+            self._send_json({"error": "請先登入參數設定"}, status=401)
+            return
+        connection_class = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        connection = None
+        try:
+            connection = connection_class(str(target_ip), port, timeout=8)
+            connection.request("POST", CENTRAL_RAM_ACK_PATH,
+                               body=json.dumps({"eventId": event_id}).encode("utf-8"),
+                               headers={"Accept": "application/json", "Content-Type": "application/json",
+                                        CENTRAL_RAM_ACK_HEADER: "1",
+                                        CENTRAL_UPDATE_USER_HEADER: urllib.parse.quote(actor, safe="")})
+            response = connection.getresponse()
+            status = int(response.status)
+            payload = json.loads(response.read().decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("invalid response")
+        except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+            self._send_json({"error": "無法連線至設備 RAM 確認服務，請確認線體已更新"}, status=502)
+            return
+        finally:
+            if connection is not None:
+                connection.close()
+        if status == 200 and payload.get("success") is True and isinstance(payload.get("ram_capacity_alert"), dict):
+            self._send_json(payload)
+        elif status in {400, 403, 404, 409, 503}:
+            self._send_json({"error": str(payload.get("error") or "設備拒絕 RAM 確認要求")}, status=status)
+        else:
+            self._send_json({"error": "設備 RAM 確認服務回應異常"}, status=502)
 
     def _get_training_status_payload(self) -> Dict[str, Any]:
         """Read-only activity summary; never expose training paths, logs or params."""

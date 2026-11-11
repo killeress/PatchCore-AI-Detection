@@ -998,6 +998,62 @@ body[data-mode="history"] .refresh-block {
     border-color: rgba(207, 63, 80, 0.25);
 }
 
+.overview-alert:has(.ram-action) {
+    gap: 7px;
+    flex-wrap: wrap;
+    white-space: normal;
+}
+
+.ram-action {
+    padding: 4px 7px;
+    color: var(--primary);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.ram-action:hover:not(:disabled) { background: var(--surface-blue); }
+.ram-action:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.ram-action:disabled { opacity: 0.55; cursor: default; }
+
+.ram-system-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+}
+
+.ram-system-heading > span { color: var(--muted); font-size: 0.67rem; }
+
+.ram-history-dialog {
+    width: min(1100px, calc(100vw - 24px));
+    max-height: 85vh;
+    padding: 22px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    box-shadow: var(--shadow-strong);
+    overflow: auto;
+}
+
+.ram-history-dialog::backdrop { background: rgba(8, 17, 28, 0.6); }
+.ram-history-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ram-history-heading h2 { margin: 0; font-size: 1.12rem; }
+.ram-history-heading p, .ram-history-note, #ram-history-message { color: var(--muted); font-size: 0.8rem; line-height: 1.6; }
+.ram-history-heading p { margin: 5px 0 0; }
+.ram-history-table-wrap { overflow-x: auto; margin: 12px 0; }
+.ram-history-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; text-align: left; }
+.ram-history-table th, .ram-history-table td { padding: 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.ram-history-table th { color: var(--muted); background: var(--surface-soft); }
+.ram-history-table tr[data-direction="decrease"] td:first-child { color: var(--red); font-weight: 700; }
+.ram-history-table tr[data-direction="increase"] td:first-child { color: var(--amber); font-weight: 700; }
+
 .overview-update {
     display: flex;
     align-items: center;

@@ -45,6 +45,7 @@ def test_decrease_is_logged_once_with_detection_interval_and_survives_restart(tm
     assert event == {
         "id": 1, "hostname": HOST, "previous_total_gb": 62.3, "new_total_gb": 30.3,
         "last_seen_at": LAST_SEEN, "detected_at": DETECTED,
+        "acknowledged_by": "", "acknowledged_at": "",
     }
     repeated = db.record_ram_capacity_observation(HOST, 30.3, "2026-11-10T10:01:30+08:00")
     assert repeated["latest_change"] == event
