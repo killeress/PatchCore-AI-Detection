@@ -142,6 +142,7 @@ def _settings_handler(*, facility="MOD2", params=None, can_manage_accounts=True)
     [
         ("MOD1", {"facility": "MOD1", "ip": "10.172.25.105"}),
         ("MOD2", {"facility": "MOD2", "ip": "10.174.37.81"}),
+        ("CARUX", {"facility": "CARUX", "ip": "10.170.25.65"}),
         ("unknown", {"facility": "MOD2", "ip": "10.174.37.81"}),
     ],
 )
@@ -435,6 +436,7 @@ def test_settings_template_integrates_central_location_into_accounts():
     assert 'id="central-account-ip"' in accounts_renderer
     assert "10.172.25.105" in accounts_renderer
     assert "10.174.37.81" in accounts_renderer
+    assert "10.170.25.65" in accounts_renderer
     assert "saveCentralAccountLocation()" in accounts_renderer
     assert "renderWithinSpecPane(withinSpecParam, centralAccountLocation)" in template
     assert "function renderWithinSpecPane(param, centralAccountLocation)" in template

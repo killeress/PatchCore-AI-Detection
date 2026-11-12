@@ -65,7 +65,7 @@ from capi_image_naming import (
     canonical_image_prefix,
     source_image_prefix,
 )
-from capi_inference import AOI_PASSTHROUGH_CODES, CAPIInferencer, ImageResult, TileInfo, resolve_product_resolution
+from capi_inference import AOI_PASSTHROUGH_CODES, CAPIInferencer, ImageResult, TileInfo, resolve_product_resolution, resolve_request_product_resolution
 from capi_preprocess import (
     BOUNDARY_REFERENCE_PRIORITY, PreprocessConfig, detect_panel_geometry,
     panel_boundary_config_for_station,
@@ -1435,9 +1435,13 @@ def build_qjpg_response(
     config: Optional[CAPIConfig] = None,
 ) -> str:
     glass_id = str((parsed or {}).get("glass_id", "") or "")
-    product_resolution = resolve_product_resolution(
-        (parsed or {}).get("model_id") or getattr(config, "machine_id", ""),
-        getattr(config, "model_resolution_map", None),
+    # CarUX 廠別推理時已採用 Client 解析度，回覆座標沿用同一把尺。
+    product_resolution = (
+        (parsed or {}).get("_resolved_product_resolution")
+        or resolve_product_resolution(
+            (parsed or {}).get("model_id") or getattr(config, "machine_id", ""),
+            getattr(config, "model_resolution_map", None),
+        )
     )
     detected_mark_text = _first_mark_text(results or [])
     mark_status = "OK" if detected_mark_text else "NG"
@@ -3758,6 +3762,12 @@ class CAPIServer:
                 "error_message": str(e),
             }
 
+    def _use_client_product_resolution(self) -> bool:
+        """CarUX 廠別：產品解析度採用 Client 傳入值，不依機種第六碼查表。"""
+        server_config = getattr(self, "server_config", None) or {}
+        facility = str((server_config.get("mes_report") or {}).get("facility") or "")
+        return facility.strip().upper() == "CARUX"
+
     def _process_request(
         self,
         parsed: Dict,
@@ -3781,10 +3791,15 @@ class CAPIServer:
         if inferencer is None:
             return "ERR:MODEL_NOT_LOADED", "[]", [], False, None, {}, False, "", None
 
-        product_resolution = resolve_product_resolution(
+        use_client_res = self._use_client_product_resolution()
+        product_resolution = resolve_request_product_resolution(
             model_id,
             getattr(inferencer.config, "model_resolution_map", None),
+            client_resolution=parsed.get("resolution"),
+            use_client_resolution=use_client_res,
         )
+        if use_client_res:
+            parsed["_resolved_product_resolution"] = product_resolution
         station_adapter = (
             getattr(self, "station_adapter", None)
             or getattr(inferencer, "station_adapter", None)
@@ -3883,6 +3898,9 @@ class CAPIServer:
                     glass_id=parsed.get("glass_id"),
                     aoi_report_override=aoi_report_override,
                     machine_judgment=parsed.get("machine_judgment"),
+                    client_product_resolution=(
+                        product_resolution if use_client_res else None
+                    ),
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate, omit_image, aoi_report)

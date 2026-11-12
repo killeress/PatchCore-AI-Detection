@@ -93,6 +93,26 @@ def test_defaults_use_current_settings_and_record_source(debug_side):
     assert env.responses[-1][1]['parameters']['csjbl_preview_radius_product_px'] == 75
 
 
+@pytest.mark.parametrize('facility, expected', [('CARUX', [1920, 720]), ('MOD2', [1920, 1200])])
+def test_record_debug_resolution_respects_facility(debug_side, monkeypatch, facility, expected):
+    env = debug_side
+    conn = env.db._get_conn()
+    try:
+        conn.execute('UPDATE inference_records SET resolution_y = ? WHERE id = ?', (720, env.record_id))
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(env.handler, '_capi_server_instance', SimpleNamespace(
+        server_config={'mes_report': {'facility': facility}}, path_mapping={}), raising=False)
+    env.handler._handle_debug_side_white_defaults({'record_id': [str(env.record_id)]})
+    status, defaults = env.responses[-1]
+    assert status == 200
+    assert defaults['source']['product_resolution'] == expected
+    status, result = post(env, {'record_id': env.record_id})
+    assert status == 200
+    assert result['payload']['evidence_context']['product_resolution'] == expected
+
+
 def test_debug_reuses_exact_saved_front_geometry_and_rejects_rotation_mismatch(debug_side, monkeypatch):
     import capi_side_white as sw
     env = debug_side
