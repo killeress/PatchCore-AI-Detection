@@ -12,6 +12,7 @@ _AAPI_REQUEST = (
 )
 
 
+@pytest.mark.parametrize("facility", ["CARUX", "MOD2"])
 @pytest.mark.parametrize("use_gpu_lock", [False, True])
 @pytest.mark.parametrize(
     ("machine_judgment", "client_request_text", "expected_report_payload", "filtered_non_bomb"),
@@ -26,6 +27,7 @@ def test_rerun_passes_stored_request_context_to_inference(
     tmp_path,
     monkeypatch,
     use_gpu_lock,
+    facility,
     machine_judgment,
     client_request_text,
     expected_report_payload,
@@ -65,7 +67,11 @@ def test_rerun_passes_stored_request_context_to_inference(
     db = MagicMock()
 
     monkeypatch.setattr(CAPIWebHandler, "inferencer", inferencer)
-    monkeypatch.setattr(CAPIWebHandler, "_capi_server_instance", None)
+    server = SimpleNamespace(
+        server_config={"mes_report": {"facility": facility}},
+        _get_or_create_inferencer=lambda _model_id: inferencer,
+    )
+    monkeypatch.setattr(CAPIWebHandler, "_capi_server_instance", server)
     monkeypatch.setattr(
         CAPIWebHandler,
         "_gpu_lock",
@@ -104,7 +110,7 @@ def test_rerun_passes_stored_request_context_to_inference(
             "machine_no": "CAPI07",
             "glass_id": "PANEL001",
             "resolution_x": 1920,
-            "resolution_y": 1080,
+            "resolution_y": 720,
             "client_bomb_info": "",
             "client_request_text": client_request_text,
             "client_response_text": "original sent response",
@@ -114,6 +120,9 @@ def test_rerun_passes_stored_request_context_to_inference(
 
     original_judgment = "NG" if client_request_text else machine_judgment
     assert inferencer.process_panel.call_args.kwargs["machine_judgment"] == original_judgment
+    assert inferencer.process_panel.call_args.kwargs.get("client_product_resolution") == (
+        (1920, 720) if facility == "CARUX" else None
+    )
     if expected_report_payload is not None:
         inferencer._parse_aoi_report_txt.assert_called_once_with(
             tmp_path,

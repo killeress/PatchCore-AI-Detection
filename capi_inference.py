@@ -215,6 +215,29 @@ def resolve_product_resolution(model_id: str, resolution_map: Optional[Dict] = N
     return DEFAULT_PRODUCT_RESOLUTION
 
 
+def resolve_request_product_resolution(
+    model_id: str,
+    resolution_map: Optional[Dict] = None,
+    *,
+    client_resolution: Optional[Tuple[int, int]] = None,
+    use_client_resolution: bool = False,
+) -> Tuple[int, int]:
+    """依呼叫方設定決定產品解析度來源。
+
+    use_client_resolution=True（CarUX 廠別）且 Client 解析度為有效正整數時，
+    直接採用 Client 傳入值；其餘情況維持機種第六碼查表（含預設回退）。
+    """
+    if use_client_resolution and client_resolution is not None:
+        try:
+            width = int(client_resolution[0])
+            height = int(client_resolution[1])
+        except (TypeError, ValueError, IndexError):
+            width = height = 0
+        if width > 0 and height > 0:
+            return (width, height)
+    return resolve_product_resolution(model_id, resolution_map)
+
+
 @dataclass
 class TileInfo:
     """切塊資訊"""
@@ -1479,6 +1502,7 @@ class CAPIInferencer:
     def _find_robust_object_bounds(
         self,
         image: np.ndarray,
+        product_resolution: Optional[Tuple[int, int]] = None,
     ) -> Tuple[Tuple[int, int, int, int], Optional[np.ndarray]]:
         """Use training preprocess boundary logic for small-product inference."""
         pre_cfg = PreprocessConfig(
@@ -1486,7 +1510,7 @@ class CAPIInferencer:
             tile_stride=getattr(self.config, "tile_stride", self.config.tile_size),
             otsu_offset=0,
             enable_panel_polygon=self.config.enable_panel_polygon,
-            product_resolution=self._product_resolution(),
+            product_resolution=product_resolution or self._product_resolution(),
         )
         bbox, polygon = detect_panel_polygon(image, pre_cfg)
         if bbox is None:
@@ -1500,9 +1524,8 @@ class CAPIInferencer:
             getattr(self.config, "model_resolution_map", None),
         )
 
-    def _use_robust_panel_boundary(self) -> bool:
-        product_resolution = self._product_resolution()
-        return is_small_product_resolution(product_resolution)
+    def _use_robust_panel_boundary(self, product_resolution: Optional[Tuple[int, int]] = None) -> bool:
+        return is_small_product_resolution(product_resolution or self._product_resolution())
 
     def calculate_otsu_bounds(
         self,
@@ -1510,6 +1533,7 @@ class CAPIInferencer:
         otsu_offset_override: Optional[int] = None,
         reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None,
         reference_polygon: Optional[np.ndarray] = None,
+        boundary_product_resolution: Optional[Tuple[int, int]] = None,
     ) -> Tuple[Tuple[int, int, int, int], Optional[int], Optional[np.ndarray]]:
         """
         計算 Otsu 前景邊界與 panel polygon。
@@ -1529,8 +1553,10 @@ class CAPIInferencer:
         if reference_raw_bounds is not None:
             x_min, y_min, x_max, y_max = reference_raw_bounds
             binary_mask = None
-        elif self._use_robust_panel_boundary():
-            (x_min, y_min, x_max, y_max), precomputed_polygon = self._find_robust_object_bounds(image)
+        elif self._use_robust_panel_boundary(boundary_product_resolution):
+            (x_min, y_min, x_max, y_max), precomputed_polygon = self._find_robust_object_bounds(
+                image, boundary_product_resolution
+            )
             binary_mask = None
         else:
             (x_min, y_min, x_max, y_max), binary_mask = self._find_raw_object_bounds(image)
@@ -1575,7 +1601,7 @@ class CAPIInferencer:
             if (panel_polygon is not None
                     and offset != 0
                     and reference_polygon is None
-                    and not self._use_robust_panel_boundary()):
+                    and not self._use_robust_panel_boundary(boundary_product_resolution)):
                 cx = (panel_polygon[:, 0].mean())
                 cy = (panel_polygon[:, 1].mean())
                 for i in range(4):
@@ -1899,6 +1925,7 @@ class CAPIInferencer:
         otsu_offset_override: Optional[int] = None,
         reference_raw_bounds: Optional[Tuple[int, int, int, int]] = None,
         reference_polygon: Optional[np.ndarray] = None,
+        boundary_product_resolution: Optional[Tuple[int, int]] = None,
     ) -> Optional[ImageResult]:
         """
         預處理圖片：Otsu + 排除區域 + 切塊
@@ -1962,6 +1989,7 @@ class CAPIInferencer:
             otsu_offset_override=otsu_offset_override,
             reference_raw_bounds=reference_raw_bounds,
             reference_polygon=reference_polygon,
+            boundary_product_resolution=boundary_product_resolution,
         )
         
         # 記錄裁切區域
@@ -7941,15 +7969,24 @@ class CAPIInferencer:
         glass_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
+        client_product_resolution: Optional[Tuple[int, int]] = None,
     ):
         """依機種第六碼決定產品解析度，再路由至 v1 或 v2 實作。
 
         product_resolution 保留呼叫相容性；不採用 Client 傳入的解析度。
+        client_product_resolution：CarUX 廠別由呼叫方帶入的 Client 解析度，
+        提供時優先採用（其餘呼叫方維持查表行為）。
         """
-        product_resolution = resolve_product_resolution(
-            model_id or getattr(self.config, "machine_id", ""),
-            getattr(self.config, "model_resolution_map", None),
-        )
+        if client_product_resolution is not None:
+            product_resolution = (
+                int(client_product_resolution[0]),
+                int(client_product_resolution[1]),
+            )
+        else:
+            product_resolution = resolve_product_resolution(
+                model_id or getattr(self.config, "machine_id", ""),
+                getattr(self.config, "model_resolution_map", None),
+            )
         if getattr(self.config, "grid_canonicalization_enabled", False):
             from capi_grid_canonicalization import normalize_product_resolution
 
@@ -7983,6 +8020,8 @@ class CAPIInferencer:
                 glass_id=glass_id,
                 aoi_report_override=aoi_report_override,
                 machine_judgment=machine_judgment,
+                **({"boundary_product_resolution": product_resolution}
+                   if client_product_resolution is not None and not self.config.is_new_architecture else {}),
             )
         if panel_result and panel_result[0]:
             for result in panel_result[0]:
@@ -8001,6 +8040,7 @@ class CAPIInferencer:
         glass_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
+        boundary_product_resolution: Optional[Tuple[int, int]] = None,
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -8154,8 +8194,8 @@ class CAPIInferencer:
                 ref_img = self._read_detection_image(ref_path)
                 if ref_img is None:
                     continue
-                if self._use_robust_panel_boundary():
-                    ref_bounds, ref_polygon = self._find_robust_object_bounds(ref_img)
+                if self._use_robust_panel_boundary(boundary_product_resolution):
+                    ref_bounds, ref_polygon = self._find_robust_object_bounds(ref_img, boundary_product_resolution)
                     ref_binary = None
                 else:
                     ref_bounds, ref_binary = self._find_raw_object_bounds(ref_img)
@@ -8205,6 +8245,8 @@ class CAPIInferencer:
                 cached_mark=cached_mark,
                 reference_raw_bounds=panel_reference_raw_bounds,
                 reference_polygon=panel_reference_polygon,
+                **({"boundary_product_resolution": boundary_product_resolution}
+                   if boundary_product_resolution is not None else {}),
             )
             if result is None:
                 return None
@@ -8310,6 +8352,8 @@ class CAPIInferencer:
                                 cached_mark=cached_mark,
                                 reference_raw_bounds=panel_reference_raw_bounds,
                                 reference_polygon=panel_reference_polygon,
+                                **({"boundary_product_resolution": boundary_product_resolution}
+                                   if boundary_product_resolution is not None else {}),
                             )
                             if skip_result is not None:
                                 skip_result.tiles = []

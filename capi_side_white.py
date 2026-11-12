@@ -460,7 +460,8 @@ def snapshot_context(config, edge_config, parsed):
     return {"config": copy.deepcopy(config), "zones": zones, "zone_warning": warning,
             "bombs": bombs, "bomb_source": "client" if parsed.get("bomb_info") is not None else "config",
             "zone_coordinate_space": "front_detection_pixels", "bomb_coordinate_space": "product_detection_coordinates",
-            "product_resolution": list(resolve_product_resolution(model_id, getattr(config, "model_resolution_map", None)))}
+            "product_resolution": list(parsed.get("_resolved_product_resolution") or
+                                       resolve_product_resolution(model_id, getattr(config, "model_resolution_map", None)))}
 
 
 def prepare_aoi_context(context, coords, ng_details="", images=(), *, rotate_180=False, formal_results=()):

@@ -9058,6 +9058,14 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             raise ValueError(f"找不到側拍白畫面：{side_name or 'SW0F00000'}")
         model_id = detail.get("model_id", "") if detail else data.get("model_id")
         resolution = self._debug_product_resolution(side, model_id)
+        server_config = getattr(server_inst, "server_config", {}) or {}
+        facility = str((server_config.get("mes_report") or {}).get("facility") or "").strip().upper()
+        if facility == "CARUX" and detail:
+            width, height = detail.get("resolution_x"), detail.get("resolution_y")
+            if isinstance(width, int) and not isinstance(width, bool) and width > 0 and \
+                    isinstance(height, int) and not isinstance(height, bool) and height > 0:
+                resolution["product_resolution"] = [width, height]
+                resolution["resolution_warning"] = ""
         return detail, side, resolution
 
     def _handle_debug_side_white_defaults(self, query):
@@ -9098,7 +9106,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 bomb_info = json.loads(detail["client_bomb_info"])
             context = snapshot_context(
                 config, getattr(getattr(self.inferencer, "edge_inspector", None), "config", None),
-                {"model_id": resolution["model_id"], "bomb_info": bomb_info},
+                {"model_id": resolution["model_id"], "bomb_info": bomb_info,
+                 "_resolved_product_resolution": resolution["product_resolution"]},
             )
             if detail:
                 from capi_side_report import csjbl_points, inference_mark_evidence
@@ -14327,6 +14336,16 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             resolution = None
             if detail.get("resolution_x") and detail.get("resolution_y"):
                 resolution = (detail["resolution_x"], detail["resolution_y"])
+            server_config = getattr(server_inst, "server_config", {}) or {}
+            facility = str((server_config.get("mes_report") or {}).get("facility") or "").strip().upper()
+            use_client_resolution = facility == "CARUX"
+            resolved_resolution = None
+            if use_client_resolution:
+                from capi_inference import resolve_request_product_resolution
+                resolved_resolution = resolve_request_product_resolution(
+                    model_id, getattr(inferencer.config, "model_resolution_map", None),
+                    client_resolution=resolution, use_client_resolution=True,
+                )
 
             bomb_info = None
             if detail.get("client_bomb_info"):
@@ -14360,7 +14379,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 side_white_context = snapshot_context(
                     inferencer.config,
                     getattr(getattr(inferencer, "edge_inspector", None), "config", None),
-                    {"model_id": model_id, "bomb_info": bomb_info},
+                    {"model_id": model_id, "bomb_info": bomb_info,
+                     "_resolved_product_resolution": resolved_resolution},
                 )
 
             _update_status("正在等待 GPU...")
@@ -14379,7 +14399,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 if white_frame_path is not None:
                     white_frame_kwargs = _white_frame_aoi_kwargs(
                         station_adapter, aoi_report_override, inferencer.config, model_id,
-                        bomb_info=bomb_info, product_resolution=resolution,
+                        bomb_info=bomb_info, product_resolution=resolved_resolution or resolution,
                     )
                     white_frame_inspection = inspect_white_frame_image(
                         white_frame_path,
@@ -14435,6 +14455,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     glass_id=detail.get("glass_id"),
                     aoi_report_override=aoi_report_override,
                     machine_judgment=machine_judgment,
+                    **({"client_product_resolution": resolved_resolution} if use_client_resolution else {}),
                 )
 
             processing_seconds = _time.time() - start_time
@@ -14642,6 +14663,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "model_id": model_id,
                 "aoi_passthrough_records": side_parsed["aoi_passthrough_records"],
                 "front_decision": side_parsed["front_decision"],
+                "_resolved_product_resolution": resolved_resolution,
             }
             response_preview = build_qjpg_response(
                 preview_context, ai_judgment, results, inferencer.config,
