@@ -224,3 +224,132 @@ def test_production_paths_gate_dust_on_whole_roi_residual(monkeypatch, tmp_path,
     assert any(row.startswith("PCDK2") for row in reported) is (defect is not None)
     if defect == 2:
         assert len(probes) == 2
+
+
+@pytest.mark.parametrize("flat_raw", [False, True])
+def test_high_coverage_faint_diffuse_dust_falls_back_to_whole_roi_residual(monkeypatch, flat_raw):
+    worker, tile, result, raw, dust, support, probes = _case(monkeypatch)
+    rng = np.random.default_rng(23)
+    noise_bg = np.clip(100 + rng.normal(0, 0.3, size=raw.shape), 0, 255).astype(np.uint8)
+    raw = noise_bg.copy()
+    if not flat_raw:
+        # 漫射弱殘差 (< 2.0，不足以形成 >= 3px 獨立元件，但在精準灰塵區明顯高於背景雜訊)
+        raw[60:64, 30:90] = np.clip(raw[60:64, 30:90].astype(np.int16) - 2, 0, 255).astype(np.uint8)
+    dust = np.zeros_like(raw)
+    dust[59:65, 28:92] = 255
+    omit = rng.integers(10, 14, size=raw.shape, dtype=np.uint8)
+    omit[59:65, 28:92] = 60
+    tile.image = raw.copy()
+    tile.original_image = raw.copy()
+    tile.dust_region_details = [dict(
+        label_id=1, area=300, dust_overlap=276, coverage=0.92, is_dust=True,
+        max_score=0.45, peak_yx=(61, 60),
+    )]
+    tile.is_suspected_dust_or_scratch = True
+
+    monkeypatch.setattr(worker, "_check_dust_or_scratch_feature_with_context",
+                        lambda *a, **kw: (True, dust.copy(), 0.05, "STRIPE_OMIT"))
+    monkeypatch.setattr(worker, "predict_tile", lambda probe, **kw: (
+        probes.append(probe.image.copy()) or 0.15,
+        np.full(raw.shape, 0.15, np.float32),
+    ))
+
+    note = worker._confirm_aoi_dust_residual(result, tile, support, omit, omit)
+    if flat_raw:
+        assert tile.is_suspected_dust_or_scratch is False
+        assert tile.decision_context["aoi_dust_residual"]["status"] == "unconfirmed"
+        assert not probes
+    else:
+        assert tile.is_suspected_dust_or_scratch is True
+        assert "ROI_RESIDUAL: clear both_fills_below_threshold checks=2/2 -> DUST" in note
+        assert len(probes) == 2
+
+
+def _faint_stripe(seed=23):
+    rng = np.random.default_rng(seed)
+    raw = np.clip(100 + rng.normal(0, 0.3, size=(128, 128)), 0, 255).astype(np.uint8)
+    raw[60:64, 30:90] -= 2
+    dust = np.zeros_like(raw)
+    dust[59:65, 28:92] = 255
+    omit = rng.integers(10, 14, size=raw.shape, dtype=np.uint8)
+    omit[59:65, 28:92] = 60
+    roi = np.zeros_like(raw)
+    roi[16:112, 16:112] = 1
+    support = np.where(roi, 0.42, 0).astype(np.float32)
+    return raw, dust, omit, roi, support
+
+
+def test_high_coverage_fallback_edits_only_components_with_own_signal():
+    raw, dust, omit, roi, support = _faint_stripe()
+    dust[90:96, 40:50] = 255  # Separate OMIT component without any raw signal
+    omit[90:96, 40:50] = 60
+
+    edit, _, reason = confirmed_roi_surface_mask(
+        raw, dust, roi, support, omit_crop=omit, high_coverage_fallback=True,
+    )
+
+    assert reason == "confirmed_surface"
+    assert np.any(edit[60:64, 30:90] > 0)
+    assert not np.any(edit[90:96, 40:50] > 0)
+
+
+def test_high_coverage_fallback_rejects_stripe_clipped_by_roi_or_tile_edge():
+    raw, dust, omit, roi, support = _faint_stripe()
+    raw[60:64, :] = raw[60:64, :].min(axis=1, keepdims=True)
+    dust[59:65, :] = 255  # Original OMIT stripe runs past ROI to both tile edges
+    omit[59:65, :] = 60
+
+    edit, _, reason = confirmed_roi_surface_mask(
+        raw, dust, roi, support, omit_crop=omit, high_coverage_fallback=True,
+    )
+
+    assert edit is None
+    assert reason == "surface_mask_clipped"
+
+
+def test_high_coverage_fallback_allows_tiny_roi_fringe_and_isolated_spike_noise():
+    rng = np.random.default_rng(23)
+    raw = np.clip(100 + rng.normal(0, 0.3, size=(128, 128)), 0, 255).astype(np.uint8)
+    raw[60:64, 24:108] -= 2
+    # Isolated 1-2px fluctuations inside the diffuse stripe (not >=3px strong component)
+    raw[61, 50] = 96
+    raw[62, 80:82] = 96
+    dust = np.zeros_like(raw)
+    dust[59:65, 16:110] = 255
+    dust[60:63, 15:16] = 255  # Extends 1 px left of ROI (3 px outside / 567 px = 0.53%)
+    omit = rng.integers(10, 14, size=raw.shape, dtype=np.uint8)
+    omit[dust > 0] = 60
+    roi = np.zeros_like(raw)
+    roi[16:112, 16:112] = 1
+    support = np.where((roi > 0) & (np.arange(128)[None, :] >= 20) & (np.arange(128)[None, :] <= 105), 0.42, 0).astype(np.float32)
+
+    edit, _, reason = confirmed_roi_surface_mask(
+        raw, dust, roi, support, omit_crop=omit, high_coverage_fallback=True,
+    )
+
+    assert reason == "confirmed_surface"
+    assert int(np.count_nonzero(edit)) == int(np.count_nonzero(dust))
+
+
+def test_high_coverage_fallback_rejects_connected_3px_strong_feature(monkeypatch):
+    import capi_dust_review
+
+    raw, dust, omit, roi, support = _faint_stripe()
+    # Create a >=3px connected strong anomaly inside the stripe
+    raw[60:63, 55:58] = 88
+
+    # An inconclusive primary review is required to enter the fallback. Normally
+    # this strong feature matches OMIT and is handled by the primary review.
+    monkeypatch.setattr(
+        capi_dust_review, "review_low_coverage_regions",
+        lambda *args, **kwargs: ([dict(
+            is_dust=False, feature_review_reason="no_matched_features",
+        )], []),
+    )
+
+    edit, _, reason = confirmed_roi_surface_mask(
+        raw, dust, roi, support, omit_crop=omit, high_coverage_fallback=True,
+    )
+
+    assert edit is None
+    assert reason == "fallback_strong_feature"

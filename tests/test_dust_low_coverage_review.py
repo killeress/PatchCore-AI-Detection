@@ -400,3 +400,140 @@ def test_shared_response_cannot_use_one_bubble_to_clear_another_hot_core():
     )
 
     assert all(not region["is_dust"] for region in updated)
+
+
+def test_local_omit_retry_recovers_weak_dust_missed_by_global_blur():
+    rng = np.random.default_rng(7)
+    image = np.full((256, 256), 100, np.uint8)
+    _spot(image, (100, 100), contrast=-14, radius=3)
+    omit = rng.integers(19, 22, size=(256, 256), dtype=np.uint8)
+    cv2.circle(omit, (100, 100), 3, 28, -1)
+    precise = np.zeros_like(image)  # Global blur suppressed the weak spot completely.
+    roi = np.zeros_like(image)
+    roi[32:224, 32:224] = 1
+    labels = np.zeros_like(image, dtype=np.int32)
+    labels[96:105, 96:105] = 1
+    anomaly = np.where(labels > 0, 0.55, 0.0).astype(np.float32)
+    regions = _regions(labels, precise, anomaly)
+
+    updated_without_omit, _ = review_low_coverage_regions(
+        image, precise, anomaly, labels, regions, coverage_threshold=0.1,
+        evaluation_mask=roi, support_anomaly_map=anomaly,
+    )
+    assert updated_without_omit[0]["is_dust"] is False
+
+    updated_with_omit, features = review_low_coverage_regions(
+        image, precise, anomaly, labels, regions, coverage_threshold=0.1,
+        evaluation_mask=roi, support_anomaly_map=anomaly, omit_crop=omit,
+    )
+    assert updated_with_omit[0]["is_dust"] is True
+    assert updated_with_omit[0]["feature_review_reason"] == "all_features_match_precise_dust"
+    assert any(f["is_dust"] and abs(f["abs_pos"][0] - 100) <= 2 for f in features)
+
+
+@pytest.mark.parametrize("with_independent_defect", [False, True])
+def test_roi_border_halo_matches_confirmed_dust_just_outside_roi(with_independent_defect):
+    rng = np.random.default_rng(11)
+    image = np.full((256, 256), 100, np.uint8)
+    _spot(image, (140, 212), contrast=-15, radius=4)  # Outside ROI bottom y=191
+    if with_independent_defect:
+        _spot(image, (170, 210), contrast=-12, radius=4)
+    omit = rng.integers(19, 22, size=(256, 256), dtype=np.uint8)
+    cv2.circle(omit, (140, 212), 7, 160, -1)
+    precise = np.zeros_like(image)
+    cv2.circle(precise, (140, 212), 7, 255, -1)
+    roi = np.zeros_like(image)
+    roi[32:192, 32:224] = 1
+    labels = np.zeros_like(image, dtype=np.int32)
+    labels[188:192, 136:146] = 1
+    anomaly = np.where(labels > 0, 0.45, 0.0).astype(np.float32)
+    regions = _regions(labels, precise, anomaly)
+
+    updated, features = review_low_coverage_regions(
+        image, precise, anomaly, labels, regions, coverage_threshold=0.1,
+        evaluation_mask=roi, support_anomaly_map=anomaly, omit_crop=omit,
+    )
+
+    assert updated[0]["is_dust"] is (not with_independent_defect)
+    if not with_independent_defect:
+        assert updated[0]["feature_review_scope"] == "roi_border_halo"
+        assert any(f.get("outside_roi_halo") and f["is_dust"] for f in features)
+    else:
+        assert updated[0]["feature_review_scope"] != "roi_border_halo"
+        assert not features
+
+
+def _border_halo_case(inner_spot):
+    rng = np.random.default_rng(11)
+    image = np.full((256, 256), 100, np.uint8)
+    _spot(image, (140, 212), contrast=-15, radius=4)  # Dust just outside ROI bottom y=191
+    if inner_spot:
+        _spot(image, (141, 186), contrast=-12, radius=2)  # Independent defect inside ROI
+    omit = rng.integers(19, 22, size=(256, 256), dtype=np.uint8)
+    cv2.circle(omit, (140, 212), 7, 160, -1)
+    precise = np.zeros_like(image)
+    cv2.circle(precise, (140, 212), 7, 255, -1)
+    roi = np.zeros_like(image)
+    roi[32:192, 32:224] = 1
+    labels = np.zeros_like(image, dtype=np.int32)
+    labels[183:192, 134:148] = 1
+    anomaly = np.where(labels > 0, 0.45, 0.0).astype(np.float32)
+    return image, omit, precise, roi, labels, anomaly
+
+
+def test_roi_border_halo_requires_completed_inner_scan_without_inner_dust():
+    image, omit, precise, roi, labels, anomaly = _border_halo_case(inner_spot=True)
+
+    updated, features = review_low_coverage_regions(
+        image, precise, anomaly, labels, _regions(labels, precise, anomaly),
+        coverage_threshold=0.1, evaluation_mask=roi, support_anomaly_map=anomaly,
+        omit_crop=omit,
+    )
+
+    assert updated[0]["is_dust"] is False
+    assert updated[0]["feature_review_scope"] != "roi_border_halo"
+    assert updated[0]["feature_review_reason"] == "unmatched_features"
+    assert not any(f.get("outside_roi_halo") for f in features)
+
+
+@pytest.mark.parametrize("inner_spot", [False, True])
+def test_whole_roi_review_reaches_border_halo_with_only_outer_dust(inner_spot):
+    from capi_dust_review import confirmed_roi_surface_mask
+
+    image, omit, precise, roi, _, anomaly = _border_halo_case(inner_spot)
+
+    edit, features, reason = confirmed_roi_surface_mask(
+        image, precise, roi, anomaly, omit_crop=omit,
+    )
+
+    if inner_spot:
+        assert edit is None and reason == "unmatched_features"
+    else:
+        assert reason == "confirmed_surface"
+        assert np.any(edit > 0) and not np.any((edit > 0) & (roi > 0))
+        assert any(f.get("outside_roi_halo") and f["is_dust"] for f in features)
+
+
+def test_whole_roi_review_runs_local_omit_recovery_once(monkeypatch):
+    import capi_dust_review
+    from capi_dust_review import confirmed_roi_surface_mask
+
+    calls = []
+    original = capi_dust_review._recover_local_omit_dust_mask
+    monkeypatch.setattr(capi_dust_review, "_recover_local_omit_dust_mask",
+                        lambda *a, **kw: calls.append(1) or original(*a, **kw))
+    rng = np.random.default_rng(3)
+    image = np.full((128, 128), 100, np.uint8)
+    cv2.circle(image, (60, 60), 4, 80, -1)
+    precise = np.zeros_like(image)
+    cv2.circle(precise, (60, 60), 6, 255, -1)
+    omit = rng.integers(10, 14, size=image.shape, dtype=np.uint8)
+    omit[precise > 0] = 60
+    roi = np.zeros_like(image)
+    roi[16:112, 16:112] = 1
+    support = np.where(roi, 0.42, 0).astype(np.float32)
+
+    _, _, reason = confirmed_roi_surface_mask(image, precise, roi, support, omit_crop=omit)
+
+    assert reason == "confirmed_surface"
+    assert len(calls) == 1

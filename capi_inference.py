@@ -5185,7 +5185,7 @@ class CAPIInferencer:
             return region_details, ""
         if tile.original_image is None or omit_crop is None:
             return region_details, " LOW_COV_FEATURE: missing raw/OMIT -> KEEP_NG"
-        from capi_dust_review import review_low_coverage_regions
+        from capi_dust_review import review_low_coverage_regions, small_particle_core_mask
 
         _, precise_mask, _, _ = self._check_dust_or_scratch_feature_with_context(
             omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
@@ -5193,11 +5193,16 @@ class CAPIInferencer:
             product_resolution=product_resolution,
             preserve_small_cores=True,
         )
+        small_cores = small_particle_core_mask(
+            precise_mask, max(int(self.config.dust_area_min), 128),
+        )
         reviewed, features = review_low_coverage_regions(
             tile.original_image, precise_mask, anomaly_map, region_labels,
             region_details, coverage_threshold=threshold,
             evaluation_mask=tile.aoi_roi_mask,
             support_anomaly_map=support_anomaly_map,
+            small_core_mask=small_cores,
+            omit_crop=omit_crop,
         )
         tile.dust_low_coverage_features = features
         rescued = sum(region.get("feature_review_reason") ==
@@ -5228,8 +5233,9 @@ class CAPIInferencer:
         # A small native core can explain a dark spot while preprocessing leaves
         # opposite-sign halo features marked REAL. Let the existing full-ROI
         # model review decide, only after the raw image confirms the same core.
+        core_area_limit = max(int(self.config.dust_area_min), 128)
         small_hint = small_particle_core_mask(
-            getattr(tile, "dust_two_stage_dust_mask", None), self.config.dust_area_min,
+            getattr(tile, "dust_two_stage_dust_mask", None), core_area_limit,
         )
         small_core_review = bool(
             not tile.is_suspected_dust_or_scratch
@@ -5292,13 +5298,23 @@ class CAPIInferencer:
                 extension_override=0, focus_x=focus_x, product_resolution=product_resolution,
                 preserve_small_cores=True,
             )
-            small_cores = small_particle_core_mask(precise, self.config.dust_area_min)
+            small_cores = small_particle_core_mask(precise, core_area_limit)
             snapshot["small_core_pixels"] = int(np.count_nonzero(small_cores)) if small_cores is not None else 0
             if small_core_review and not snapshot["small_core_pixels"]:
                 return finish("unconfirmed", "missing_small_core")
+            high_cov_fallback = bool(
+                not small_core_review
+                and tile.dust_region_details
+                and all(
+                    r.get("is_dust") and float(r.get("coverage", 0.0)) >= 0.80
+                    for r in tile.dust_region_details
+                )
+            )
             edit_mask, features, reason = confirmed_roi_surface_mask(
                 tile.original_image, precise, tile.aoi_roi_mask, support_map,
                 small_core_mask=small_cores,
+                omit_crop=omit_crop,
+                high_coverage_fallback=high_cov_fallback,
             )
             tile.dust_low_coverage_features = features
             if edit_mask is None:
@@ -5315,7 +5331,19 @@ class CAPIInferencer:
             model = self._get_inferencer_for_zone(prefix, tile.zone or "inner")
             if model is None:
                 return finish("unconfirmed", "missing_model")
-            for name, image in surface_removed_images(tile.image, edit_mask):
+            tile_pipeline = []
+            if (getattr(self.config, "preprocess_after_tiling", False)
+                    and tile.original_image is not None
+                    and tile.original_image.shape[:2] == edit_mask.shape):
+                from capi_preprocess import image_preprocess_pipeline_for_zone
+                tile_pipeline = image_preprocess_pipeline_for_zone(
+                    self.config, tile.zone or "inner",
+                ) or []
+            base_image = tile.original_image if tile_pipeline else tile.image
+            for name, image in surface_removed_images(base_image, edit_mask):
+                if tile_pipeline:
+                    from capi_image_preprocess_lab import apply_preprocess_pipeline
+                    image = apply_preprocess_pipeline(image, tile_pipeline)["image"]
                 probe = replace(tile, image=image, decision_context=dict(tile.decision_context))
                 with cuda_stage("aoi-dust-residual", image=str(result.image_path), variant=name):
                     score, values = self.predict_tile(
