@@ -145,6 +145,13 @@ def test_start_server_banner_uses_hostname_station(monkeypatch):
     assert start_server._station_name() == "AAPI"
 
 
+@pytest.mark.parametrize("codeonly", [False, True], ids=["full", "code-only"])
+def test_release_includes_carux_report_module(codeonly):
+    from scripts import build_deploy_zip
+
+    assert "capi_carux_report.py" in build_deploy_zip._release_files(codeonly=codeonly)
+
+
 def test_build_release_zip_includes_manifest_checksums_and_excludes_static_dirs(tmp_path, monkeypatch):
     from scripts import build_deploy_zip
 

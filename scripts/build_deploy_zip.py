@@ -33,6 +33,7 @@ CODE_FILES = [
     "capi_version.py",
     "capi_auto_model_switch.py",
     "capi_config.py",
+    "capi_carux_report.py",
     "capi_database.py",
     "capi_retention.py",
     "capi_dataset_export.py",
