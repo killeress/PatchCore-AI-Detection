@@ -43,6 +43,7 @@ import torch
 import logging
 import re
 from capi_image_naming import AOI_REPORT_PREFIXES, canonical_image_prefix, is_half_screen_prefix
+from capi_carux_report import CARUX_REPORT_NOT_FOUND, read_carux_report_lines
 
 from capi_image_orientation import (
     read_detection_image, panel_image_cache, timed_inference_stage,
@@ -5979,6 +5980,9 @@ class CAPIInferencer:
         glass_id: str = "",
         machine_judgment: str = "",
         report_payload: str = "",
+        carux_report_dir: Optional[Path] = None,
+        model_id: str = "",
+        carux_report_only: bool = False,
     ) -> Dict[str, List['AOIReportDefect']]:
         """
         解析 AOI 機台 NG 報告。
@@ -6024,35 +6028,59 @@ class CAPIInferencer:
             )
             return result_map
 
-        # 路徑替換取得報告目錄
-        replace_from = self.config.aoi_report_path_replace_from
-        replace_to = self.config.aoi_report_path_replace_to
-        panel_str = str(panel_dir)
+        lines = None
+        report_file = carux_report_dir
+        use_carux_only = carux_report_only or carux_report_dir is not None
+        if use_carux_only:
+            if carux_report_dir is None:
+                logger.warning("AOI Report[CARUX]: 無法確定 102 報告目錄: %s", panel_dir)
+                return result_map
+            panel_path = Path(panel_dir)
+            if (glass_id and model_id
+                    and panel_path.name.casefold() == glass_id.casefold()
+                    and panel_path.parent.parent.name.casefold() == model_id.casefold()):
+                lines = read_carux_report_lines(
+                    carux_report_dir, glass_id, model_id, panel_path.parent.name,
+                )
+            else:
+                logger.warning("AOI Report[CARUX]: 圖片目錄與 PID 或機種不符: %s", panel_dir)
+                return result_map
 
-        if replace_from not in panel_str:
-            logger.warning(f"AOI Report: 路徑中找不到 '{replace_from}': {panel_str}")
+        if lines is CARUX_REPORT_NOT_FOUND:
+            logger.info(f"AOI Report: 報告目錄中無 TXT 檔案: {carux_report_dir}")
             return result_map
 
-        report_dir = Path(panel_str.replace(replace_from, replace_to, 1))
-
-        if not report_dir.exists():
-            logger.info(f"AOI Report: 報告目錄不存在: {report_dir}")
+        if use_carux_only and lines is None:
             return result_map
 
-        # 找最新的 .TXT 檔案 (依 st_mtime 排序，避免跨日時 HHMMSS 時間戳倒序)
-        # 用 set 去重，避免 Windows 大小寫不敏感時 *.TXT 與 *.txt 回傳相同檔案
-        txt_files = list({f.resolve() for f in
-            list(report_dir.glob("*.TXT")) + list(report_dir.glob("*.txt"))})
-        if not txt_files:
-            logger.info(f"AOI Report: 報告目錄中無 TXT 檔案: {report_dir}")
-            return result_map
+        if lines is None:
+            # 非目標機台沿用原有路徑替換與最新 TXT 選擇。
+            replace_from = self.config.aoi_report_path_replace_from
+            replace_to = self.config.aoi_report_path_replace_to
+            panel_str = str(panel_dir)
 
-        report_file = max(txt_files, key=lambda f: f.stat().st_mtime)
-        logger.info(f"AOI Report: 讀取報告 {report_file.name}")
+            if replace_from not in panel_str:
+                logger.warning(f"AOI Report: 路徑中找不到 '{replace_from}': {panel_str}")
+                return result_map
+
+            report_dir = Path(panel_str.replace(replace_from, replace_to, 1))
+            if not report_dir.exists():
+                logger.info(f"AOI Report: 報告目錄不存在: {report_dir}")
+                return result_map
+
+            txt_files = list({f.resolve() for f in
+                list(report_dir.glob("*.TXT")) + list(report_dir.glob("*.txt"))})
+            if not txt_files:
+                logger.info(f"AOI Report: 報告目錄中無 TXT 檔案: {report_dir}")
+                return result_map
+
+            report_file = max(txt_files, key=lambda f: f.stat().st_mtime)
+            logger.info(f"AOI Report: 讀取報告 {report_file.name}")
 
         try:
-            with open(report_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+            if lines is None:
+                with open(report_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
 
             if len(lines) < 2:
                 logger.warning(f"AOI Report: 報告內容不足 2 行: {report_file}")
@@ -7970,6 +7998,8 @@ class CAPIInferencer:
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
         client_product_resolution: Optional[Tuple[int, int]] = None,
+        carux_report_dir: Optional[Path] = None,
+        carux_report_only: bool = False,
     ):
         """依機種第六碼決定產品解析度，再路由至 v1 或 v2 實作。
 
@@ -8020,6 +8050,8 @@ class CAPIInferencer:
                 glass_id=glass_id,
                 aoi_report_override=aoi_report_override,
                 machine_judgment=machine_judgment,
+                **({"carux_report_dir": carux_report_dir, "carux_report_only": carux_report_only}
+                   if carux_report_only or carux_report_dir is not None else {}),
                 **({"boundary_product_resolution": product_resolution}
                    if client_product_resolution is not None and not self.config.is_new_architecture else {}),
             )
@@ -8041,6 +8073,8 @@ class CAPIInferencer:
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
         boundary_product_resolution: Optional[Tuple[int, int]] = None,
+        carux_report_dir: Optional[Path] = None,
+        carux_report_only: bool = False,
     ) -> List[ImageResult]:
         """
         處理整個面板的圖片 (包含 PINIGBI 灰塵檢查 和 AOI Defect 整合)
@@ -8321,6 +8355,9 @@ class CAPIInferencer:
                 panel_dir,
                 glass_id=glass_id or "",
                 machine_judgment=machine_judgment or "",
+                **({"carux_report_dir": carux_report_dir, "model_id": model_id or "",
+                    "carux_report_only": carux_report_only}
+                   if carux_report_only or carux_report_dir is not None else {}),
             )
             aoi_report_for_inference, _forced_bomb_count = self._aoi_report_with_forced_client_bomb_coords(
                 aoi_report,
@@ -10751,6 +10788,8 @@ class CAPIInferencer:
         glass_id: Optional[str] = None,
         aoi_report_override: Optional[Dict[str, List['AOIReportDefect']]] = None,
         machine_judgment: Optional[str] = None,
+        carux_report_dir: Optional[Path] = None,
+        carux_report_only: bool = False,
     ):
         """新架構：依 tile zone routing inner/edge model。
 
@@ -10793,6 +10832,9 @@ class CAPIInferencer:
                     Path(panel_dir),
                     glass_id=glass_id or "",
                     machine_judgment=machine_judgment or "",
+                    **({"carux_report_dir": carux_report_dir, "model_id": model_id or "",
+                        "carux_report_only": carux_report_only}
+                       if carux_report_only or carux_report_dir is not None else {}),
                 )
             )
             aoi_report_for_inference, _forced_bomb_count = self._aoi_report_with_forced_client_bomb_coords(

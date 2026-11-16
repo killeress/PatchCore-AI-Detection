@@ -57,6 +57,7 @@ from typing import Callable, Dict, Optional, Tuple, List, Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from capi_config import BombDefect, CAPIConfig
+from capi_carux_report import resolve_carux_report_dir, uses_carux_report
 from capi_image_orientation import (
     read_detection_image, panel_image_cache, use_capi_aoi_fast_path,
 )
@@ -3820,6 +3821,12 @@ class CAPIServer:
             return f"ERR:NOT_A_DIR ({image_dir})", "[]", [], False, None, {}, False, "", None
 
         logger.info(f"Inference directory: {panel_dir}")
+        carux_report_only = uses_carux_report(
+            getattr(self, "server_config", None), parsed.get("machine_no"),
+        )
+        carux_report_dir = resolve_carux_report_dir(
+            getattr(self, "server_config", None), parsed.get("machine_no"), panel_dir,
+        )
 
         aoi_report_override = None
         image_abnormal_enabled = bool(
@@ -3835,6 +3842,8 @@ class CAPIServer:
                     glass_id=parsed.get("glass_id", ""),
                     machine_judgment=parsed.get("machine_judgment", ""),
                     report_payload=parsed.get("aoi_report_payload", ""),
+                    **({"carux_report_dir": carux_report_dir, "model_id": model_id,
+                        "carux_report_only": True} if carux_report_only else {}),
                 )
             except Exception as exc:
                 logger.error(
@@ -3901,6 +3910,8 @@ class CAPIServer:
                     client_product_resolution=(
                         product_resolution if use_client_res else None
                     ),
+                    **({"carux_report_dir": carux_report_dir, "carux_report_only": True}
+                       if carux_report_only else {}),
                 )
 
                 # process_panel 回傳: (results, omit_vis, omit_overexposed, omit_info, is_duplicate, omit_image, aoi_report)

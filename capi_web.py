@@ -61,6 +61,7 @@ from capi_retention import (
     resolve_retention_policy, normalize_retention_policy,
 )
 from capi_image_naming import image_prefix_display_labels
+from capi_carux_report import resolve_carux_report_dir, uses_carux_report
 from capi_image_orientation import read_detection_image
 from capi_scratch_center import ScratchCenterMixin, SAMPLE_MANIFEST_LOCK
 from capi_mark_shadow import (
@@ -14534,6 +14535,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             server_config = getattr(server_inst, "server_config", {}) or {}
             facility = str((server_config.get("mes_report") or {}).get("facility") or "").strip().upper()
             use_client_resolution = facility == "CARUX"
+            carux_report_only = uses_carux_report(server_config, detail.get("machine_no"))
+            carux_report_dir = resolve_carux_report_dir(
+                server_config, detail.get("machine_no"), panel_dir,
+            )
             resolved_resolution = None
             if use_client_resolution:
                 from capi_inference import resolve_request_product_resolution
@@ -14566,6 +14571,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         glass_id=detail.get("glass_id", ""),
                         machine_judgment=machine_judgment,
                         report_payload=report_payload,
+                        **({"carux_report_dir": carux_report_dir, "model_id": model_id,
+                            "carux_report_only": True} if carux_report_only else {}),
                     )
 
             side_white_context = None
@@ -14651,6 +14658,8 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     aoi_report_override=aoi_report_override,
                     machine_judgment=machine_judgment,
                     **({"client_product_resolution": resolved_resolution} if use_client_resolution else {}),
+                    **({"carux_report_dir": carux_report_dir, "carux_report_only": True}
+                       if carux_report_only else {}),
                 )
 
             processing_seconds = _time.time() - start_time

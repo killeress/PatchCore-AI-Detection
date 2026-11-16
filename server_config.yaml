@@ -7,6 +7,8 @@
 
 # Linux hostname 含 aapi 時使用 AAPI Adapter；含 capi 時使用 CAPI Adapter。
 # AAPI 每日 AOI report share path 由 AAPI Adapter 固定處理，不放在設定檔。
+# CARUX CAPI 加四位數機台的 102 報告唯讀掛載根目錄；不回退原 Report 目錄。
+carux_aoi_report_root: /10.170.5.102
 
 # ------------------------------------------------------------
 # TCP Socket Server — 接收 AOI 機台請求
