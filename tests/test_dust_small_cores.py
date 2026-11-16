@@ -246,3 +246,47 @@ def test_feature_diagnostic_explains_residual_verification(monkeypatch):
     assert panels
     assert "Feature: DUST-VERIFIED" in texts
     assert "Verified: raw core + whole ROI" in texts
+
+
+def test_compact_dust_core_with_post_tiling_dog_inpaints_raw_before_reapplying_dog(monkeypatch):
+    from capi_image_preprocess_lab import apply_preprocess_pipeline
+    from capi_preprocess import image_preprocess_pipeline_for_zone
+
+    worker, tile, result, raw, dust, support, _ = _small_case(monkeypatch)
+    worker.config.dust_area_min = 5
+    worker.config.preprocess_after_tiling = True
+    worker.config.image_preprocess_pipeline = [{"method": "dog"}]
+
+    rng = np.random.default_rng(19)
+    raw[:] = 100
+    cv2.circle(raw, (64, 64), 4, 78, -1)  # ~60 px dark core, between dust_area_min=5 and 128
+    dust[:] = 0
+    cv2.circle(dust, (64, 64), 4, 255, -1)
+    omit = rng.integers(11, 14, size=raw.shape, dtype=np.uint8)
+    cv2.circle(omit, (64, 64), 4, 30, -1)
+    tile.original_image = raw.copy()
+    pipe = image_preprocess_pipeline_for_zone(worker.config, "inner")
+    tile.image = apply_preprocess_pipeline(raw, pipe)["image"]
+    tile.dust_two_stage_dust_mask = dust.copy()
+    tile.dust_two_stage_features = [dict(
+        abs_pos=(64, 57), type="bright", area=160, is_dust=False,
+        dust_ratio=0., dust_reason="clean",
+    )]
+
+    observed_min = []
+
+    def predict_dog(probe, *, inferencer, threshold, **kwargs):
+        # 確認 probe.image 是由原圖修補後重跑 DoG，而非直接修補已存在大面積黑塊的 DoG 圖
+        roi_min = int(np.min(probe.image[16:112, 16:112]))
+        observed_min.append(roi_min)
+        score = 0.42 if roi_min < 95 else 0.12
+        return score, np.full(raw.shape, score, np.float32)
+
+    monkeypatch.setattr(worker, "_check_dust_or_scratch_feature_with_context",
+                        lambda *a, **kw: (True, dust.copy(), 0.05, "COMPACT_OMIT"))
+    monkeypatch.setattr(worker, "predict_tile", predict_dog)
+
+    note = worker._confirm_aoi_dust_residual(result, tile, support, omit, omit)
+    assert "ROI_RESIDUAL: clear both_fills_below_threshold checks=2/2 -> DUST" in note
+    assert tile.is_suspected_dust_or_scratch is True
+    assert len(observed_min) == 2 and all(m >= 100 for m in observed_min)
