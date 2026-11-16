@@ -85,6 +85,7 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
+from capi_dust_review import GRID_DUST_TOP_PERCENT
 from capi_edge_cv import (
     CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel,
     compute_fg_aware_diff, compute_boundary_band_mask, compute_pc_roi_offset,
@@ -92,7 +93,6 @@ from capi_edge_cv import (
     inspect_aoi_edge_light_leak,
 )
 from capi_preprocess import (
-    GridDustReviewInput,
     PreprocessConfig,
     detect_panel_polygon,
     isolate_panel_foreground,
@@ -5218,34 +5218,16 @@ class CAPIInferencer:
             f" rescued_regions={rescued} response_regions={response_regions}"
         )
 
-    @staticmethod
-    def _grid_dust_residual_images(raw_panel, tile, edit_mask, polygon, config):
-        """Repair camera pixels and replay full-panel preprocessing at the original tile origin."""
-        from capi_dust_review import surface_removed_images
-        from capi_grid_canonicalization import canonicalize_panel_grid
-        from capi_image_preprocess_lab import apply_preprocess_pipeline
-
-        crop = np.s_[tile.y:tile.y + tile.height, tile.x:tile.x + tile.width]
-        for name, filled_tile in surface_removed_images(raw_panel[crop], edit_mask):
-            panel = raw_panel.copy()
-            panel[crop] = filled_tile
-            if not config.preprocess_after_tiling and config.image_preprocess_pipeline:
-                panel = apply_preprocess_pipeline(panel, config.image_preprocess_pipeline)["image"]
-            image = canonicalize_panel_grid(
-                panel, polygon, config.product_resolution, config.grid_samples_per_cell,
-            ).image[crop].copy()
-            del panel
-            yield name, image
+    def _uses_grid_dust_review(self, tile):
+        return (getattr(self.config, "grid_canonicalization_enabled", False)
+                and tile.aoi_roi_mask is not None
+                and not (tile.is_bright_spot_detection or tile.is_half_spot_detection))
 
     def _confirm_aoi_dust_residual(
         self, result, tile, support_map, omit_image, omit_crop, *,
-        focus_x=None, product_resolution=None, model_id=None, grid_input=None,
+        focus_x=None, product_resolution=None, model_id=None, precise=None,
     ):
-        """Require both surface-removal predictions to clear the entire AOI ROI.
-
-        CV evidence proposes an edit, never an OK verdict. Missing evidence or
-        an unsuccessful/abnormal residual prediction leaves the tile NG.
-        """
+        """Review Grid candidates on the original camera tile; otherwise run both residual probes."""
         if (tile.aoi_roi_mask is None or tile.is_bright_spot_detection or tile.is_half_spot_detection
                 or getattr(tile, "is_aoi_coord_below_threshold", False)):
             return ""
@@ -5265,11 +5247,12 @@ class CAPIInferencer:
             and all(region["is_dust"] for region in tile.dust_region_details)
             and small_hint is not None and np.any(small_hint)
         )
-        if not tile.is_suspected_dust_or_scratch and not small_core_review:
+        grid = self._uses_grid_dust_review(tile)
+        if not grid and not tile.is_suspected_dust_or_scratch and not small_core_review:
             return ""
 
         snapshot = dict(scope="whole_roi", status="unconfirmed", checks=[],
-                        threshold=tile.score_threshold, method="surface_removed_model_v1",
+                        threshold=tile.score_threshold, method="grid_original_roi" if grid else "surface_removed_model_v1",
                         small_core_review=small_core_review)
         tile.decision_context = dict(tile.decision_context or {}, aoi_dust_residual=snapshot)
         tile.is_suspected_dust_or_scratch = False
@@ -5279,7 +5262,7 @@ class CAPIInferencer:
             tile.is_suspected_dust_or_scratch = status == "clear"
             if status != "clear":
                 tile.scratch_filtered = False
-            elif small_core_review:
+            elif small_core_review and not grid:
                 for feature in tile.dust_two_stage_features:
                     feature["pre_residual_is_dust"] = bool(feature["is_dust"])
                     feature["pre_residual_dust_reason"] = feature.get("dust_reason", "")
@@ -5295,6 +5278,10 @@ class CAPIInferencer:
             for region in tile.dust_region_details or []:
                 region["roi_residual_status"] = status
                 region["roi_residual_reason"] = reason
+                if grid:
+                    region["roi_residual_method"] = snapshot["method"]
+                    if status == "clear":
+                        region["is_dust"] = True
                 if status != "clear":
                     region["core_is_dust"] = bool(region["is_dust"])
                     region["is_dust"] = False
@@ -5306,19 +5293,42 @@ class CAPIInferencer:
                             int((peak_image[0] - tile.x) * mw / tile.width),
                         )
             outcome = "DUST" if status == "clear" else "KEEP_NG"
+            if grid:
+                return (f" GRID_ORIGINAL_ROI: {status} {reason}"
+                        f" core={snapshot.get('dust_overlap_pixels', 0)}/{snapshot.get('core_pixels', 0)} -> {outcome}")
             return f" ROI_RESIDUAL: {status} {reason} checks={len(snapshot['checks'])}/2 -> {outcome}"
 
         try:
             threshold = float(tile.score_threshold)
             if not np.isfinite(threshold) or threshold <= 0 or omit_crop is None:
                 return finish("unconfirmed", "missing_threshold_or_omit")
-            if grid_input is None and getattr(self.config, "grid_canonicalization_enabled", False):
-                return finish("unconfirmed", "missing_grid_preprocessing")
-            _, precise, _, _ = self._check_dust_or_scratch_feature_with_context(
-                omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
-                extension_override=0, focus_x=focus_x, product_resolution=product_resolution,
-                preserve_small_cores=True,
-            )
+            if precise is None:
+                _, precise, _, _ = self._check_dust_or_scratch_feature_with_context(
+                    omit_image, tile.x, tile.y, tile.width, tile.height, omit_crop,
+                    extension_override=0, focus_x=focus_x, product_resolution=product_resolution,
+                    preserve_small_cores=True,
+                )
+            if grid:
+                from capi_dust_review import review_grid_dust_original
+                if (support_map is None or tile.original_image is None
+                        or tile.original_image.shape[:2] != (tile.height, tile.width)):
+                    return finish("unconfirmed", "missing_grid_evidence")
+                # Build the inspection area from geometry and configured exclusions.
+                # A cold model pixel can still contain an independent raw defect.
+                scope = tile.aoi_roi_mask.astype(np.float32)
+                if tile.mask is not None:
+                    scope *= cv2.resize((tile.mask > 0).astype(np.uint8), (scope.shape[1], scope.shape[0]),
+                                        interpolation=cv2.INTER_NEAREST)
+                scope, _ = self._mask_tile_corner_exclusion(tile, scope)
+                scope, _ = self._mask_tile_mark_exclusion_regions(tile, scope)
+                scope, _ = self._mask_tile_configured_exclude_regions(tile, scope, model_id)
+                evidence, features = review_grid_dust_original(
+                    tile.original_image, omit_crop, precise, tile.dust_heatmap_binary, scope,
+                    panel_polygon=result.panel_polygon, tile_origin=(tile.x, tile.y),
+                )
+                tile.dust_low_coverage_features = features
+                snapshot.update(evidence)
+                return finish(evidence["status"], evidence["reason"])
             small_cores = small_particle_core_mask(precise, core_area_limit)
             snapshot["small_core_pixels"] = int(np.count_nonzero(small_cores)) if small_cores is not None else 0
             if small_core_review and not snapshot["small_core_pixels"]:
@@ -5354,7 +5364,7 @@ class CAPIInferencer:
             model = self._get_inferencer_for_zone(prefix, tile.zone or "inner")
             if model is None:
                 return finish("unconfirmed", "missing_model")
-            preprocess_config = grid_input.config if grid_input is not None else self.config
+            preprocess_config = self.config
             tile_pipeline = []
             if (getattr(preprocess_config, "preprocess_after_tiling", False)
                     and tile.original_image is not None
@@ -5363,21 +5373,8 @@ class CAPIInferencer:
                 tile_pipeline = image_preprocess_pipeline_for_zone(
                     preprocess_config, tile.zone or "inner",
                 ) or []
-            if grid_input is not None:
-                if result.panel_polygon is None or preprocess_config.product_resolution is None:
-                    return finish("unconfirmed", "missing_grid_geometry")
-                raw_panel = grid_input.raw_panel
-                width, height = result.image_size
-                if (raw_panel.shape != (height, width) or edit_mask.shape != (tile.height, tile.width)
-                        or not (0 <= tile.x < tile.x + tile.width <= width
-                                and 0 <= tile.y < tile.y + tile.height <= height)):
-                    return finish("unconfirmed", "grid_source_geometry_mismatch")
-                variants = self._grid_dust_residual_images(
-                    raw_panel, tile, edit_mask, result.panel_polygon, preprocess_config,
-                )
-            else:
-                base_image = tile.original_image if tile_pipeline else tile.image
-                variants = surface_removed_images(base_image, edit_mask)
+            base_image = tile.original_image if tile_pipeline else tile.image
+            variants = surface_removed_images(base_image, edit_mask)
             for name, image in variants:
                 if tile_pipeline:
                     from capi_image_preprocess_lab import apply_preprocess_pipeline
@@ -8628,6 +8625,7 @@ class CAPIInferencer:
                         context_focus_x = focus_image_x - tx if focus_image_x >= 0 else None
                         
                         # Step A: 進階灰塵偵測 (CLAHE + Otsu + 面積篩選)
+                        grid = self._uses_grid_dust_review(tile)
                         is_dust, dust_mask, bright_ratio, detail_text = \
                             self._check_dust_or_scratch_feature_with_context(
                                 omit_image,
@@ -8636,9 +8634,11 @@ class CAPIInferencer:
                                 tw,
                                 th,
                                 omit_crop,
+                                **({"extension_override": 0, "preserve_small_cores": True} if grid else {}),
                                 focus_x=context_focus_x,
                                 product_resolution=product_resolution,
                             )
+                        precise = dust_mask if grid else None
                         dust_mask = self._limit_aoi_roi_mask(tile, dust_mask)
                         tile.dust_mask = dust_mask
                         tile.dust_bright_ratio = bright_ratio
@@ -8715,7 +8715,7 @@ class CAPIInferencer:
                             else:
                                 # 所有異常區域都與灰塵重疊 → 初步標記為灰塵
                                 # 如果啟用兩階段判定，進行二次確認
-                                if self.config.dust_two_stage_enabled and not (region_details and all(
+                                if self.config.dust_two_stage_enabled and not grid and not (region_details and all(
                                     region.get("feature_review_reason") == "all_features_match_precise_dust"
                                     for region in region_details
                                 )):
@@ -8781,7 +8781,7 @@ class CAPIInferencer:
                             detail_text += self._confirm_aoi_dust_residual(
                                 result, tile, review_support_map, omit_image, omit_crop,
                                 focus_x=context_focus_x, product_resolution=product_resolution,
-                                model_id=model_id,
+                                model_id=model_id, precise=precise,
                             )
 
                             # 產生 Debug 可視化圖
@@ -8812,7 +8812,7 @@ class CAPIInferencer:
                             detail_text += self._confirm_aoi_dust_residual(
                                 result, tile, None, omit_image, omit_crop,
                                 focus_x=context_focus_x, product_resolution=product_resolution,
-                                model_id=model_id,
+                                model_id=model_id, precise=precise,
                             )
                         else:
                             detail_text += " NO_DUST -> REAL_NG"
@@ -9669,14 +9669,12 @@ class CAPIInferencer:
         cpu_workers: int = 4,
         model_id: Optional[str] = None,
         product_resolution: Optional[Tuple[int, int]] = None,
-        grid_inputs: Optional[Dict[Path, GridDustReviewInput]] = None,
     ) -> None:
         """Apply OMIT filtering to PatchCore heatmaps and binary bright spots."""
         if omit_image is None:
             return
 
         def _dust_check_one(result: ImageResult) -> None:
-            grid_input = grid_inputs.get(result.image_path) if grid_inputs else None
             binary_only = (self.config.should_skip_file(result.image_path.name, self.station_adapter)
                            or self._get_image_prefix(result.image_path.name) == "B0F00000")
             if (binary_only
@@ -9727,6 +9725,10 @@ class CAPIInferencer:
                     focus_image_x = int(getattr(tile, 'anomaly_peak_x', -1))
                 context_focus_x = focus_image_x - tx if focus_image_x >= 0 else None
 
+                grid = self._uses_grid_dust_review(tile)
+                dust_options = {"extension_override": 0} if tile.is_bright_spot_detection else {}
+                if grid:
+                    dust_options = {"extension_override": 0, "preserve_small_cores": True}
                 is_dust, dust_mask, bright_ratio, detail_text = \
                     self._check_dust_or_scratch_feature_with_context(
                         omit_image,
@@ -9735,10 +9737,11 @@ class CAPIInferencer:
                         tw,
                         th,
                         omit_crop,
-                        **({"extension_override": 0} if tile.is_bright_spot_detection else {}),
+                        **dust_options,
                         focus_x=context_focus_x,
                         product_resolution=product_resolution,
                     )
+                precise = dust_mask if grid else None
                 dust_mask = self._limit_aoi_roi_mask(tile, dust_mask)
                 tile.dust_mask = dust_mask
                 tile.dust_bright_ratio = bright_ratio
@@ -9823,7 +9826,7 @@ class CAPIInferencer:
                             tile.anomaly_peak_y = tile.y + int(real_peak_yx[0] * tile.height / amap_h)
                             tile.anomaly_peak_x = tile.x + int(real_peak_yx[1] * tile.width / amap_w)
                     else:
-                        if self.config.dust_two_stage_enabled and not (region_details and all(
+                        if self.config.dust_two_stage_enabled and not grid and not (region_details and all(
                             region.get("feature_review_reason") == "all_features_match_precise_dust"
                             for region in region_details
                         )):
@@ -9889,7 +9892,7 @@ class CAPIInferencer:
                     detail_text += self._confirm_aoi_dust_residual(
                         result, tile, review_support_map, omit_image, omit_crop,
                         focus_x=context_focus_x, product_resolution=product_resolution,
-                        model_id=model_id, grid_input=grid_input,
+                        model_id=model_id, precise=precise,
                     )
                     rescue_dust_mask = (
                         _ts_dust_mask_no_ext
@@ -9932,7 +9935,7 @@ class CAPIInferencer:
                     detail_text += self._confirm_aoi_dust_residual(
                         result, tile, None, omit_image, omit_crop,
                         focus_x=context_focus_x, product_resolution=product_resolution,
-                        model_id=model_id, grid_input=grid_input,
+                        model_id=model_id, precise=precise,
                     )
                     detail_text += self._apply_aoi_edge_light_leak_rescue(
                         result,
@@ -10068,7 +10071,8 @@ class CAPIInferencer:
                     "product_bounds": [x1, y1, x2, y2],
                     "tile_polygon": local_polygon.tolist(),
                     "full_tile_score": float(score), "roi_score": roi_score,
-                    "display_top_percent": float(self.config.dust_heatmap_top_percent),
+                    "display_top_percent": (GRID_DUST_TOP_PERCENT if self._uses_grid_dust_review(tile)
+                                            else float(self.config.dust_heatmap_top_percent)),
                     "score_method": "binary_roi" if (tile.is_bright_spot_detection or tile.is_half_spot_detection) else "max_ratio",
                     "outside_ignored": True,
                 })
@@ -11079,7 +11083,6 @@ class CAPIInferencer:
                 or getattr(self.config, "grid_canonicalization_enabled", False)
             ),
             generate_grid_tiles=bool(self.config.grid_tiling_enabled),
-            grid_dust_review_lightings=tuple(aoi_report_for_inference) if self.config.aoi_judgment_roi_enabled else (),
             **panel_boundary_config_for_station(self.station_adapter.profile),
             preprocess_after_tiling=getattr(self.config, "preprocess_after_tiling", False),
             product_resolution=product_resolution or self._product_resolution(),
@@ -11499,8 +11502,6 @@ class CAPIInferencer:
             cpu_workers=cpu_workers,
             model_id=model_id,
             product_resolution=product_resolution,
-            grid_inputs={r.image_path: r.grid_dust_input for r in panel_results.values()
-                         if getattr(r, "grid_dust_input", None) is not None},
         )
         self._apply_aoi_peak_postprocess(results)
         self._apply_bomb_postprocess(results, bomb_info, product_resolution)

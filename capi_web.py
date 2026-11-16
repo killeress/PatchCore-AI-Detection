@@ -2106,6 +2106,10 @@ def _unmeasured_aoi_peaks(detected, peaks):
 def _within_spec_unmeasured_reason(evidence):
     if "peaks_image_xy" in evidence:
         return f"AOI 有 {evidence['count']} 個 REAL_NG 熱區，規格內未完整量測，保留 NG"
+    if evidence.get("method") == "grid_original_roi":
+        if evidence["status"] == "unconfirmed":
+            return "Pixel Grid 灰塵證據不足，保留 NG"
+        return "AOI 原圖另有異常特徵，規格內未量到該位置，保留 NG"
     if evidence["status"] == "unconfirmed":
         return "AOI 去塵複判未確認，保留 NG"
     return "去塵後 AOI 仍有異常，規格內未量到殘留位置，保留 NG"
@@ -2840,6 +2844,8 @@ def _save_within_spec_dot_visuals(
             continue
         px, py = peak_xy
         label = "ROI-NG" if "peaks_image_xy" in unmeasured_aoi else "ROI-R"
+        if unmeasured_aoi.get("method") == "grid_original_roi":
+            label = "RAW"
         for canvas in (detected.get("overlay"), dust_overlay, no_detect_overlay):
             if canvas is not None:
                 cv2.circle(canvas, (px, py), 8, (0, 0, 255), 1)

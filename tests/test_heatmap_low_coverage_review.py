@@ -115,6 +115,14 @@ def test_roi_residual_verdict_overrides_preliminary_feature_match(monkeypatch, s
     assert not any(text.startswith("FEATURE_MATCH") for text in texts)
 
 
+def test_grid_review_displays_original_evidence(monkeypatch):
+    texts = _capture_text(monkeypatch)
+    region = _region(is_dust=True, roi_residual_status="clear", roi_residual_method="grid_original_roi")
+    build_region_zoom_panels(np.ones((128, 128), np.uint8), None, [region], iou_threshold=.1)
+    assert "GRID: Core in dust + original clear -> DUST" in texts
+    assert not any("2/2" in text for text in texts)
+
+
 def test_remaining_model_point_is_marked_without_moving_original_heat(tmp_path, monkeypatch):
     texts = _capture_text(monkeypatch)
     image = np.full((128, 128), 90, np.uint8)

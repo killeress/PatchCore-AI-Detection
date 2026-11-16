@@ -7,6 +7,8 @@ An empty or incomplete observation must therefore never suppress a region.
 import cv2
 import numpy as np
 
+GRID_DUST_TOP_PERCENT = 0.4
+
 
 def recover_small_particle_cores(binary, area_min, area_max, extension):
     """Keep native pixels of small particles accepted by the expanded detector.
@@ -66,7 +68,7 @@ def build_aoi_roi_core_mask(anomaly_map, heatmap_binary, roi_mask, top_percent):
     return core
 
 
-def _is_real_grayscale_omit(omit_crop, gray_image):
+def _is_real_grayscale_omit(omit_crop, gray_image, *, min_levels=3):
     """確認 omit_crop 為真實灰階 OMIT 影像，而非同圖佔位或二值遮罩。"""
     if omit_crop is None or gray_image is None:
         return False
@@ -79,7 +81,7 @@ def _is_real_grayscale_omit(omit_crop, gray_image):
     if (omit_gray.ndim != 2 or gray.ndim != 2 or omit_gray.shape != gray.shape
             or not np.isfinite(omit_gray).all() or np.array_equal(omit_gray, gray)):
         return False
-    return int(np.unique(omit_gray).size) > 2
+    return np.unique(omit_gray).size >= min_levels
 
 
 def _recover_local_omit_dust_mask(original_image, precise_dust_mask, omit_crop):
@@ -206,6 +208,7 @@ def review_low_coverage_regions(
     real_omit=None,
     allow_zero_overlap=False,
     panel_edge_distance=None,
+    smoothing_kernel=5,
 ):
     """Return copied region decisions and feature evidence in image coordinates.
 
@@ -286,7 +289,7 @@ def review_low_coverage_regions(
     # Suppress the LCD pixel lattice before measuring local dark/bright contrast.
     # A robust noise estimate avoids letting one strong dust spot hide a weaker
     # independent defect, as a percentile of positive contrast would do.
-    smooth = cv2.GaussianBlur(gray.astype(np.float32), (5, 5), 0)
+    smooth = cv2.GaussianBlur(gray.astype(np.float32), (smoothing_kernel, smoothing_kernel), 0)
     residual = smooth - cv2.GaussianBlur(smooth, (31, 31), 0)
     ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     inner_edge = allowed & (cv2.erode(allowed.astype(np.uint8), np.ones((5, 5), np.uint8)) == 0)
@@ -449,6 +452,7 @@ def review_low_coverage_regions(
             # 外側補判前必須先完成內側檢查（即使 ROI 內無灰塵像素），
             # 否則 ROI 內的獨立暗/亮點會被 ROI 外的灰塵「代為放行」。
             inner_scan = _scan_features_in_scope(zone, region)
+            region["raw_scan_complete"] = inner_scan is not None
             region_features = inner_scan or []
         if not region_features and border_review and inner_scan is not None:
             outer_collar = (
@@ -479,6 +483,62 @@ def review_low_coverage_regions(
             region["is_dust"] = True
             region["feature_review_reason"] = "all_features_match_precise_dust"
     return regions, features
+
+
+def review_grid_dust_original(original, omit_crop, precise, core_mask, inspection_mask,
+                              *, panel_polygon, tile_origin):
+    """Verify the entire measured ROI on the camera tile, including areas below the model threshold."""
+    evidence = dict(status="unconfirmed", reason="missing_grid_evidence",
+                    top_percent=GRID_DUST_TOP_PERCENT)
+    if any(value is None for value in (original, omit_crop, precise, core_mask, inspection_mask)):
+        return evidence, []
+    if (not _is_real_grayscale_omit(omit_crop, original, min_levels=2)
+            or precise.shape != original.shape[:2] or core_mask.ndim != 2
+            or not core_mask.size or core_mask.shape != inspection_mask.shape
+            or not np.isfinite(precise).all() or not np.isfinite(core_mask).all()
+            or not np.isfinite(inspection_mask).all()):
+        return evidence, []
+    core = core_mask > 0
+    allowed = inspection_mask > 0
+    dust = cv2.resize((precise > 0).astype(np.uint8), (core.shape[1], core.shape[0]),
+                      interpolation=cv2.INTER_NEAREST) > 0
+    count = int(np.count_nonzero(core))
+    overlap = int(np.count_nonzero(core & dust & allowed))
+    evidence.update(core_pixels=count, dust_overlap_pixels=overlap)
+    if not count or overlap != count:
+        evidence["reason"] = "empty_core" if not count else "core_outside_precise_dust"
+        return evidence, []
+    h, w = original.shape[:2]
+    native_core = cv2.resize(core.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+    if np.any((native_core > 0) & (precise == 0)):
+        evidence["reason"] = "core_outside_precise_dust"
+        return evidence, []
+
+    scope = allowed.astype(np.uint8)
+    scope_overlap = int(np.count_nonzero(allowed & dust))
+    region = dict(label_id=1, is_dust=False, coverage=scope_overlap / np.count_nonzero(allowed),
+                  dust_overlap=scope_overlap)
+    reviewed, features = review_low_coverage_regions(
+        original, precise, scope, scope, [region], coverage_threshold=1.01,
+        evaluation_mask=scope, omit_crop=omit_crop,
+        panel_edge_distance=_tile_boundary_distance((h, w), panel_polygon, tile_origin),
+        # Suppress the periodic LCD lattice before extracting raw contrast features.
+        smoothing_kernel=7,
+    )
+    review = reviewed[0]
+    evidence.update(raw_roi_pixels=review.get("feature_review_scope_pixels", 0),
+                    unmatched_features=review.get("feature_review_unmatched", 0),
+                    panel_boundary_seen=review.get("panel_boundary_seen", False))
+    if not review.get("raw_scan_complete"):
+        evidence["reason"] = "incomplete_original_review"
+    elif evidence["unmatched_features"]:
+        feature = max((f for f in features if not f["is_dust"]), key=lambda f: f["contrast"])
+        x, y = feature["real_pos"]
+        evidence.update(status="remaining", reason="unmatched_original_feature",
+                        remaining_image_xy=[tile_origin[0] + x, tile_origin[1] + y])
+    else:
+        evidence.update(status="clear", reason="core_in_precise_dust_and_original_clear")
+    return evidence, features
 
 
 def confirmed_roi_surface_mask(

@@ -768,6 +768,11 @@ def build_region_zoom_panels(
             elif region.get("bomb_status") == "PARTIAL_BOMB":
                 reason = (f"BOMB: {region['bomb_excluded_px']} px; "
                           f"remaining NG: {region['bomb_remaining_px']} px")
+            elif region.get("roi_residual_method") == "grid_original_roi":
+                status = region["roi_residual_status"]
+                reason = ("GRID: Core in dust + original clear -> DUST" if status == "clear" else
+                          "GRID: Unmatched original feature -> REAL_NG" if status == "remaining" else
+                          "GRID: Dust unconfirmed -> KEEP_NG")
             elif region.get("roi_residual_status"):
                 status = region["roi_residual_status"]
                 reason = ("ROI_RESIDUAL 2/2 clear -> DUST" if status == "clear" else
@@ -1442,7 +1447,8 @@ class HeatmapManager:
             ry = int((residual_xy[1] - getattr(tile_info, 'y', 0)) * sy)
             if 0 <= rx < tile_size and 0 <= ry < tile_size:
                 cv2.drawMarker(heatmap_panel, (rx, ry), (0, 0, 255), cv2.MARKER_CROSS, 14, 2)
-                cv2.putText(heatmap_panel, 'ROI-R', (rx + 10, ry + 5),
+                peak_label = 'RAW' if residual_review.get('method') == 'grid_original_roi' else 'ROI-R'
+                cv2.putText(heatmap_panel, peak_label, (rx + 10, ry + 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # --- Panel 3 & 4 & 5: OMIT Crop & Dust Mask & IOU Debug (如果有 tile_info) ---
@@ -1657,7 +1663,10 @@ class HeatmapManager:
                 verdict = "BOMB: AOI priority (Filtered as OK)"
             verdict_color = (255, 0, 255)  # 洋紅色
         elif is_dust:
-            if ((getattr(tile_info, 'decision_context', None) or {}).get('aoi_dust_residual') or {}).get('status') == 'clear':
+            review = (getattr(tile_info, 'decision_context', None) or {}).get('aoi_dust_residual') or {}
+            if review.get('status') == 'clear' and review.get('method') == 'grid_original_roi':
+                verdict = "DUST (Filtered as OK) | GRID: Top 0.4% in dust + original clear"
+            elif review.get('status') == 'clear':
                 verdict = "DUST (Filtered as OK) | ROI_RESIDUAL 2/2 clear"
             elif "TWO_STAGE" in str(dust_detail):
                 verdict = "DUST (Filtered as OK) | TWO_STAGE -> DUST"
