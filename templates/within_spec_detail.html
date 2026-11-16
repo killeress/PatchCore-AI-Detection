@@ -381,7 +381,7 @@
         沒有可加總的有效點。OpenCV 初步抓到 {{ raw_candidates }} 個點候選，
         其中灰塵遮罩排除 {{ dust_filtered }} 個、MARK/不檢測區排除 {{ no_detect_filtered }} 個，
         最後有效點 {{ final_candidates }} 個。
-        {% if summary.missed_dot_tile_count %}
+        {% if summary.missed_dot_tile_count and not final_candidates %}
         因 AOI tile 最後沒有有效點，仍判定為點偵測未命中。
         {% endif %}
     </div>
@@ -434,7 +434,11 @@
             <div class="ws-visual-head">
                 <div>{{ visual.image_name }} / Tile {{ visual.tile_id }} / {{ visual.dot_label }}</div>
                 <div>
+                    {% if visual.unmeasured_residual_reason %}
+                    {{ visual.unmeasured_residual_reason }}。有效點 {{ visual.count }} 個
+                    {% else %}
                     {{ visual.count }} 點，max {{ "%.4f"|format(visual.max_size_mm or 0) }} mm
+                    {% endif %}
                     {% if visual.non_dot_residues %}，非點狀NG {{ visual.non_dot_residues|length }}{% endif %}
                     {% if visual.dust_mask_filtered_count %}，灰塵排除 {{ visual.dust_mask_filtered_count }}{% endif %}
                     {% if visual.no_detect_mask_filtered_count %}，不檢測區排除 {{ visual.no_detect_mask_filtered_count }}{% endif %}

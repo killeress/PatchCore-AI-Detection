@@ -146,6 +146,51 @@ def _recover_local_omit_dust_mask(original_image, precise_dust_mask, omit_crop):
     return recovered
 
 
+# The 5x5 smoothing followed by 31x31 background subtraction can spread a
+# brightness step this far on either side of the measured product boundary.
+_EDGE_RESPONSE_RADIUS = 5 // 2 + 31 // 2
+
+
+def _tile_boundary_distance(shape, panel_polygon, tile_origin):
+    if panel_polygon is None:
+        return None
+    poly = np.asarray(panel_polygon, dtype=np.float32)
+    if poly.shape != (4, 2) or not np.isfinite(poly).all() or not cv2.isContourConvex(poly):
+        return None
+    # An inward-shifted tile can end just inside the physical edge. Rasterize
+    # the actual polygon on a padded canvas, never the perimeter of the crop.
+    pad = _EDGE_RESPONSE_RADIUS
+    h, w = shape
+    local = np.rint(poly - tile_origin + pad).astype(np.int32)
+    canvas = np.ones((h + 2 * pad, w + 2 * pad), np.uint8)
+    cv2.polylines(canvas, [local], True, 0, 1)
+    if np.all(canvas):
+        return None
+    distances = cv2.distanceTransform(canvas, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    return distances[pad:pad + h, pad:pad + w]
+
+
+def _panel_boundary_responses(residual, threshold, allowed, distance):
+    # A brightness step produces adjacent dark and bright responses. Bridge
+    # only their small zero crossing to check their geometry, without changing
+    # the features, the edit mask, or the model inputs.
+    active = (np.abs(residual) >= threshold) & allowed
+    contact = active & (distance <= 3)
+    _, contact_labels, stats, _ = cv2.connectedComponentsWithStats(
+        contact.astype(np.uint8), connectivity=8,
+    )
+    long_contact = np.maximum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT]) >= 31
+    long_contact[0] = False
+    if not np.any(long_contact):
+        return None
+    joined = cv2.dilate(active.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    _, labels = cv2.connectedComponents(joined, connectivity=8)
+    anchored = np.unique(labels[long_contact[contact_labels]])
+    # Reject even a small connected branch that protrudes into the product.
+    inward = np.unique(labels[active & (distance > _EDGE_RESPONSE_RADIUS)])
+    return active & np.isin(labels, np.setdiff1d(anchored, inward))
+
+
 def review_low_coverage_regions(
     original_image,
     precise_dust_mask,
@@ -160,6 +205,7 @@ def review_low_coverage_regions(
     omit_crop=None,
     real_omit=None,
     allow_zero_overlap=False,
+    panel_edge_distance=None,
 ):
     """Return copied region decisions and feature evidence in image coordinates.
 
@@ -248,7 +294,7 @@ def review_low_coverage_regions(
                      if real_omit is None else bool(real_omit))
 
     def _scan_features_in_scope(
-        scope_mask, region_id, *, allow_outside_roi=False,
+        scope_mask, region, *, allow_outside_roi=False,
     ):
         bg_mask = scope_mask & ~dust
         background = residual[bg_mask]
@@ -258,6 +304,9 @@ def review_low_coverage_regions(
         noise = 1.4826 * float(np.median(np.abs(background - median)))
         contrast_threshold = max(2.0, 4.0 * noise)
         ring_allowed = ~allowed if allow_outside_roi else allowed
+        boundary_response = None
+        if not allow_outside_roi and panel_edge_distance is not None:
+            boundary_response = _panel_boundary_responses(residual, contrast_threshold, allowed, panel_edge_distance)
         found = []
         for sign, spot_type in ((-1, "dark"), (1, "bright")):
             # Components are extracted before ROI clipping: a cut component is
@@ -277,6 +326,13 @@ def review_low_coverage_regions(
                                or y + h > height - 2
                                or (not allow_outside_roi and np.any(component & ~allowed))
                                or (allow_outside_roi and np.any(component & allowed)))
+                if clipped and boundary_response is not None:
+                    inside = component & allowed
+                    if not np.any(inside & ~boundary_response):
+                        _, _, span_x, span_y = cv2.boundingRect(inside.astype(np.uint8))
+                        if max(span_x, span_y) >= 31:
+                            region["panel_boundary_seen"] = True
+                            continue
                 ring = (cv2.dilate(component.astype(np.uint8), ring_kernel) > 0) & ~component
                 ring &= ring_allowed if allow_outside_roi else allowed
                 if not np.any(ring):
@@ -329,7 +385,7 @@ def review_low_coverage_regions(
                                                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 contour = max(contours, key=cv2.contourArea).reshape(-1, 2).tolist()
                 feature = {
-                    "zone_id": region_id,
+                    "zone_id": region["label_id"],
                     "abs_pos": (int(np.mean(xs)), int(np.mean(ys))),
                     "area": area,
                     "type": spot_type,
@@ -392,7 +448,7 @@ def review_low_coverage_regions(
         if np.any(zone) and (np.any(zone & dust) or border_review):
             # 外側補判前必須先完成內側檢查（即使 ROI 內無灰塵像素），
             # 否則 ROI 內的獨立暗/亮點會被 ROI 外的灰塵「代為放行」。
-            inner_scan = _scan_features_in_scope(zone, region["label_id"])
+            inner_scan = _scan_features_in_scope(zone, region)
             region_features = inner_scan or []
         if not region_features and border_review and inner_scan is not None:
             outer_collar = (
@@ -400,7 +456,7 @@ def review_low_coverage_regions(
             ) & ~allowed
             if np.any(outer_collar & dust):
                 outer_features = _scan_features_in_scope(
-                    outer_collar, region["label_id"], allow_outside_roi=True,
+                    outer_collar, region, allow_outside_roi=True,
                 )
                 if outer_features and all(f["is_dust"] for f in outer_features):
                     region_features = outer_features
@@ -434,6 +490,8 @@ def confirmed_roi_surface_mask(
     small_core_mask=None,
     omit_crop=None,
     high_coverage_fallback=False,
+    panel_polygon=None,
+    tile_origin=(0, 0),
 ):
     """Confirm surface components using all active ROI pixels, without Top%/half-peak cuts.
 
@@ -480,6 +538,7 @@ def confirmed_roi_surface_mask(
                   dust_overlap=overlap, area=int(active.sum()))
     # This auxiliary region describes every above-threshold ROI pixel. It does
     # not replace the stored Top% labels or their measured coverage.
+    edge_distance = _tile_boundary_distance(image.shape[:2], panel_polygon, tile_origin)
     reviewed, features = review_low_coverage_regions(
         image, dust, support, labels, [region], coverage_threshold=1.01,
         evaluation_mask=roi,
@@ -489,10 +548,13 @@ def confirmed_roi_surface_mask(
         real_omit=has_real_omit,
         # 僅 ROI 外側有灰塵時，整區候選重疊量為 0，仍須進入外側補判
         allow_zero_overlap=has_real_omit,
+        panel_edge_distance=edge_distance,
     )
     _, dust_labels = cv2.connectedComponents((dust > 0).astype(np.uint8), connectivity=8)
     smooth = cv2.GaussianBlur(gray.astype(np.float32), (5, 5), 0)
     residual = smooth - cv2.GaussianBlur(smooth, (31, 31), 0)
+    # Keep the recognized perimeter intact in both residual model inputs.
+    protect_edge = reviewed[0].get("panel_boundary_seen", False)
 
     if not reviewed[0].get("is_dust"):
         review_reason = reviewed[0].get("feature_review_reason", "missing_evidence")
@@ -521,6 +583,8 @@ def confirmed_roi_surface_mask(
                     part = comp & active_img
                     if not np.any(part):
                         continue
+                    if protect_edge and not np.any(part & (edge_distance > _EDGE_RESPONSE_RADIUS)):
+                        continue  # This band must remain visible in both original-model probes.
                     comp_dev = np.abs(residual[part] - bg_med)
                     # 逐元件判定：僅確認自身具弱訊號的元件，略過無訊號元件
                     if not (float(np.max(comp_dev)) >= peak_thr
@@ -541,6 +605,8 @@ def confirmed_roi_surface_mask(
                             return None, features, "fallback_strong_feature"
                     edit |= comp
                 if np.count_nonzero(edit) >= 3:
+                    if protect_edge and np.any(edit & (edge_distance <= _EDGE_RESPONSE_RADIUS)):
+                        return None, features, "surface_on_panel_boundary"
                     ring = (cv2.dilate(edit.astype(np.uint8), np.ones((11, 11), np.uint8)) > 0) & ~edit & allowed
                     if np.count_nonzero(ring) >= 16:
                         return edit.astype(np.uint8) * 255, features, "confirmed_surface"
@@ -615,6 +681,8 @@ def confirmed_roi_surface_mask(
 
     if not selected and not outer_selected:
         return None, features, "missing_surface_evidence"
+    if protect_edge and np.any(edit & (edge_distance <= _EDGE_RESPONSE_RADIUS)):
+        return None, features, "surface_on_panel_boundary"
     if selected:
         surface = np.isin(dust_labels, list(selected - outer_selected))
         if np.any(surface) and (np.any(surface & ~allowed) or np.any(surface[:2]) or np.any(surface[-2:])

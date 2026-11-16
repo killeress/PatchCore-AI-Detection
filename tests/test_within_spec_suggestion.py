@@ -748,6 +748,141 @@ def test_within_spec_counts_dust_mask_candidate_as_zero_point(tmp_path):
     assert (visual_dir / Path(urls["dust_overlay_url"]).name).is_file()
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_within_spec_keeps_unmeasured_aoi_shadow_ng_after_dust_filter(tmp_path, deferred):
+    # Same geometry as the reported failure: a low-contrast shadow and a
+    # separate compact dust dot. The model peak is in source-image coordinates.
+    path = tmp_path / "W0F00000.png"
+    y, x = np.indices((96, 144))
+    shadow = 2 * np.exp(-((x - 72)**2 + (y - 48)**2) / (2 * 9**2))
+    image = np.rint(128 - shadow).astype(np.uint8)
+    cv2.circle(image, (96, 29), 3, 60, -1)
+    cv2.imwrite(str(path), image)
+    detail = _with_aoi_roi(_detail(path), (12, 12, 84, 84))
+    tile = detail["images"][0]["tiles"][0]
+    tile.update(x=24, tile_id=0)
+    mask = np.zeros((96, 96), dtype=np.uint8)
+    cv2.circle(mask, (72, 29), 7, 255, -1)
+    tile["_runtime_dust_mask"] = mask
+    context = json.loads(tile["decision_context"])
+    context["aoi_dust_residual"] = {
+        "status": "remaining", "reason": "residual_score_at_or_above_threshold",
+        "remaining_image_xy": [72, 48],
+    }
+    tile["decision_context"] = json.dumps(context)
+    rules = _rules()
+    rules["default"]["dot_detection"]["diff_threshold"] = 3
+    jobs = [] if deferred else None
+    result = _evaluate_within_spec_suggestion_detail(
+        detail, rules, visual_output_dir=tmp_path, visual_url_prefix="/visuals", deferred_visual_jobs=jobs,
+    )
+    if deferred:
+        _flush_within_spec_visual_jobs(jobs)
+    assert result["candidate_summary"]["dust_mask_filtered_count"] == 1
+    assert result["candidate_summary"]["final_candidate_count"] == 0
+    assert result["panel_totals"] == []
+    assert result["suggestion"] is None
+    assert result["missed_dot_tiles"][0]["aoi_dust_residual"]["peak_crop_xy"] == [48, 48]
+    assert "未量到殘留位置" in _format_within_spec_panel_summary(result)
+    visual = result["visuals"][0]
+    assert "保留 NG" in visual["unmeasured_residual_reason"]
+    overlay = cv2.imread(str(tmp_path / Path(visual["urls"]["dust_overlay_url"]).name))
+    assert tuple(overlay[24 + 48, 48 + 8]) == (0, 0, 255)
+
+
+@pytest.mark.parametrize(("status", "peak", "can_pass"), [
+    ("remaining", [48, 48], True),   # Measured dot at the residual peak, within spec.
+    ("remaining", [42, 42], False),  # A different in-spec dot cannot explain the peak.
+    ("remaining", None, False),
+    ("unconfirmed", None, False),
+    ("clear", None, True),
+])
+def test_within_spec_checks_residual_against_measured_dot(tmp_path, status, peak, can_pass):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path))
+    tile = detail["images"][0]["tiles"][0]
+    # Even a second, fully measured tile cannot clear an unexplained peak.
+    detail["images"][0]["tiles"].append(dict(tile, tile_id=1))
+    tile["decision_context"] = dict(json.loads(tile["decision_context"]),
+                                    aoi_dust_residual={"status": status, "remaining_image_xy": peak})
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules(screen_limit=2))
+    assert (result["suggestion"] is not None) is can_pass
+    assert result["panel_summary"]["missed_dot_tile_count"] == int(not can_pass)
+    assert result["panel_totals"][0]["within"] is True
+
+
+def test_within_spec_residual_inside_configured_no_detect_zone(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path))
+    image = detail["images"][0]
+    image["mark_bbox"] = "38,38,5,5"
+    image["within_spec_no_detect"] = {"mark_padding_px": 0}
+    tile = image["tiles"][0]
+    tile["decision_context"] = dict(json.loads(tile["decision_context"]),
+                                    aoi_dust_residual={"status": "remaining", "remaining_image_xy": [40, 40]})
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules())
+    assert result["suggestion"] is not None
+    assert result["panel_totals"][0]["total_count"] == 1
+
+
+@pytest.mark.parametrize(("dust_centers", "missing"), [
+    ([(32, 32), (64, 64)], [[32, 32], [64, 64]]),
+    ([(64, 64)], [[64, 64]]),
+    ([], []),
+])
+def test_within_spec_measures_each_final_aoi_real_region(tmp_path, dust_centers, missing):
+    from types import SimpleNamespace
+    from capi_tile_diagnostics import tile_decision_context
+
+    path = tmp_path / "W0F00000.png"
+    image = np.full((96, 112), 128, np.uint8)
+    for center in [(48, 32), (80, 64)]:
+        cv2.circle(image, center, 3, 60, -1)
+    cv2.imwrite(str(path), image)
+    detail = _with_aoi_roi(_detail(path), (12, 12, 84, 84))
+    tile = detail["images"][0]["tiles"][0]
+    tile.update(x=16, tile_id=0)
+    native = SimpleNamespace(
+        x=16, y=0, width=96, height=96, decision_context=json.loads(tile["decision_context"]),
+        dust_heatmap_binary=np.zeros((48, 48), np.uint8),
+        dust_region_details=[
+            {"peak_yx": (16, 16), "is_dust": False},
+            {"peak_yx": (12, 30), "is_dust": True},
+            {"peak_yx": (33, 35), "real_feature_peak_yx": (32, 32), "is_dust": False},
+        ],
+    )
+    tile["decision_context"] = json.dumps(tile_decision_context(native))
+    mask = np.zeros((96, 96), dtype=np.uint8)
+    for center in dust_centers:
+        cv2.circle(mask, center, 7, 255, -1)
+    tile["_runtime_dust_mask"] = mask
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules(screen_limit=2, tile_limit=2))
+    assert result["candidate_summary"]["raw_candidate_count"] == 2
+    assert result["candidate_summary"]["dust_mask_filtered_count"] == len(dust_centers)
+    assert (result["suggestion"] is None) == bool(missing)
+    if missing:
+        regions = result["missed_dot_tiles"][0]["aoi_real_regions"]
+        assert regions["peaks_image_xy"] == [[48, 32], [80, 64]]
+        assert regions["unmeasured_crop_xy"] == missing
+        assert "2 個 REAL_NG 熱區" in _format_within_spec_panel_summary(result)
+    else:
+        assert result["panel_totals"][0]["total_count"] == 2
+
+
+def test_within_spec_historical_real_regions_do_not_share_one_saved_peak(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path))
+    tile = detail["images"][0]["tiles"][0]
+    tile.update(tile_id=0, peak_x=48, peak_y=48,
+                dust_detail_text="LOW_COV_FEATURE: 0dust+0real PER_REGION: 2real+0dust -> REAL_NG")
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules())
+    assert result["suggestion"] is None
+    assert result["missed_dot_tiles"][0]["aoi_real_regions"]["unmeasured_crop_xy"] == [None]
+
+
 def test_within_spec_ignores_dot_candidate_inside_mark_bbox(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     visual_dir = tmp_path / "visuals"

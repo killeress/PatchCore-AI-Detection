@@ -141,6 +141,65 @@ def test_residual_model_ignores_heat_outside_roi(monkeypatch):
     assert len(probes) == 2
 
 
+@pytest.mark.parametrize("scene,checks,clear", [
+    ("perimeter", 2, True), ("model_detects_edge", 2, False),
+    ("missing_polygon", 0, False), ("offset_polygon", 0, False),
+    ("inward_branch", 0, False), ("compact_edge_spot", 0, False),
+    ("independent_spot", 0, False), ("no_dust_signal", 0, False),
+])
+def test_panel_perimeter_in_corner_tile_is_preserved_for_both_probes(monkeypatch, scene, checks, clear):
+    worker, tile, result, _, _, _, probes = _case(monkeypatch)
+    # Reproduce the reported corner geometry, including the inward tile shift.
+    tile.x, tile.y = 5438, 3684
+    tile.width = tile.height = 512
+    result.panel_polygon = np.float32([[263, 656.3], [5942.2, 647.3],
+                                       [5950.7, 4195.8], [267.9, 4207.7]])
+    if scene == "missing_polygon":
+        result.panel_polygon = None
+    if scene == "offset_polygon":
+        result.panel_polygon[:, 0] += 35
+    raw = np.full((512, 512), 100, np.uint8)
+    if scene == "compact_edge_spot":
+        raw[240:248, -3:] = 50
+    else:
+        raw[:, -8:] -= np.arange(8, dtype=np.uint8) * 4
+    if scene == "inward_branch":
+        raw[200:204, -32:] = 60
+    if scene == "independent_spot":
+        cv2.circle(raw, (486, 200), 3, 65, -1)
+    if scene != "no_dust_signal":
+        cv2.circle(raw, (434, 291), 6, 75, -1)
+    dust = np.zeros_like(raw)
+    cv2.circle(dust, (434, 291), 10, 255, -1)
+    roi = np.zeros_like(raw)
+    roi[99:483, 242:] = 1
+    support = np.where(roi, .42, 0).astype(np.float32)
+    tile.image = raw.copy()
+    tile.original_image = raw.copy()
+    tile.aoi_roi_mask = roi
+    tile.aoi_roi_full_map = support.copy()
+    tile.dust_region_details[0]["coverage"] = 1.
+    monkeypatch.setattr(worker, "_check_dust_or_scratch_feature_with_context",
+                        lambda *a, **kw: (True, dust.copy(), .1, "OMIT"))
+
+    def predict(probe, **kwargs):
+        probes.append(probe.image.copy())
+        values = np.full(raw.shape, .1, np.float32)
+        if scene == "model_detects_edge" and len(probes) == 2:
+            values[220, 509] = .5
+        return float(values.max()), values
+
+    monkeypatch.setattr(worker, "predict_tile", predict)
+    worker._confirm_aoi_dust_residual(result, tile, support, raw, raw)
+    assert len(probes) == checks
+    assert tile.is_suspected_dust_or_scratch is clear
+    for probe in probes:
+        np.testing.assert_array_equal(probe[dust == 0], raw[dust == 0])
+        assert probe[291, 434] > raw[291, 434]
+    if scene == "model_detects_edge":
+        assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == (tile.x + 509, tile.y + 220)
+
+
 @pytest.mark.parametrize("pipeline,roi_scores", [
     ("grid_only", (.1, .1)), ("before_grid", (.5, .1)), ("edge_dog", (.1, .5)),
 ])
@@ -402,6 +461,22 @@ def _faint_stripe(seed=23):
     roi[16:112, 16:112] = 1
     support = np.where(roi, 0.42, 0).astype(np.float32)
     return raw, dust, omit, roi, support
+
+
+def test_diffuse_dust_edit_leaves_omit_response_at_polygon_edge_untouched():
+    raw, dust, omit, roi, _ = _faint_stripe()
+    roi[16:112, 16:] = 1
+    raw[:, -8:] -= np.arange(8, dtype=np.uint8) * 4
+    dust[:, -5:] = 255
+    omit[:, -5:] = 70
+    polygon = np.float32([[-600, -600], [127, -600], [128, 140], [-600, 140]])
+    edit, _, reason = confirmed_roi_surface_mask(
+        raw, dust, roi, roi.astype(np.float32), omit_crop=omit, high_coverage_fallback=True,
+        panel_polygon=polygon,
+    )
+    assert reason == "confirmed_surface"
+    np.testing.assert_array_equal(edit[:, :-17], dust[:, :-17])
+    assert not np.any(edit[:, -17:])
 
 
 def test_high_coverage_fallback_edits_only_components_with_own_signal():

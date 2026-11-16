@@ -122,7 +122,29 @@ def tile_decision_context(tile):
     else:
         context["detector"] = "bright_spot" if getattr(tile, "is_bright_spot_detection", False) else "patchcore"
     context["score_threshold"] = _number(getattr(tile, "score_threshold", None))
+    roi = context.get("aoi_judgment_roi") or {}
+    regions = getattr(tile, "dust_region_details", None)
+    core = getattr(tile, "dust_heatmap_binary", None)
     bomb_diagnostics = getattr(tile, "bomb_region_diagnostics", None) or {}
+    if (roi.get("enabled") and context["detector"] == "patchcore" and regions and core is not None
+            and not context.get("aoi_dust_residual") and getattr(tile, "dust_two_stage_features", None) is None):
+        # Use the final real positions when bomb filtering removed part of a core.
+        peaks = getattr(tile, "bomb_remaining_points", None)
+        if peaks is None:
+            height, width = core.shape[:2]
+            peaks = []
+            real_regions = [region for region in regions if not region["is_dust"]]
+            count = len(real_regions)
+            for region in real_regions:
+                peak = region.get("real_feature_peak_yx") or region.get("peak_yx")
+                if peak is not None:
+                    py, px = peak
+                    peaks.append((tile.x + int(px * tile.width / width), tile.y + int(py * tile.height / height)))
+        else:
+            if bomb_diagnostics.get("aoi_coordinate_retained"):
+                peaks = [(tile.anomaly_peak_x, tile.anomaly_peak_y)]
+            count = len(peaks)
+        context["aoi_real_regions"] = {"count": count, "peaks_image_xy": [[int(x), int(y)] for x, y in peaks]}
     context["aoi_bomb_priority_applied"] = bool(bomb_diagnostics.get("priority_applied"))
     if context["aoi_bomb_priority_applied"]:
         context["aoi_bomb_priority_basis"] = bomb_diagnostics.get("priority_basis")

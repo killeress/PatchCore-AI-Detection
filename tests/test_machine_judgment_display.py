@@ -37,7 +37,7 @@ def test_legacy_converted_record_is_annotated_from_original_response():
 
 
 @pytest.mark.parametrize("template", ["index.html", "search.html"])
-def test_record_lists_distinguish_converted_ok_from_original_ok(template):
+def test_record_lists_show_final_machine_judgment_without_conversion_note(template):
     records = [
         dict(id=index, glass_id=f"G{index}", model_id="M1", machine_no="AAPI2612",
              ai_judgment="OK", machine_judgment=stored, processing_seconds=1.0,
@@ -51,5 +51,8 @@ def test_record_lists_distinguish_converted_ok_from_original_ok(template):
 
     rows = re.findall(r"<tr>\s*<td><a href=\"/record/\d+\".*?</tr>", html, re.S)
     assert len(rows) == 3
-    assert "原始 NG → OK（炸彈排除）" in rows[0]
-    assert all("data-machine-judgment-note" not in row for row in rows[1:])
+    for row, record in zip(rows, records):
+        badges = re.findall(r'<span class="badge [^"]+">([^<]+)</span>', row)
+        assert badges[:2] == [record["machine_judgment"], record["ai_judgment"]]
+    assert "data-machine-judgment-note" not in html
+    assert "原始 NG → OK（炸彈排除）" not in html

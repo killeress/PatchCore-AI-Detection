@@ -2059,7 +2059,56 @@ def _within_spec_aoi_roi_for_tile(tile, shape, crop_box):
     cv2.fillConvexPoly(mask, cv2.convexHull(np.rint(polygon).astype(np.int32)), 1)
     if not np.any(mask):
         raise ValueError("Saved AOI ROI does not intersect the within-spec crop")
-    return mask > 0, dict(roi, measurement_policy="whole_intersecting_component")
+    roi = dict(roi, measurement_policy="whole_intersecting_component")
+
+    def crop_peak(peak):
+        if isinstance(peak, (list, tuple)) and len(peak) == 2:
+            px = round((_as_int(peak[0], -1) - x1) * shape[1] / (x2 - x1))
+            py = round((_as_int(peak[1], -1) - y1) * shape[0] / (y2 - y1))
+            if 0 <= px < shape[1] and 0 <= py < shape[0] and mask[py, px]:
+                return [px, py]
+        return None
+
+    residual = context.get("aoi_dust_residual") or {}
+    if residual.get("status") in ("remaining", "unconfirmed"):
+        roi["aoi_dust_residual"] = dict(residual, peak_crop_xy=crop_peak(residual.get("remaining_image_xy")))
+    elif not residual:
+        regions = context.get("aoi_real_regions")
+        if regions is None:
+            # Older tile records saved the final per-region verdict and just one peak.
+            match = re.search(r"\bPER_REGION:\s*([1-9]\d*)real\+\d+dust\s*->\s*REAL_NG\b",
+                              str(tile.get("dust_detail_text") or ""))
+            if match:
+                regions = {"count": int(match[1]), "peaks_image_xy": [[tile.get("peak_x"), tile.get("peak_y")]]}
+        if regions and regions["count"]:
+            roi["aoi_real_regions"] = dict(regions, peaks_crop_xy=[crop_peak(p) for p in regions["peaks_image_xy"]])
+    return mask > 0, roi
+
+
+def _unmeasured_aoi_peaks(detected, peaks):
+    """Return peaks outside every calibrated component surviving both masks."""
+    import cv2
+
+    if not peaks or not detected["candidates"]:
+        return peaks
+    # A bbox may also enclose an unrelated or rejected component.
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(detected["mask"], connectivity=8)
+    measured = {(c["x"], c["y"], c["w"], c["h"], c["area_px"]) for c in detected["candidates"]
+                if c.get("size_mm") is not None}
+    missing = []
+    for peak in peaks:
+        label = labels[peak[1], peak[0]] if peak is not None else 0
+        if not label or tuple(stats[label]) not in measured:
+            missing.append(peak)
+    return missing
+
+
+def _within_spec_unmeasured_reason(evidence):
+    if "peaks_image_xy" in evidence:
+        return f"AOI 有 {evidence['count']} 個 REAL_NG 熱區，規格內未完整量測，保留 NG"
+    if evidence["status"] == "unconfirmed":
+        return "AOI 去塵複判未確認，保留 NG"
+    return "去塵後 AOI 仍有異常，規格內未量到殘留位置，保留 NG"
 
 
 def _non_dot_residue_config(dot_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2564,6 +2613,10 @@ def _format_within_spec_panel_summary_parts(detail: Dict[str, Any]) -> List[str]
     missed_by_screen: Dict[str, List[Dict[str, Any]]] = {}
     for item in detail.get("missed_dot_tiles") or []:
         screen = item.get("screen") or "UNKNOWN"
+        evidence = item.get("aoi_dust_residual") or item.get("aoi_real_regions")
+        if evidence:
+            parts.append(f"{screen} tile {item.get('tile_id')} {_within_spec_unmeasured_reason(evidence)}")
+            continue
         missed_by_screen.setdefault(screen, []).append(item)
     for screen, items in missed_by_screen.items():
         aoi_count = sum(1 for item in items if item.get("is_aoi_coord"))
@@ -2663,6 +2716,7 @@ def _save_within_spec_dot_visuals(
     no_detect_mask=None,
     evaluation_mask=None,
     aoi_roi=None,
+    unmeasured_aoi=None,
     non_dot_residues: Optional[List[Dict[str, Any]]] = None,
     output_dir: Optional[Path],
     url_prefix: str,
@@ -2781,6 +2835,17 @@ def _save_within_spec_dot_visuals(
                     cv2.LINE_AA,
                 )
 
+    for peak_xy in (unmeasured_aoi or {}).get("unmeasured_crop_xy", []):
+        if peak_xy is None:
+            continue
+        px, py = peak_xy
+        label = "ROI-NG" if "peaks_image_xy" in unmeasured_aoi else "ROI-R"
+        for canvas in (detected.get("overlay"), dust_overlay, no_detect_overlay):
+            if canvas is not None:
+                cv2.circle(canvas, (px, py), 8, (0, 0, 255), 1)
+                cv2.putText(canvas, label, (px + 10, py), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.4, (0, 0, 255), 1, cv2.LINE_AA)
+
     files = {
         "crop_url": f"{prefix}_crop.png",
         "preprocessed_url": f"{prefix}_preprocessed.png",
@@ -2841,6 +2906,7 @@ def _save_within_spec_dot_visuals(
     return {
         "image_name": image_name,
         "aoi_judgment_roi": aoi_roi,
+        "unmeasured_residual_reason": _within_spec_unmeasured_reason(unmeasured_aoi) if unmeasured_aoi else "",
         "tile_id": tile_id,
         "dot_type": chosen["dot_type"],
         "dot_label": chosen["label"],
@@ -3123,6 +3189,18 @@ def _evaluate_within_spec_suggestion_detail(
                 processed_crop.shape[:2],
                 crop_box,
             )
+            roi_evidence = aoi_roi or {}
+            evidence_key = "aoi_real_regions" if "aoi_real_regions" in roi_evidence else "aoi_dust_residual"
+            evidence = roi_evidence.get(evidence_key) or {}
+            peaks = []
+            if evidence_key == "aoi_real_regions":
+                peaks = list(evidence["peaks_crop_xy"])
+                if len(peaks) < evidence["count"]:
+                    peaks.append(None)  # Historical record lacks positions for the other regions.
+            elif evidence:
+                peaks = [evidence.get("peak_crop_xy")]
+            if no_detect_mask is not None and evidence.get("status") != "unconfirmed":
+                peaks = [p for p in peaks if p is None or not no_detect_mask[p[1], p[0]]]
 
             detections = []
             for dot_type, polarity, label in dot_types:
@@ -3176,6 +3254,9 @@ def _evaluate_within_spec_suggestion_detail(
                     "screen_limit": screen_limit,
                     "tile_limit": tile_limit,
                     "candidates": candidates,
+                    "unmeasured_peaks": (
+                        peaks if evidence.get("status") == "unconfirmed" else _unmeasured_aoi_peaks(detected, peaks)
+                    ),
                     "rejected_candidates": detected.get("rejected_candidates", []),
                     "dust_mask_filtered_count": detected.get("dust_mask_filtered_count", 0),
                     "dust_mask_filtered_rejected_count": detected.get("dust_mask_filtered_rejected_count", 0),
@@ -3186,6 +3267,11 @@ def _evaluate_within_spec_suggestion_detail(
                 })
 
             if not detections:
+                if peaks:
+                    result["missed_dot_tiles"].append({
+                        "image": image.get("image_name") or image_path.name, "screen": screen_code,
+                        "tile_id": tile.get("tile_id"), evidence_key: evidence,
+                    })
                 add_step(
                     "略過 tile：沒有可用的黑點/白點規則",
                     image=image.get("image_name") or "",
@@ -3218,6 +3304,8 @@ def _evaluate_within_spec_suggestion_detail(
                     detections,
                     key=lambda d: _as_int(d.get("dust_mask_filtered_count"), 0),
                 )
+            unmeasured_aoi = (dict(evidence, unmeasured_crop_xy=chosen["unmeasured_peaks"])
+                              if chosen["unmeasured_peaks"] else None)
             for key, value in tile_candidate_summary.items():
                 result["candidate_summary"][key] = result["candidate_summary"].get(key, 0) + value
             tile_non_dot_residues: List[Dict[str, Any]] = []
@@ -3284,7 +3372,7 @@ def _evaluate_within_spec_suggestion_detail(
                         non_dot_residues.append(matched)
                         tile_non_dot_keys.add(key)
                         tile_non_dot_residues.append(matched)
-            if dust_only:
+            if dust_only and not unmeasured_aoi:
                 add_step(
                     "tile 點候選皆落在灰塵遮罩：以 0 點納入 Panel 判定",
                     image=image.get("image_name") or "",
@@ -3293,12 +3381,12 @@ def _evaluate_within_spec_suggestion_detail(
                     filtered_count=tile_candidate_summary["dust_mask_filtered_count"],
                     detection=detection_summary,
                 )
-            if chosen["count"] <= 0 and not dust_only:
+            if unmeasured_aoi or (chosen["count"] <= 0 and not dust_only):
                 no_detect_filtered = sum(
                     _as_int(d.get("no_detect_mask_filtered_count"), 0)
                     for d in detections
                 )
-                if no_detect_filtered > 0:
+                if no_detect_filtered > 0 and not unmeasured_aoi:
                     result["skipped_tiles"]["no_detect_mask"] = (
                         result["skipped_tiles"].get("no_detect_mask", 0) + 1
                     )
@@ -3342,9 +3430,13 @@ def _evaluate_within_spec_suggestion_detail(
                     "aoi_image_x": _as_int(tile.get("aoi_image_x"), -1),
                     "aoi_image_y": _as_int(tile.get("aoi_image_y"), -1),
                 }
+                message = "tile 點偵測未命中：不符合規格內"
+                if unmeasured_aoi:
+                    missed_tile[evidence_key] = unmeasured_aoi
+                    message = _within_spec_unmeasured_reason(unmeasured_aoi)
                 result["missed_dot_tiles"].append(missed_tile)
                 add_step(
-                    "tile 點偵測未命中：不符合規格內",
+                    message,
                     image=image.get("image_name") or "",
                     tile_id=tile.get("tile_id"),
                     crop_box=crop_box,
@@ -3352,6 +3444,7 @@ def _evaluate_within_spec_suggestion_detail(
                     aoi_product_x=missed_tile["aoi_product_x"],
                     aoi_product_y=missed_tile["aoi_product_y"],
                     detection=detection_summary,
+                    **({evidence_key: unmeasured_aoi} if unmeasured_aoi else {}),
                 )
                 visual = save_visual(
                     tile_crop=tile_crop,
@@ -3362,6 +3455,7 @@ def _evaluate_within_spec_suggestion_detail(
                     no_detect_mask=no_detect_mask,
                     evaluation_mask=evaluation_mask,
                     aoi_roi=aoi_roi,
+                    unmeasured_aoi=unmeasured_aoi,
                     non_dot_residues=tile_non_dot_residues,
                     output_dir=visual_output_dir,
                     url_prefix=visual_url_prefix,
@@ -7577,7 +7671,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     error_message = reason
                 else:
                     status = "not_evaluable"
-                    reason = "未取得可比對的規格內點數結果"
+                    reason = panel_reason or "未取得可比對的規格內點數結果"
                     error_message = reason
                 eval_result["source"] = "inference"
                 eval_result["inference_context"] = {
@@ -14761,7 +14855,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         reason = panel_reason or "未符合規格內條件"
                     else:
                         status = "not_evaluable"
-                        reason = "未取得可比對的規格內點數結果"
+                        reason = panel_reason or "未取得可比對的規格內點數結果"
                     saved_suggestion = suggestion if converted else None
                     if saved_suggestion and reason:
                         saved_suggestion = dict(saved_suggestion)

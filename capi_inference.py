@@ -5336,6 +5336,8 @@ class CAPIInferencer:
                 small_core_mask=small_cores,
                 omit_crop=omit_crop,
                 high_coverage_fallback=high_cov_fallback,
+                panel_polygon=result.panel_polygon,
+                tile_origin=(tile.x, tile.y),
             )
             tile.dust_low_coverage_features = features
             if edit_mask is None:

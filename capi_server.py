@@ -3706,7 +3706,7 @@ class CAPIServer:
                 reason = panel_reason or "未符合規格內條件"
                 status = "not_within_spec"
             else:
-                reason = "未取得可比對的規格內點數結果"
+                reason = panel_reason or "未取得可比對的規格內點數結果"
                 status = "not_evaluable"
             saved_suggestion = suggestion if converted else None
             if saved_suggestion and reason:
