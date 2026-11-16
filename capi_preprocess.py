@@ -207,6 +207,8 @@ class PreprocessConfig:
     recover_failed_raw_boundary: bool = False
     # Refine a successful coarse polygon from raw pixels before creating masks.
     raw_gradient_refinement_enabled: bool = False
+    # Keep the pre-Grid frame for AOI dust review only on requested lightings.
+    grid_dust_review_lightings: Tuple[str, ...] = ()
 
     def __post_init__(self):
         from capi_dog import validate_execution_mode
@@ -268,6 +270,12 @@ class TileResult:
     preprocess_total_ms: float = 0.0
 
 
+@dataclass(frozen=True)
+class GridDustReviewInput:
+    raw_panel: np.ndarray = field(repr=False)
+    config: PreprocessConfig
+
+
 @dataclass
 class PanelPreprocessResult:
     image_path: Path
@@ -279,6 +287,7 @@ class PanelPreprocessResult:
     preprocess_steps: List[Dict[str, Any]] = field(default_factory=list)
     preprocess_total_ms: float = 0.0
     processed_image: Optional[np.ndarray] = field(default=None, repr=False)
+    grid_dust_input: Optional[GridDustReviewInput] = field(default=None, repr=False)
 
 
 LIGHTING_PREFIXES = CAPI_LIGHTING_PREFIXES
@@ -1668,6 +1677,9 @@ def preprocess_panel_image(
         preprocess_steps=preprocess_steps,
         preprocess_total_ms=preprocess_total_ms,
         processed_image=img if config.cache_processed_image else None,
+        grid_dust_input=(GridDustReviewInput(original_img, config)
+                         if config.grid_canonicalization_enabled and lighting in config.grid_dust_review_lightings
+                         else None),
     )
 
 

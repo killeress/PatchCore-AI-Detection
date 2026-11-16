@@ -141,6 +141,131 @@ def test_residual_model_ignores_heat_outside_roi(monkeypatch):
     assert len(probes) == 2
 
 
+@pytest.mark.parametrize("pipeline,roi_scores", [
+    ("grid_only", (.1, .1)), ("before_grid", (.5, .1)), ("edge_dog", (.1, .5)),
+])
+def test_grid_dust_replays_full_camera_frame_in_production(monkeypatch, tmp_path, pipeline, roi_scores):
+    from capi_inference import AOIReportDefect
+    from capi_image_preprocess_lab import apply_preprocess_pipeline
+    from capi_preprocess import PreprocessConfig, preprocess_panel_image
+    from test_process_panel_v2 import _make_config
+
+    config = _make_config(tmp_path)
+    config.tile_size = 128
+    config.grid_tiling_enabled = False
+    config.grid_canonicalization_enabled = True
+    config.grid_product_resolution = (184, 124)
+    config.grid_samples_per_cell = 1 if pipeline == "before_grid" else 3
+    config.inference_rotate_180_enabled = True
+    config.aoi_coord_inspection_enabled = config.aoi_judgment_roi_enabled = True
+    config.dust_heatmap_top_percent = .4
+    if pipeline == "before_grid":
+        config.image_preprocess_pipeline = [{"method": "clahe"}]
+    if pipeline == "edge_dog":
+        config.preprocess_after_tiling = True
+        config.image_preprocess_pipelines = {"edge": [{"method": "dog"}], "inner": []}
+
+    raw = np.zeros((310, 432), np.uint8)
+    polygon = np.array([[32, 34], [400, 29], [395, 278], [37, 280]], np.int32)
+    cv2.fillPoly(raw, [polygon], 100)
+    point = (355, 177)
+    cv2.circle(raw, point, 6, 75, -1)
+    omit = np.full_like(raw, 18)
+    cv2.circle(omit, point, 10, 175, -1)
+    path = tmp_path / "G0F00000_test.tif"
+    assert cv2.imwrite(str(path), cv2.flip(raw, -1))
+    assert cv2.imwrite(str(tmp_path / "PINIGBI _test.tif"), cv2.flip(omit, -1))
+    report = AOIReportDefect("C1111", raw.shape[1] - 1 - point[0], raw.shape[0] - 1 - point[1],
+                             "G0F00000", coordinate_space="image")
+
+    model = object()
+    worker = CAPIInferencer(config)
+    monkeypatch.setattr(worker, "_get_model_for", lambda machine, prefix, zone: model if zone == "edge" else None)
+    inputs = []
+
+    def predict(tile, *, inferencer, threshold, **kwargs):
+        assert inferencer is model and threshold == .5
+        x, y = point[0] - tile.x, point[1] - tile.y
+        values = np.zeros((tile.height, tile.width), np.float32)
+        if not inputs:
+            cv2.circle(values, (x, y), 24, .6, -1)
+            cv2.circle(values, (x, y), 5, 1., -1)
+            # A later file replacement must not change either residual prediction.
+            assert cv2.imwrite(str(path), np.zeros_like(raw))
+        else:
+            values[0, 0] = 1.  # Outside the AOI ROI.
+            values[y + 12, x] = roi_scores[len(inputs) - 1]  # Inside ROI, outside original core.
+        inputs.append(tile.image.copy())
+        return 1., values
+
+    monkeypatch.setattr(worker, "predict_tile", predict)
+    fills = []
+    fill_sources = []
+
+    def record_fills(source, mask):
+        fill_sources.append(source.copy())
+        assert 0 < np.count_nonzero(mask) < source.size
+        for name, filled in surface_removed_images(source, mask):
+            fills.append(filled.copy())
+            yield name, filled
+
+    monkeypatch.setattr("capi_dust_review.surface_removed_images", record_fills)
+    results, *_ = worker.process_panel(tmp_path, cpu_workers=1, client_product_resolution=(184, 124),
+                                       aoi_report_override={"G0F00000": [report]})
+    result, = results
+    tile, = result.tiles
+    review = tile.decision_context["aoi_dust_residual"]
+    assert [c["variant"] for c in review["checks"]] == ["telea", "navier_stokes"]
+    assert [c["roi_score"] for c in review["checks"]] == pytest.approx(roi_scores)
+    assert tile.is_suspected_dust_or_scratch is (max(roi_scores) < .5)
+    assert len(inputs) == 3 and len(fills) == 2
+
+    # Compare each probe to a fresh first-pass preprocess of that edited source TIFF.
+    crop = np.s_[tile.y:tile.y + tile.height, tile.x:tile.x + tile.width]
+    assert tile.x > 0 and tile.y > 0 and tile.aoi_tile_shift_dx != 0
+    source, = fill_sources
+    np.testing.assert_array_equal(source, raw[crop])
+    reference_config = PreprocessConfig(
+        cache_processed_image=True, generate_grid_tiles=False, grid_canonicalization_enabled=True,
+        grid_samples_per_cell=config.grid_samples_per_cell, product_resolution=config.grid_product_resolution,
+        rotate_180=True, preprocess_after_tiling=config.preprocess_after_tiling,
+        image_preprocess_pipeline=config.image_preprocess_pipeline,
+    )
+    for index, filled in enumerate(fills, 1):
+        edited = raw.copy()
+        edited[crop] = filled
+        edit_path = tmp_path / f"reference{index}.tif"
+        assert cv2.imwrite(str(edit_path), cv2.flip(edited, -1))
+        reference = preprocess_panel_image(edit_path, "G0F00000", reference_config,
+                                          reference_polygon=result.panel_polygon)
+        expected = reference.processed_image[crop]
+        if pipeline == "edge_dog":
+            expected = apply_preprocess_pipeline(expected, config.image_preprocess_pipelines["edge"])["image"]
+        np.testing.assert_array_equal(inputs[index], expected)
+        assert not np.array_equal(inputs[0], inputs[index])
+    np.testing.assert_array_equal(tile.image, inputs[0])
+    np.testing.assert_array_equal(tile.original_image, raw[crop])
+
+
+@pytest.mark.parametrize("reason", ["missing_grid_preprocessing", "missing_grid_geometry",
+                                    "grid_source_geometry_mismatch"])
+def test_unreproducible_grid_input_keeps_ng(monkeypatch, reason):
+    from capi_preprocess import GridDustReviewInput, PreprocessConfig
+
+    worker, tile, result, raw, _, support, probes = _case(monkeypatch)
+    worker.config.grid_canonicalization_enabled = True
+    grid_input = None
+    if reason != "missing_grid_preprocessing":
+        config = PreprocessConfig(grid_canonicalization_enabled=True, product_resolution=(64, 64))
+        grid_input = GridDustReviewInput(raw[1:, :] if reason == "grid_source_geometry_mismatch" else raw, config)
+    if reason != "missing_grid_geometry":
+        result.panel_polygon = np.float32([[0, 0], [127, 0], [127, 127], [0, 127]])
+    note = worker._confirm_aoi_dust_residual(result, tile, support, raw, raw, grid_input=grid_input)
+
+    assert f"{reason} checks=0/2 -> KEEP_NG" in note
+    assert not tile.is_suspected_dust_or_scratch and not probes
+
+
 def test_guard_skips_non_roi_and_binary_workflows(monkeypatch):
     worker, tile, result, raw, _, support, probes = _case(monkeypatch)
     tile.is_bright_spot_detection = True
