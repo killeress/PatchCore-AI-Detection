@@ -6137,31 +6137,30 @@ class CAPIInferencer:
 
         lines = None
         report_file = carux_report_dir
-        use_carux_only = carux_report_only or carux_report_dir is not None
-        if use_carux_only:
-            if carux_report_dir is None:
-                logger.warning("AOI Report[CARUX]: 無法確定 102 報告目錄: %s", panel_dir)
-                return result_map
+        # 兼容既有參數名；公共網盤未取得報告時查詢天目網路的 Report 目錄。
+        use_carux_source = carux_report_only or carux_report_dir is not None
+        if use_carux_source:
             panel_path = Path(panel_dir)
-            if (glass_id and model_id
+            if not (glass_id and model_id
                     and panel_path.name.casefold() == glass_id.casefold()
                     and panel_path.parent.parent.name.casefold() == model_id.casefold()):
+                logger.warning("AOI Report[CARUX]: 圖片目錄與 PID 或機種不符: %s", panel_dir)
+                return result_map
+            if carux_report_dir is None:
+                logger.warning("AOI Report[CARUX]: 無法確定公共網盤報告目錄: %s", panel_dir)
+            else:
                 lines = read_carux_report_lines(
                     carux_report_dir, glass_id, model_id, panel_path.parent.name,
                 )
-            else:
-                logger.warning("AOI Report[CARUX]: 圖片目錄與 PID 或機種不符: %s", panel_dir)
-                return result_map
 
         if lines is CARUX_REPORT_NOT_FOUND:
-            logger.info(f"AOI Report: 報告目錄中無 TXT 檔案: {carux_report_dir}")
-            return result_map
-
-        if use_carux_only and lines is None:
-            return result_map
+            logger.info("AOI Report[CARUX]: 公共網盤無匹配 TXT，改查天目網路 Report: %s", carux_report_dir)
+            lines = None
+        elif use_carux_source and lines is None:
+            logger.info("AOI Report[CARUX]: 公共網盤無法取得報告，改查天目網路 Report")
 
         if lines is None:
-            # 非目標機台沿用原有路徑替換與最新 TXT 選擇。
+            # CARUX 改查天目網路 Report；其他站點沿用原有路徑與最新 TXT 選擇。
             replace_from = self.config.aoi_report_path_replace_from
             replace_to = self.config.aoi_report_path_replace_to
             panel_str = str(panel_dir)
@@ -6182,7 +6181,10 @@ class CAPIInferencer:
                 return result_map
 
             report_file = max(txt_files, key=lambda f: f.stat().st_mtime)
-            logger.info(f"AOI Report: 讀取報告 {report_file.name}")
+            if use_carux_source:
+                logger.info("AOI Report[CARUX]: 讀取天目網路 Report %s", report_file)
+            else:
+                logger.info(f"AOI Report: 讀取報告 {report_file.name}")
 
         try:
             if lines is None:
