@@ -1982,7 +1982,7 @@
                     💡 黑畫面推論
                 </h2>
                 <p style="color:var(--text-muted); font-size:0.85rem; margin-top:4px;">
-                    輸入 B0F 黑畫面圖片 + 產品座標，裁切 512×512 做亮點偵測（完全復現推論管線）
+                    輸入 B0F 黑畫面圖片 + 產品座標，裁切 512×512 做亮點／DoG 壓傷偵測；結果尚未套用 AOI 範圍、灰塵與炸彈等後處理。
                 </p>
             </div>
         </div>
@@ -4650,13 +4650,17 @@
                 <div class="value" style="color:${jColor}">${jIcon} ${data.judgment}</div>
             </div>
             <div class="summary-card">
-                <div class="label">亮點面積 (px)</div>
+                <div class="label">亮點／壓傷面積 (px)</div>
                 <div class="value" style="color:${data.bright_spot_area > 0 ? 'var(--ng)' : 'var(--ok)'}">${data.bright_spot_area}</div>
             </div>
             <div class="summary-card">
                 <div class="label">最大差異值</div>
                 <div class="value" style="color:var(--accent)">${data.bright_spot_max_diff}</div>
             </div>
+            ${data.black_mura ? `<div class="summary-card">
+                <div class="label">DoG 壓傷（原始灰階差）</div>
+                <div class="value" style="color:var(--accent);font-size:0.85rem;">${data.black_mura.max_residual.toFixed(3)} / 門檻 ${data.black_mura.threshold}<br>候選 ${data.black_mura.candidate_pixels}px / 最小 ${data.black_mura.min_area}px</div>
+            </div>` : ''}
             <div class="summary-card">
                 <div class="label">耗時</div>
                 <div class="value" style="color:var(--accent)">${data.processing_time}s</div>

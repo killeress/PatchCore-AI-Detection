@@ -14,7 +14,7 @@ import uuid
 
 import cv2
 import numpy as np
-from capi_dog import DEFAULT_PARAMS, normalize_params, dog_residual, render_dog
+from capi_dog import DEFAULT_PARAMS, normalize_params, dog_residual_crop, render_dog
 
 logger = logging.getLogger("capi.white_spot_debug")
 
@@ -65,16 +65,13 @@ def prepare_white_spot(gray, center=None, tile_size=512, params=None):
     x2, y2 = x1 + tile_size, y1 + tile_size
     pad_x = math.ceil(4 * params["background_sigma_x"])
     pad_y = math.ceil(4 * params["background_sigma_y"])
-    bx1, by1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-    bx2, by2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-    work = gray[by1:by2, bx1:bx2].astype(np.float32)
     start = time.perf_counter()
-    residual = dog_residual(work, params)[y1-by1:y2-by1, x1-bx1:x2-bx1].copy()
+    residual, context_bounds = dog_residual_crop(gray, (x1, y1, x2, y2), params)
     enhanced = render_dog(residual, params)
     return {
         "original": gray[y1:y2, x1:x2].copy(), "enhanced": enhanced, "residual": residual,
         "params": params, "center": [cx, cy], "center_in_tile": [cx-x1, cy-y1],
-        "crop_bounds": [x1, y1, x2, y2], "context_bounds": [bx1, by1, bx2, by2],
+        "crop_bounds": [x1, y1, x2, y2], "context_bounds": list(context_bounds),
         "padding_px": [pad_x, pad_y], "elapsed_ms": (time.perf_counter()-start)*1000,
         "clipped_fraction": float(np.mean((enhanced == 0) | (enhanced == 255))),
     }

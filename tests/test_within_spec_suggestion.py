@@ -883,6 +883,87 @@ def test_within_spec_historical_real_regions_do_not_share_one_saved_peak(tmp_pat
     assert result["missed_dot_tiles"][0]["aoi_real_regions"]["unmeasured_crop_xy"] == [None]
 
 
+@pytest.mark.parametrize("record_mode", ["real_regions", "legacy_core_outside_zero_overlap", "legacy_core_outside_no_text"])
+@pytest.mark.parametrize(("threshold_mm", "peak_xy", "expected_outcome"), [
+    (0.35, [48, 48], "within_spec"),
+    (0.05, [48, 48], "over_spec"),
+    (0.35, [24, 24], "unmeasured"),
+])
+def test_within_spec_grid_real_defect_evaluates_measured_dot_instead_of_dust_unconfirmed(
+    tmp_path, record_mode, threshold_mm, peak_xy, expected_outcome,
+):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path), (12, 12, 84, 84))
+    tile = detail["images"][0]["tiles"][0]
+    tile.update(tile_id=0, peak_x=peak_xy[0], peak_y=peak_xy[1])
+    context = json.loads(tile["decision_context"])
+    if record_mode == "real_regions":
+        context["aoi_real_regions"] = {"count": 1, "peaks_image_xy": [peak_xy]}
+        tile["dust_detail_text"] = "PER_REGION: 1real+0dust -> REAL_NG"
+    else:
+        context["aoi_dust_residual"] = {
+            "method": "grid_original_roi",
+            "status": "unconfirmed",
+            "reason": "core_outside_precise_dust",
+            "core_pixels": 462,
+            "dust_overlap_pixels": 0,
+            "peak_crop_xy": None,
+        }
+        if record_mode == "legacy_core_outside_zero_overlap":
+            tile["dust_detail_text"] = (
+                "PER_REGION: 1real+0dust -> REAL_NG "
+                "GRID_ORIGINAL_ROI: unconfirmed core_outside_precise_dust core=0/462 -> KEEP_NG"
+            )
+    tile["decision_context"] = json.dumps(context)
+
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules(threshold_mm=threshold_mm))
+    assert not any("Pixel Grid 灰塵證據不足" in step.get("message", "") for step in result["steps"])
+    if expected_outcome == "within_spec":
+        assert result["suggestion"] is not None
+        assert result["panel_summary"]["evaluated_tile_count"] == 1
+        assert result["panel_summary"]["missed_dot_tile_count"] == 0
+        assert result["panel_totals"][0]["within"] is True
+    elif expected_outcome == "over_spec":
+        assert result["suggestion"] is None
+        assert result["panel_summary"]["evaluated_tile_count"] == 1
+        assert result["panel_summary"]["missed_dot_tile_count"] == 0
+        assert result["panel_totals"][0]["within"] is False
+    else:
+        assert result["suggestion"] is None
+        assert result["panel_summary"]["evaluated_tile_count"] == 0
+        assert result["panel_summary"]["missed_dot_tile_count"] == 1
+        assert "REAL_NG 熱區" in _format_within_spec_panel_summary(result)
+
+
+def test_within_spec_grid_partial_dust_overlap_still_blocks_as_unconfirmed(tmp_path):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path), (12, 12, 84, 84))
+    tile = detail["images"][0]["tiles"][0]
+    tile.update(
+        tile_id=0,
+        peak_x=48,
+        peak_y=48,
+        dust_detail_text="PER_REGION: 0real+1dust -> DUST GRID_ORIGINAL_ROI: unconfirmed core_outside_precise_dust core=120/462 -> KEEP_NG",
+    )
+    context = json.loads(tile["decision_context"])
+    context["aoi_dust_residual"] = {
+        "method": "grid_original_roi",
+        "status": "unconfirmed",
+        "reason": "core_outside_precise_dust",
+        "core_pixels": 462,
+        "dust_overlap_pixels": 120,
+    }
+    tile["decision_context"] = json.dumps(context)
+
+    result = _evaluate_within_spec_suggestion_detail(detail, _rules(threshold_mm=0.35))
+    assert result["suggestion"] is None
+    assert result["panel_summary"]["evaluated_tile_count"] == 0
+    assert result["panel_summary"]["missed_dot_tile_count"] == 1
+    assert any(step["message"] == "Pixel Grid 灰塵證據不足，保留 NG" for step in result["steps"])
+
+
 def test_within_spec_ignores_dot_candidate_inside_mark_bbox(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     visual_dir = tmp_path / "visuals"

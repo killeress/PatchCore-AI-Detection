@@ -119,12 +119,17 @@ def test_black_debug_uses_white_reference(station, handler_factory):
         setattr(worker.config, name, 10)
     worker.config.bright_spot_median_kernel = 3
     worker.calculate_otsu_bounds = Mock(return_value=((0, 0, 128, 128), None, None))
+    worker._prepare_black_mura_tile = Mock()
+    worker._rect_polygon_from_bounds = CAPIInferencer._rect_polygon_from_bounds
     worker._detect_bright_spots = lambda *a: (0, None)
     handler._handle_debug_bright_spot_inference()
     payload = handler.responses[-1][1]
     assert payload.get("success"), payload
     assert payload["ref_image"] == white.name
     assert worker.calculate_otsu_bounds.call_args.kwargs["reference_raw_bounds"] == (0, 0, 128, 128)
+    assert worker._prepare_black_mura_tile.call_args.kwargs["image_prefix"] == "B0F00000"
+    np.testing.assert_array_equal(worker._prepare_black_mura_tile.call_args.kwargs["panel_polygon"],
+                                  CAPIInferencer._rect_polygon_from_bounds((0, 0, 128, 128)))
 
 
 @pytest.mark.parametrize("source,expected", [

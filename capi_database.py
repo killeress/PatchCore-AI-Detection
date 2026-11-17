@@ -7460,6 +7460,9 @@ class CAPIDatabase:
             ("bright_spot_min_area", 5, "int", "亮點最小連通面積 (px)"),
             ("bright_spot_median_kernel", 21, "int", "背景估計 median filter 核大小"),
             ("bright_spot_diff_threshold", 10, "int", "局部對比差異閾值"),
+            ("black_mura_enabled", False, "bool", "B0F AOI 切塊啟用 DoG 8/64 輕微壓傷偵測（預設關閉）"),
+            ("black_mura_threshold", 0.5, "float", "壓傷 DoG 原始灰階差門檻（未乘顯示增益，越低越敏感）"),
+            ("black_mura_min_area", 100, "int", "壓傷 DoG 最小連通面積 (px)，獨立於亮點面積"),
             # 半黑半白畫面黑底白點偵測設定 (BWFHALF0/WBFHALF0)
             ("half_spot_diff_threshold", 10, "int", "半屏白點局部對比差異閾值 (BWFHALF0/WBFHALF0)"),
             ("half_spot_median_kernel", 21, "int", "半屏白點背景估計 median filter 核大小"),

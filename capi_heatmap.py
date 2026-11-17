@@ -1363,6 +1363,10 @@ class HeatmapManager:
             info_text = f"{spot_label} | Diff:{max_diff} Area:{spot_area}px | DiffThr:{diff_thr} MinArea:{spot_min_area} | "
             self._draw_split_color_header(header, info_text, verdict, verdict_color, y=25, font_scale=0.6)
             detail_line = f"Tile#{tile_id} | {image_name}"
+            mura = (getattr(tile_info, 'decision_context', None) or {}).get('black_mura') or {}
+            if mura.get('enabled'):
+                detail_line += (f" | DoG8/64 Max:{mura['max_residual']:.3f} Thr:{mura['threshold']:.3f}"
+                                f" MinArea:{mura['min_area']}")
             dust_detail = getattr(tile_info, 'dust_detail_text', '')
             if dust_detail:
                 detail_line += " | " + str(dust_detail).replace('\u2192', '->').replace('\u2190', '<-')

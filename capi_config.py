@@ -365,6 +365,9 @@ class CAPIConfig:
     bright_spot_min_area: int = 5             # 亮點最小連通面積 (px, 小於此視為雜訊)
     bright_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
     bright_spot_diff_threshold: int = 10      # 局部對比差異閾值 (與背景差值超過此值為異常)
+    black_mura_enabled: bool = False          # B0F AOI DoG 輕微壓傷偵測，預設關閉
+    black_mura_threshold: float = 0.5          # DoG 原始灰階差門檻，未乘顯示增益
+    black_mura_min_area: int = 100             # DoG 最小連通面積，獨立於亮點 min_area
     # 半黑半白畫面黑底白點偵測設定 (BWFHALF0/WBFHALF0，僅 AOI 座標附近)
     half_spot_diff_threshold: int = 10      # 局部對比差異閾值
     half_spot_median_kernel: int = 21       # 背景估計 median filter 核大小
@@ -713,6 +716,9 @@ class CAPIConfig:
             bright_spot_min_area=data.get("bright_spot_min_area", 5),
             bright_spot_median_kernel=data.get("bright_spot_median_kernel", 21),
             bright_spot_diff_threshold=data.get("bright_spot_diff_threshold", 10),
+            black_mura_enabled=data.get("black_mura_enabled", False),
+            black_mura_threshold=data.get("black_mura_threshold", 0.5),
+            black_mura_min_area=data.get("black_mura_min_area", 100),
             half_spot_diff_threshold=data.get("half_spot_diff_threshold", 10),
             half_spot_median_kernel=data.get("half_spot_median_kernel", 21),
             half_spot_min_area=data.get("half_spot_min_area", 5),
@@ -864,6 +870,9 @@ class CAPIConfig:
             "bright_spot_min_area": self.bright_spot_min_area,
             "bright_spot_median_kernel": self.bright_spot_median_kernel,
             "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
+            "black_mura_enabled": self.black_mura_enabled,
+            "black_mura_threshold": self.black_mura_threshold,
+            "black_mura_min_area": self.black_mura_min_area,
             "within_spec_judgment_rules": self.within_spec_judgment_rules,
             "report_black_dot_defect_code": self.report_black_dot_defect_code,
             "report_white_dot_defect_code": self.report_white_dot_defect_code,
@@ -990,6 +999,9 @@ class CAPIConfig:
             "bright_spot_min_area": self.bright_spot_min_area,
             "bright_spot_median_kernel": self.bright_spot_median_kernel,
             "bright_spot_diff_threshold": self.bright_spot_diff_threshold,
+            "black_mura_enabled": self.black_mura_enabled,
+            "black_mura_threshold": self.black_mura_threshold,
+            "black_mura_min_area": self.black_mura_min_area,
             "within_spec_judgment_rules": self.within_spec_judgment_rules,
             "report_black_dot_defect_code": self.report_black_dot_defect_code,
             "report_white_dot_defect_code": self.report_white_dot_defect_code,
@@ -1233,6 +1245,13 @@ class CAPIConfig:
             self.bright_spot_median_kernel = int(param_map["bright_spot_median_kernel"])
         if "bright_spot_diff_threshold" in param_map:
             self.bright_spot_diff_threshold = int(param_map["bright_spot_diff_threshold"])
+        if "black_mura_enabled" in param_map:
+            val = param_map["black_mura_enabled"]
+            self.black_mura_enabled = str(val).lower() == "true" if isinstance(val, str) else bool(val)
+        if "black_mura_threshold" in param_map:
+            self.black_mura_threshold = float(param_map["black_mura_threshold"])
+        if "black_mura_min_area" in param_map:
+            self.black_mura_min_area = int(param_map["black_mura_min_area"])
         if "half_spot_diff_threshold" in param_map:
             self.half_spot_diff_threshold = int(param_map["half_spot_diff_threshold"])
         if "half_spot_median_kernel" in param_map:

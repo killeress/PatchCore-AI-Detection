@@ -2070,16 +2070,25 @@ def _within_spec_aoi_roi_for_tile(tile, shape, crop_box):
         return None
 
     residual = context.get("aoi_dust_residual") or {}
+    real_region_match = re.search(
+        r"\bPER_REGION:\s*([1-9]\d*)real\+\d+dust\s*->\s*REAL_NG\b",
+        str(tile.get("dust_detail_text") or ""),
+    )
+    if (residual.get("method") == "grid_original_roi"
+            and residual.get("reason") == "core_outside_precise_dust"
+            and (context.get("aoi_real_regions") or real_region_match
+                 or residual.get("dust_overlap_pixels") == 0)):
+        residual = {}
+        roi.pop("aoi_dust_residual", None)
     if residual.get("status") in ("remaining", "unconfirmed"):
         roi["aoi_dust_residual"] = dict(residual, peak_crop_xy=crop_peak(residual.get("remaining_image_xy")))
     elif not residual:
         regions = context.get("aoi_real_regions")
-        if regions is None:
+        if regions is None and real_region_match:
             # Older tile records saved the final per-region verdict and just one peak.
-            match = re.search(r"\bPER_REGION:\s*([1-9]\d*)real\+\d+dust\s*->\s*REAL_NG\b",
-                              str(tile.get("dust_detail_text") or ""))
-            if match:
-                regions = {"count": int(match[1]), "peaks_image_xy": [[tile.get("peak_x"), tile.get("peak_y")]]}
+            regions = {"count": int(real_region_match[1]), "peaks_image_xy": [[tile.get("peak_x"), tile.get("peak_y")]]}
+        elif regions is None and (context.get("aoi_dust_residual") or {}).get("reason") == "core_outside_precise_dust":
+            regions = {"count": 1, "peaks_image_xy": [[tile.get("peak_x"), tile.get("peak_y")]]}
         if regions and regions["count"]:
             roi["aoi_real_regions"] = dict(regions, peaks_crop_xy=[crop_peak(p) for p in regions["peaks_image_xy"]])
     return mask > 0, roi
@@ -12117,6 +12126,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 x=crop_x1, y=crop_y1,
                 width=crop_w, height=crop_h,
                 image=tile_image,
+                is_aoi_coord_tile=True,
+                aoi_product_x=product_x, aoi_product_y=product_y,
+                aoi_image_x=img_cx, aoi_image_y=img_cy,
+            )
+            self.inferencer._prepare_black_mura_tile(
+                tile_info, image, image_prefix=self.inferencer._get_image_prefix(image_path.name),
+                panel_polygon=self.inferencer._rect_polygon_from_bounds(raw_bounds),
             )
 
             # 6. 暫時覆蓋 config 值，呼叫 _detect_bright_spots，再還原
@@ -12243,6 +12259,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 "overview_url": overview_url,
                 "bright_spot_area": bright_spot_area,
                 "bright_spot_max_diff": bright_spot_max_diff,
+                "black_mura": (tile_info.decision_context or {}).get("black_mura"),
                 "ref_image": ref_image_name,
                 "params_used": {
                     "diff_threshold": bs_diff_threshold,

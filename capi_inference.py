@@ -85,6 +85,7 @@ except Exception as _e:
     )
 
 from capi_config import CAPIConfig, ExclusionZone, BombDefect
+from capi_dog import detect_black_mura, filter_components
 from capi_dust_review import GRID_DUST_TOP_PERCENT
 from capi_edge_cv import (
     CVEdgeInspector, EdgeInspectionConfig, EdgeDefect, clamp_median_kernel,
@@ -292,6 +293,8 @@ class TileInfo:
     bright_spot_diff_threshold: int = 0     # B0F 偵測：使用的差異閾值
     bright_spot_area: int = 0               # B0F 偵測：偵測到的亮點面積 (px)
     bright_spot_min_area: int = 0           # B0F 偵測：使用的最小面積
+    black_mura_mask: Optional[np.ndarray] = field(default=None, repr=False)
+    bright_spot_point_mask: Optional[np.ndarray] = field(default=None, repr=False)
     is_half_spot_detection: bool = False    # 是否為半屏黑底白點偵測（BWFHALF0/WBFHALF0）
     half_spot_max_diff: int = 0             # HALF 偵測：最大局部差異值
     half_spot_diff_threshold: int = 0       # HALF 偵測：使用的差異閾值
@@ -3179,6 +3182,31 @@ class CAPIInferencer:
         
         return pred_score, anomaly_map
 
+    def _prepare_black_mura_tile(self, tile, image, *, image_prefix, panel_polygon=None):
+        """Use raw context for B0F AOI pressure marks; never enhance a model input."""
+        if (not self.config.black_mura_enabled or not tile.is_aoi_coord_tile
+                or image_prefix != "B0F00000"):
+            return
+        tile.black_mura_mask, evidence = detect_black_mura(
+            image, (tile.x, tile.y, tile.x + tile.width, tile.y + tile.height),
+            panel_polygon=panel_polygon, threshold=self.config.black_mura_threshold,
+            min_area=self.config.black_mura_min_area,
+        )
+        tile.decision_context = dict(tile.decision_context or {}, black_mura=evidence)
+
+    def _filter_bright_spot_support(self, tile, binary):
+        """Recheck each detector's own area after ROI, exclusion or dust clipping."""
+        binary = np.asarray(binary) > 0
+        minimum = max(1, int(tile.bright_spot_min_area or self.config.bright_spot_min_area))
+        if tile.black_mura_mask is None:
+            return filter_components(binary, minimum)
+        points = tile.bright_spot_point_mask
+        kept = (filter_components(binary & (points > 0), minimum)
+                if points is not None else np.zeros_like(binary))
+        evidence = (tile.decision_context or {}).get("black_mura") or {}
+        mura_minimum = evidence.get("min_area", self.config.black_mura_min_area)
+        return kept | filter_components(binary & (tile.black_mura_mask > 0), mura_minimum)
+
     def _detect_bright_spots(self, tile: 'TileInfo') -> Tuple[float, Optional[np.ndarray]]:
         """
         B0F00000 專用：偵測黑色背景上的異常亮點。
@@ -3193,6 +3221,7 @@ class CAPIInferencer:
           3. 差異 > diff_threshold → 候選亮點
           4. 連通分量面積篩選 ≥ min_area
           5. 絕對亮度 > bright_spot_threshold 的也直接納入（上限保護）
+          6. B0F AOI 切塊另合併 DoG 8/64 的輕微壓傷候選（獨立面積門檻）
 
         Args:
             tile: TileInfo 物件
@@ -3252,6 +3281,17 @@ class CAPIInferencer:
                 filtered_binary[labels == i] = 255
                 has_bright_spot = True
 
+        tile.bright_spot_min_area = min_area
+        if tile.black_mura_mask is not None:
+            tile.bright_spot_point_mask = filtered_binary > 0
+            mura = tile.black_mura_mask.astype(np.uint8) * 255
+            mura, _ = self._mask_tile_corner_exclusion(tile, mura)
+            if tile.mask is not None:
+                mura = cv2.bitwise_and(mura, mask_resized)
+            combined = (filtered_binary > 0) | (mura > 0)
+            filtered_binary = self._filter_bright_spot_support(tile, combined).astype(np.uint8) * 255
+            has_bright_spot = bool(np.any(filtered_binary))
+
         score = 1.0 if has_bright_spot else 0.0
 
         # 轉為 float anomaly_map 格式（與 PatchCore 輸出格式相容）
@@ -3263,9 +3303,10 @@ class CAPIInferencer:
         tile.bright_spot_diff_threshold = diff_threshold
         tile.bright_spot_area = int(np.sum(filtered_binary > 0))
         tile.bright_spot_min_area = min_area
-        tile.decision_context = {"abs_threshold": int(abs_threshold),
-                                 "max_pixel": int(gray.max()),
-                                 "max_component_area": int(max_component_area)}
+        tile.decision_context = dict(tile.decision_context or {},
+                                     abs_threshold=int(abs_threshold),
+                                     max_pixel=int(gray.max()),
+                                     max_component_area=int(max_component_area))
 
         # 偵測結果 log
         max_pixel_val = int(gray.max())
@@ -3273,15 +3314,19 @@ class CAPIInferencer:
         bright_pixel_count = int(np.sum(filtered_binary > 0))
         raw_bright_count = int(np.sum(binary > 0))
         aoi_suffix = self._format_aoi_tile_log_suffix(tile)
+        mura = (tile.decision_context or {}).get("black_mura")
+        mura_suffix = (f", DoG8/64 max={mura['max_residual']:.3f} thr={mura['threshold']:.3f}"
+                       f" area={mura['candidate_pixels']} min_area={mura['min_area']}"
+                       if mura else "")
         if has_bright_spot:
             print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: 發現亮點 ({bright_pixel_count} px), "
                   f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
-                  f"max_pixel={max_pixel_val}, median_k={mk}")
+                  f"max_pixel={max_pixel_val}, median_k={mk}{mura_suffix}")
         else:
             print(f"  💡 B0F 偵測 Tile@({tile.x},{tile.y}){aoi_suffix}: 未發現亮點, "
                   f"max_diff={max_diff_val}, diff_thr={diff_threshold}, abs_thr={abs_threshold}, "
                   f"max_pixel={max_pixel_val}, raw_bright={raw_bright_count} px, "
-                  f"max_component={max_component_area} px (min_area={min_area})")
+                  f"max_component={max_component_area} px (min_area={min_area}){mura_suffix}")
 
         return score, anomaly_map
 
@@ -5248,7 +5293,7 @@ class CAPIInferencer:
             and small_hint is not None and np.any(small_hint)
         )
         grid = self._uses_grid_dust_review(tile)
-        if not grid and not tile.is_suspected_dust_or_scratch and not small_core_review:
+        if not tile.is_suspected_dust_or_scratch and not small_core_review:
             return ""
 
         snapshot = dict(scope="whole_roi", status="unconfirmed", checks=[],
@@ -6339,6 +6384,11 @@ class CAPIInferencer:
                 zone="bright_spot" if is_skip_file else "",
             )
 
+            self._prepare_black_mura_tile(
+                tile, image, image_prefix=self._get_image_prefix(result.image_path.name),
+                panel_polygon=(result.panel_polygon if result.panel_polygon is not None
+                               else self._rect_polygon_from_bounds(result.raw_bounds)),
+            )
             patchcore_tiles.append(tile)
             next_tile_id += 1
             logger.debug(
@@ -7477,6 +7527,11 @@ class CAPIInferencer:
                 is_left_edge=is_left,
                 is_right_edge=is_right,
             )
+            if is_skip_file:
+                self._prepare_black_mura_tile(
+                    tile, raw_image, image_prefix=self._get_image_prefix(result.image_path.name),
+                    panel_polygon=polygon,
+                )
             result.tiles.append(tile)
             next_tile_id += 1
             created += 1
@@ -8670,7 +8725,7 @@ class CAPIInferencer:
                                 self._check_tile_dust_regions(tile, anomaly_map, dust_mask)
                             review_support_map = anomaly_map
                             anomaly_map = self._aoi_dust_core_map(tile, anomaly_map, heatmap_binary)
-                            if has_real_defect:
+                            if has_real_defect and not grid:
                                 region_details, review_note = self._review_aoi_low_coverage_dust(
                                     tile, anomaly_map, region_details, region_labels,
                                     omit_image, omit_crop, focus_x=context_focus_x,
@@ -9573,11 +9628,8 @@ class CAPIInferencer:
             dm = cv2.resize(dm, (binary.shape[1], binary.shape[0]), interpolation=cv2.INTER_NEAREST)
         dust = dm > 0
         residual = ((binary > 0) & ~dust).astype(np.uint8)
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(residual, connectivity=8)
         minimum = max(1, int(tile.bright_spot_min_area or self.config.bright_spot_min_area))
-        keep = np.zeros(count, dtype=bool)
-        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= minimum
-        remaining = keep[labels]
+        remaining = self._filter_bright_spot_support(tile, residual)
 
         # Split removed and surviving pixels before making diagnostic regions.
         # A sticker can connect two real points; each surviving point must get
@@ -9789,7 +9841,7 @@ class CAPIInferencer:
                     review_support_map = anomaly_map_for_dust
                     anomaly_map_for_dust = self._aoi_dust_core_map(
                         tile, anomaly_map_for_dust, heatmap_binary)
-                    if has_real:
+                    if has_real and not grid:
                         region_details, review_note = self._review_aoi_low_coverage_dust(
                             tile, anomaly_map_for_dust, region_details, region_labels,
                             omit_image, omit_crop, focus_x=context_focus_x,
@@ -10036,11 +10088,8 @@ class CAPIInferencer:
                         keep = list(range(_kept_count)) if _kept_count else []
                         tile.half_spot_area = int(np.count_nonzero(limited))
                     else:
-                        count, labels, stats, _ = cv2.connectedComponentsWithStats(
-                            (limited > 0).astype(np.uint8), connectivity=8)
-                        minimum = max(1, tile.bright_spot_min_area)
-                        keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= minimum]
-                        limited = np.isin(labels, keep).astype(np.float32)
+                        limited = self._filter_bright_spot_support(tile, limited).astype(np.float32)
+                        keep = bool(np.any(limited))
                         tile.bright_spot_area = int(np.count_nonzero(limited))
                     roi_score = float(bool(keep))
                 else:

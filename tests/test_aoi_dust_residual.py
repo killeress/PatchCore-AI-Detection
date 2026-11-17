@@ -265,6 +265,75 @@ def test_grid_dust_reviews_original_once_in_production(monkeypatch, tmp_path, pi
     np.testing.assert_array_equal(tile.original_image, raw[tile.y:tile.y+128, tile.x:tile.x+128])
 
 
+@pytest.mark.parametrize("low_cov_overlap", [False, True])
+def test_grid_real_defect_with_unrelated_dust_records_real_regions_not_unconfirmed(
+    monkeypatch, tmp_path, low_cov_overlap,
+):
+    from capi_inference import AOIReportDefect
+    from test_process_panel_v2 import _make_config
+
+    config = _make_config(tmp_path)
+    config.model_mapping["W0F00000"] = config.model_mapping["G0F00000"]
+    config.threshold_mapping["W0F00000"] = {"inner": 0.5, "edge": 0.5}
+    config.tile_size = 128
+    config.grid_tiling_enabled = False
+    config.grid_canonicalization_enabled = True
+    config.grid_product_resolution = (184, 124)
+    config.grid_samples_per_cell = 3
+    config.inference_rotate_180_enabled = False
+    config.aoi_coord_inspection_enabled = config.aoi_judgment_roi_enabled = True
+    config.dust_heatmap_top_percent = 5.0
+    config.dust_heatmap_iou_threshold = 0.5
+
+    raw = np.zeros((310, 432), np.uint8)
+    polygon = np.array([[32, 34], [400, 29], [395, 278], [37, 280]], np.int32)
+    cv2.fillPoly(raw, [polygon], 100)
+    defect_xy = (200, 150)
+    cv2.circle(raw, defect_xy, 5, 60, -1)
+    omit = (18 + np.indices(raw.shape)[0] % 3).astype(np.uint8)
+    dust_xy = (193, 150) if low_cov_overlap else (160, 120)
+    cv2.circle(omit, dust_xy, 5, 180, -1)
+    if low_cov_overlap:
+        cv2.circle(raw, dust_xy, 5, 75, -1)
+    path = tmp_path / "W0F00000_test.tif"
+    assert cv2.imwrite(str(path), raw)
+    assert cv2.imwrite(str(tmp_path / "PINIGBI _test.tif"), omit)
+    report = AOIReportDefect("C1111", defect_xy[0], defect_xy[1], "W0F00000", coordinate_space="image")
+
+    model = object()
+    worker = CAPIInferencer(config)
+    monkeypatch.setattr(worker, "_get_model_for", lambda machine, prefix, zone: model if zone == "inner" else None)
+
+    def predict(tile, *, inferencer, threshold, **kwargs):
+        assert inferencer is model and threshold == .5
+        x, y = defect_xy[0] - tile.x, defect_xy[1] - tile.y
+        values = np.zeros((tile.height, tile.width), np.float32)
+        cv2.circle(values, (x, y), 18, .6, -1)
+        cv2.circle(values, (x, y), 4, 1., -1)
+        return 1., values
+
+    monkeypatch.setattr(worker, "predict_tile", predict)
+    results, *_ = worker.process_panel(tmp_path, cpu_workers=1, client_product_resolution=(184, 124),
+                                       aoi_report_override={"W0F00000": [report]})
+    result, = results
+    tile, = result.tiles
+    assert tile.is_suspected_dust_or_scratch is False
+    assert "aoi_dust_residual" not in (tile.decision_context or {})
+    assert "GRID_ORIGINAL_ROI" not in tile.dust_detail_text
+    assert "LOW_COV_FEATURE" not in tile.dust_detail_text
+    assert "REAL_NG" in tile.dust_detail_text
+    cov = tile.dust_region_details[0]["coverage"]
+    assert (0 < cov < 0.5) if low_cov_overlap else (cov == 0)
+    db_data = results_to_db_data([result], {})
+    import json
+    saved_ctx = json.loads(db_data[0]["tiles"][0]["decision_context"])
+    assert "aoi_dust_residual" not in saved_ctx
+    assert saved_ctx["aoi_real_regions"]["count"] == 1
+    assert len(saved_ctx["aoi_real_regions"]["peaks_image_xy"]) == 1
+    saved_peak = saved_ctx["aoi_real_regions"]["peaks_image_xy"][0]
+    assert np.linalg.norm(np.subtract(saved_peak, defect_xy)) <= 5
+
+
 @pytest.mark.parametrize("scene,expected", [
     ("clean", "clear"), ("outside_top", "remaining"), ("partial_core", "unconfirmed"),
     ("missing_raw", "unconfirmed"), ("empty_core", "unconfirmed"),

@@ -1971,13 +1971,14 @@
 <div class="modal-overlay" id="b0f-help-modal" onclick="if(event.target===this) this.classList.remove('show')">
     <div class="modal-box" style="max-width: 560px;">
         <div class="modal-header">
-            <h3>💡 B0F 亮點偵測 — 參數說明</h3>
+            <h3>💡 B0F 亮點／壓傷偵測 — 參數說明</h3>
             <button class="modal-close" onclick="document.getElementById('b0f-help-modal').classList.remove('show')">&times;</button>
         </div>
         <div class="modal-body" style="padding: 20px 24px; font-size: 0.85rem; line-height: 1.7; color: #cbd5e1;">
             <div style="margin-bottom: 16px; color: #94a3b8;">
                 B0F00000(黑畫面) 圖片使用局部對比偵測取代 PatchCore。<br>
                 偵測邏輯：median filter 估計背景 → 計算局部差異 → 差異超過閾值且面積 ≥ min_area 判定為亮點。
+                <br>AOI 黑畫面另以 DoG 8/64 偵測低對比、較寬的輕微壓傷；先讀取周圍原圖，並避開產品邊界 256px，避免正常邊緣光暈。
             </div>
 
             <table style="width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-bottom: 18px;">
@@ -1996,6 +1997,18 @@
                 <tr>
                     <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">threshold</td>
                     <td style="padding: 8px 10px;">絕對亮度上限（超過直接判定 NG）</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">black_mura_enabled</td>
+                    <td style="padding: 8px 10px;">預設關閉；手動開啟後加入 DoG 壓傷偵測，關閉時保留原亮點偵測。</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">black_mura_threshold</td>
+                    <td style="padding: 8px 10px;">DoG 原始灰階差門檻，預設 0.5；越低越敏感，不包含預覽圖的 40 倍增益。</td>
+                </tr>
+                <tr>
+                    <td style="padding: 8px 10px; color: #fbbf24; font-weight: 600;">black_mura_min_area</td>
+                    <td style="padding: 8px 10px;">DoG 最小連通面積，預設 100px；與亮點 min_area 分開，裁切 AOI 與去塵後會重新檢查。</td>
                 </tr>
             </table>
 
@@ -2306,7 +2319,8 @@
     ];
     const B0F_BRIGHT_SPOT_PARAMS = [
         'bright_spot_diff_threshold', 'bright_spot_median_kernel',
-        'bright_spot_min_area', 'bright_spot_threshold'
+        'bright_spot_min_area', 'bright_spot_threshold',
+        'black_mura_enabled', 'black_mura_threshold', 'black_mura_min_area'
     ];
     const HALF_SPOT_PARAMS = [
         'half_spot_diff_threshold', 'half_spot_median_kernel',
@@ -4167,7 +4181,7 @@
                 <div class="settings-section" style="border-left: 3px solid #f59e0b;">
                     <div class="settings-section-header">
                         <div class="icon">💡</div>
-                        <span>B0F 亮點偵測設定</span>
+                        <span>B0F 亮點／壓傷偵測設定</span>
                         <span onclick="document.getElementById('b0f-help-modal').classList.add('show')"
                               style="margin-left: 8px; cursor: pointer; font-size: 0.85rem; color: #64748b; background: rgba(100,116,139,0.15); padding: 2px 8px; border-radius: 4px; transition: all 0.2s;"
                               onmouseover="this.style.color='#fbbf24'; this.style.background='rgba(245,158,11,0.15)'"

@@ -248,6 +248,14 @@ def decision_evidence(item, is_cv=False):
             _metric("最大連通區面積", ctx.get("max_component_area"), ctx.get("min_area"), unit=" px", digits=0),
         ]
         notes.append("灰階差或絕對亮度任一條件命中後，有效區域內仍須有連通區面積達標；全 tile 最大值僅供參考。")
+        mura = ctx.get("black_mura") or {}
+        if mura.get("enabled"):
+            label, title = "亮點／壓傷偵測", "亮點／壓傷檢查"
+            metrics.extend([
+                _metric("DoG 最大灰階差", mura.get("max_residual"), mura.get("threshold"), op=">", digits=3),
+                _metric("DoG 候選最大連通區", mura.get("max_component_area"), mura.get("min_area"), unit=" px", digits=0),
+            ])
+            notes.append("壓傷另以 DoG 8/64 原始灰階差及獨立面積門檻檢查；候選仍套用 AOI、排除區、灰塵與炸彈規則。")
     else:
         label, title = "PatchCore", "模型分數達門檻"
         metrics = [_metric("異常分數", item.get("score"), ctx.get("score_threshold"), digits=4)]
