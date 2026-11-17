@@ -57,7 +57,7 @@ def test_tcp_passes_primary_source_only_for_matching_carux_machine(facility, mac
 
 
 @pytest.mark.parametrize('machine', ['CAPI0701', 'CAPI0601'])
-def test_tcp_invalid_date_still_marks_carux_102_only(machine):
+def test_tcp_invalid_date_preserves_carux_source_context(machine):
     server, inf, request = _server('CARUX', machine)
     bad_panel = Path('/158/TIANMU/yuantu/MODEL/invalid/PID')
     _run(server, request, bad_panel)
@@ -100,7 +100,7 @@ def test_v2_passes_actual_report_source_and_model_to_parser():
     assert inf._parse_aoi_report_txt.call_args.kwargs['model_id'] == 'MODEL'
 
 
-def test_v2_invalid_date_keeps_carux_102_only():
+def test_v2_invalid_date_keeps_carux_source_context():
     cfg = CAPIConfig()
     cfg.aoi_coord_inspection_enabled = True
     inf = CAPIInferencer.__new__(CAPIInferencer)

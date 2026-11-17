@@ -1,4 +1,5 @@
 """CarUX CAPI 報告來源與錯誤處理。"""
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
@@ -49,7 +50,7 @@ def test_other_factories_and_invalid_machine_numbers_keep_original_source(facili
     assert resolve_carux_report_dir(config, machine, Path('/x/M/20261113/PID')) is None
 
 
-def test_report_matching_uses_exact_pid_model_date_and_latest_mtime():
+def test_report_matching_uses_exact_pid_model_date_and_latest_mtime(caplog):
     entries = [
         _entry('PID_20261113130000_MODEL_130000.TXT', 10),
         _entry('PID_20261113120000_MODEL_120000.txt', 20),
@@ -59,11 +60,13 @@ def test_report_matching_uses_exact_pid_model_date_and_latest_mtime():
         _entry('PID_20261113160000_MODEL_W0F00000_160000.jpg', 80),
     ]
     file_open = mock_open(read_data='PID\n@;NG;;NGPCDK20000100002W0F00000,\n')
-    with patch('capi_carux_report.os.scandir', return_value=_scan(entries)), \
+    with caplog.at_level(logging.INFO, logger='capi.inference'), \
+         patch('capi_carux_report.os.scandir', return_value=_scan(entries)), \
          patch('builtins.open', file_open):
         result = read_carux_report_lines(Path('/102/20261113/CAHM0701/OK'), 'PID', 'MODEL', '20261113')
     assert result == ['PID\n', '@;NG;;NGPCDK20000100002W0F00000,\n']
     assert file_open.call_args.args[0].name == 'PID_20261113120000_MODEL_120000.txt'
+    assert '讀取公共網盤報告' in caplog.text
 
 
 def test_no_matching_report_returns_not_found():
