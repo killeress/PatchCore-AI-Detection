@@ -1,4 +1,4 @@
-"""Exercise the production OMIT postprocess, including strict-review routing."""
+"""Exercise the coverage threshold and exclusions in the production OMIT postprocess."""
 from pathlib import Path
 
 import cv2
@@ -51,21 +51,17 @@ def _case(monkeypatch, *, independent=False, original=True, two_stage=False):
 
 @pytest.mark.parametrize("two_stage", [False, True])
 @pytest.mark.parametrize("independent", [False, True])
-def test_postprocess_reviews_raw_and_keeps_unmatched_defect(monkeypatch, two_stage, independent):
+def test_low_coverage_keeps_the_region_ng(monkeypatch, two_stage, independent):
     worker, tile, result, omit, calls = _case(
         monkeypatch, two_stage=two_stage, independent=independent)
     worker._apply_omit_dust_postprocess([result], omit, False, "", cpu_workers=1)
 
-    assert tile.is_suspected_dust_or_scratch is (not independent)
-    assert 0 in calls  # A fresh unextended core, not the existing candidate mask.
-    assert "LOW_COV_FEATURE" in tile.dust_detail_text
+    assert not tile.is_suspected_dust_or_scratch
+    assert calls == [None]
+    assert "PER_REGION: 1real+0dust -> REAL_NG" in tile.dust_detail_text
     assert tile.dust_region_max_cov < 0.1
-    assert tile.dust_two_stage_features is None  # Keep bomb/legacy two-stage evidence separate.
-    assert any(f["is_dust"] for f in tile.dust_low_coverage_features)
-    if independent:
-        assert any(not f["is_dust"] for f in tile.dust_low_coverage_features)
-        assert abs(tile.anomaly_peak_x - 88) <= 2
-        assert abs(tile.anomaly_peak_y - 82) <= 2
+    assert tile.dust_two_stage_features is None
+    assert (tile.anomaly_peak_x, tile.anomaly_peak_y) == (40, 50)
 
 
 def test_zero_heatmap_and_empty_regions_keep_ng(monkeypatch):
@@ -82,10 +78,10 @@ def test_missing_original_does_not_fall_back_to_preprocessed_dust(monkeypatch):
     worker._apply_omit_dust_postprocess([result], omit, False, "", cpu_workers=1)
     assert tile.is_suspected_dust_or_scratch is False
     assert 0 not in calls
-    assert "missing raw/OMIT" in tile.dust_detail_text
+    assert "PER_REGION: 1real+0dust -> REAL_NG" in tile.dust_detail_text
 
 
-def test_extended_mask_cannot_substitute_for_precise_core(monkeypatch):
+def test_low_coverage_candidate_is_not_promoted_to_dust(monkeypatch):
     worker, tile, result, omit, _ = _case(monkeypatch)
 
     def mask(_image, extension_override=None, **_kwargs):
@@ -116,9 +112,11 @@ def test_non_roi_tile_retains_existing_coverage_decision(monkeypatch):
     assert tile.dust_low_coverage_features is None
 
 
-def test_excluded_gap_cannot_reconnect_bubble_through_cached_display_map(monkeypatch):
+@pytest.mark.parametrize("center_seed", [False, True])
+def test_excluded_gap_cannot_reconnect_bubble_through_cached_display_map(monkeypatch, center_seed):
     worker, tile, result, omit, calls = _case(monkeypatch)
     worker.config.dust_heatmap_top_percent = 0.4
+    worker.config.aoi_heatmap_center_seed_enabled = center_seed
     yy, xx = np.mgrid[:128, :128]
     display_map = np.exp(-((xx - 40) ** 2 + (yy - 32) ** 2) / (2 * 16.0 ** 2)).astype(np.float32)
     display_map[tile.aoi_roi_mask == 0] = 0
@@ -133,9 +131,10 @@ def test_excluded_gap_cannot_reconnect_bubble_through_cached_display_map(monkeyp
     monkeypatch.setattr(worker, "_mask_aoi_exclude_zones_for_dust", exclude_gap)
     worker._apply_omit_dust_postprocess([result], omit, False, "", cpu_workers=1)
 
-    assert 0 in calls
+    assert calls == [None]
     assert "EXCLUDE_ZONE_HEATMAP_ZEROED" in tile.dust_detail_text
-    assert tile.dust_heatmap_iou == 0
+    assert not np.any(tile.dust_heatmap_binary[39:44])
+    assert any(r["coverage"] == 0 for r in tile.dust_region_details)
     assert tile.is_suspected_dust_or_scratch is False
     assert not tile.dust_low_coverage_features
     assert np.any(tile.aoi_roi_full_map[39:44] > 0)

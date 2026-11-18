@@ -201,7 +201,7 @@ def test_panel_perimeter_in_corner_tile_is_preserved_for_both_probes(monkeypatch
 
 
 @pytest.mark.parametrize("pipeline", ["grid_only", "before_grid", "edge_dog"])
-def test_grid_dust_reviews_original_once_in_production(monkeypatch, tmp_path, pipeline):
+def test_grid_dust_uses_configured_coverage_in_production(monkeypatch, tmp_path, pipeline):
     from capi_inference import AOIReportDefect
     from test_process_panel_v2 import _make_config
 
@@ -213,7 +213,7 @@ def test_grid_dust_reviews_original_once_in_production(monkeypatch, tmp_path, pi
     config.grid_samples_per_cell = 1 if pipeline == "before_grid" else 3
     config.inference_rotate_180_enabled = True
     config.aoi_coord_inspection_enabled = config.aoi_judgment_roi_enabled = True
-    config.dust_heatmap_top_percent = 5.0  # Grid AOI uses its own 0.4% core.
+    config.dust_heatmap_top_percent = 5.0
     if pipeline == "before_grid":
         config.image_preprocess_pipeline = [{"method": "clahe"}]
     if pipeline == "edge_dog":
@@ -254,12 +254,10 @@ def test_grid_dust_reviews_original_once_in_production(monkeypatch, tmp_path, pi
                                        aoi_report_override={"G0F00000": [report]})
     result, = results
     tile, = result.tiles
-    review = tile.decision_context["aoi_dust_residual"]
     assert tile.is_suspected_dust_or_scratch
-    assert review["method"] == "grid_original_roi"
-    assert review["status"] == "clear" and review["checks"] == []
-    assert review["core_pixels"] == review["dust_overlap_pixels"] > 0
-    assert tile.decision_context["aoi_judgment_roi"]["dust_top_percent"] == .4
+    assert "aoi_dust_residual" not in tile.decision_context
+    assert "PER_REGION" in tile.dust_detail_text
+    assert tile.decision_context["aoi_judgment_roi"]["dust_top_percent"] == 5.0
     assert len(inputs) == 1
     assert tile.x > 0 and tile.y > 0 and tile.aoi_tile_shift_dx != 0
     np.testing.assert_array_equal(tile.original_image, raw[tile.y:tile.y+128, tile.x:tile.x+128])
@@ -432,9 +430,10 @@ def test_neighbor_bomb_cannot_use_pre_removal_core_to_clear_new_residual(monkeyp
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("defect", [None, 2, 10])
-def test_production_paths_gate_dust_on_whole_roi_residual(monkeypatch, tmp_path, version, defect):
+def test_uncovered_core_keeps_ng_without_rerunning_the_model(monkeypatch, tmp_path, version, defect):
     worker, tile, result, raw, _, _, probes = _case(monkeypatch, defect=defect)
     worker.config.dust_heatmap_iou_threshold = .1
+    worker.config.aoi_heatmap_center_seed_enabled = False
     yy, xx = np.mgrid[:128, :128]
     full_map = np.exp(-((xx - 40) ** 2 + (yy - 32) ** 2) / (2 * 16. ** 2)).astype(np.float32)
     if defect is not None:
@@ -451,17 +450,15 @@ def test_production_paths_gate_dust_on_whole_roi_residual(monkeypatch, tmp_path,
         _run_v1(worker, result, monkeypatch, tmp_path)
     else:
         worker._apply_omit_dust_postprocess([result], raw, False, "", cpu_workers=1)
-    assert tile.is_suspected_dust_or_scratch is (defect is None)
-    assert "ROI_RESIDUAL" in tile.dust_detail_text
+    assert not tile.is_suspected_dust_or_scratch
+    assert "REAL_NG" in tile.dust_detail_text
     assert np.count_nonzero(tile.dust_heatmap_binary) < np.count_nonzero(tile.aoi_roi_mask) * .005
     assert tile.dust_heatmap_iou == 0
-    snapshot = tile.decision_context["aoi_dust_residual"]
-    assert snapshot["status"] == ("clear" if defect is None else "remaining")
-    assert results_to_db_data([result], {})[0]["is_ng"] == int(defect is not None)
+    assert "aoi_dust_residual" not in tile.decision_context
+    assert results_to_db_data([result], {})[0]["is_ng"] == 1
     reported = _iter_qjpg_defect_records([result], (128, 128), worker.config)
-    assert any(row.startswith("PCDK2") for row in reported) is (defect is not None)
-    if defect == 2:
-        assert len(probes) == 2
+    assert any(row.startswith("PCDK2") for row in reported)
+    assert not probes
 
 
 @pytest.mark.parametrize("flat_raw", [False, True])

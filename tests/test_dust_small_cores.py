@@ -1,4 +1,6 @@
 """Small surface particles must survive precise review without hiding neighbors."""
+import json
+
 import cv2
 import numpy as np
 import pytest
@@ -186,7 +188,7 @@ def test_small_core_exception_cannot_clear_missing_evidence_or_model_disagreemen
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize("defect", [None, (-1, 2, 9), (1, 10, 48)])
-def test_production_paths_reconcile_small_dust_only_after_full_roi_model_checks(monkeypatch, tmp_path, version, defect):
+def test_production_paths_keep_the_two_stage_small_particle_verdict(monkeypatch, tmp_path, version, defect):
     worker, tile, result, raw, dust, _, probes = _small_case(monkeypatch, defect)
     omit = np.full_like(raw, 17)
     cv2.circle(omit, (40, 50), 2, 200, -1)
@@ -199,6 +201,7 @@ def test_production_paths_reconcile_small_dust_only_after_full_roi_model_checks(
     full_map = np.exp(-((xx - 40) ** 2 + (yy - 50) ** 2) / (2 * 6. ** 2)).astype(np.float32)
     source = np.where((tile.aoi_roi_mask > 0) & (full_map >= .34), full_map, 0)
     tile.aoi_roi_full_map = full_map
+    tile.decision_context = {"aoi_judgment_roi": {"enabled": True}}
     tile.dust_two_stage_dust_mask = tile.dust_two_stage_features = None
     result.raw_bounds = (0, 0, 128, 128)
     result.anomaly_tiles = [(tile, 1., source)]
@@ -218,13 +221,17 @@ def test_production_paths_reconcile_small_dust_only_after_full_roi_model_checks(
         worker._apply_omit_dust_postprocess([result], omit, False, "", cpu_workers=1)
 
     assert "PER_REGION: 0real+1dust" in tile.dust_detail_text
-    assert outcomes == [True]  # The actual legacy halo check initially keeps NG.
-    assert "ROI_RESIDUAL" in tile.dust_detail_text
-    assert tile.is_suspected_dust_or_scratch is (defect is None)
-    assert results_to_db_data([result], {})[0]["is_ng"] == int(defect is not None)
-    if defect is None:
-        assert len(probes) == 2
-        assert all(feature["dust_reason"] == "small_core_residual" for feature in tile.dust_two_stage_features)
+    assert outcomes == [True]
+    assert not probes
+    assert "TWO_STAGE" in tile.dust_detail_text
+    assert "aoi_dust_residual" not in tile.decision_context
+    assert not tile.is_suspected_dust_or_scratch
+    stored = results_to_db_data([result], {})[0]
+    assert stored["is_ng"] == 1
+    real_peaks = [list(f["abs_pos"]) for f in tile.dust_two_stage_features if not f["is_dust"]]
+    assert real_peaks
+    context = json.loads(stored["tiles"][0]["decision_context"])
+    assert context["aoi_real_regions"] == {"count": len(real_peaks), "peaks_image_xy": real_peaks}
 
 
 def test_feature_diagnostic_explains_residual_verification(monkeypatch):

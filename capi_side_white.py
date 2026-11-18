@@ -404,7 +404,7 @@ def _preview(gray, quad):
 
 def _candidate_preview_scope(payload):
     """Select annotations by AOI proximity without changing any detection evidence."""
-    from capi_side_report import compare_side_record, retained_candidate_contours
+    from capi_side_report import candidate_preview_reason, compare_side_record, retained_candidate_contours
 
     radius = normalize_side_white_params(payload.get("parameters"))["csjbl_preview_radius_product_px"]
     coords = {}
@@ -413,21 +413,16 @@ def _candidate_preview_scope(payload):
     comparison = compare_side_record(
         {"payload": payload, "status": payload["status"], "aoi_machine_coords": coords}, tolerance=radius)
     selected = {candidate_id for point in comparison["points"]
-                if point["status"] != "unavailable" for candidate_id in point["retained_candidate_ids"]}
+                for candidate_id in point["retained_candidate_ids"]}
     guarded = {candidate_id for point in comparison["points"]
-               if point["status"] != "unavailable" for candidate_id in point["guard_candidate_ids"]} - selected
+               for candidate_id in point["guard_candidate_ids"]} - selected
     candidates = payload.get("candidates", [])
     retained = retained_candidate_contours(payload)
-    reason = ""
-    if not comparison["has_csjbl"]:
-        reason = "沒有 AOI CSJBL 座標，未顯示黃框。"
-    elif comparison["mapped"] < len(comparison["points"]):
-        reason = "有 CSJBL 座標無法映射，僅顯示可對應黃框。"
     return {"scope": "csjbl_nearby", "tolerance_product_px": radius,
             "candidate_ids": [c["id"] for c in candidates if c["id"] in selected and c["id"] in retained],
             "guard_candidate_ids": [c["id"] for c in candidates if c["id"] in guarded and c["id"] in retained],
             "total": len(selected & retained.keys()), "guard_total": len(guarded & retained.keys()),
-            "reference_total": len(retained.keys() - selected - guarded), "reason": reason}
+            "reference_total": len(retained.keys() - selected - guarded), "reason": candidate_preview_reason(comparison)}
 
 
 def _save_preview(path, image):
@@ -641,6 +636,8 @@ def _crop_bounds(points, shape, padding):
 def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 220), remaining_contours=(),
            *, contour_color=(184, 163, 148), annotate=None):
     """Fixed-size letterboxed panel; image pixels and annotations share one transform."""
+    from capi_side_report import is_candidate_polygon
+
     canvas = np.full((350, 400, 3), 20, np.uint8)
     cv2.putText(canvas, title, (10, 23), cv2.FONT_HERSHEY_SIMPLEX, .6, (230, 230, 230), 1)
     if image is None or bounds is None:
@@ -656,7 +653,7 @@ def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 22
         colored = crop.copy()
         colored[mask > 0] = mask_color
         crop = cv2.addWeighted(crop, .55, colored, .45, 0)
-    if contour is not None:
+    if is_candidate_polygon(contour):
         cv2.polylines(crop, [np.rint(np.asarray(contour) - [x1, y1]).astype(np.int32)], True, contour_color, 1)
     for remaining in remaining_contours:
         cv2.polylines(crop, [np.rint(np.asarray(remaining) - [x1, y1]).astype(np.int32)], True, (80, 240, 80), 1)
@@ -672,7 +669,7 @@ def _panel(image, bounds, title, contour=None, mask=None, mask_color=(0, 220, 22
 
 def _candidate_comparison(item, side, front, omit, mask=None, *, payload=None, comparison=None, retained=None):
     """Use the formal match/guard colours and show the AOI-to-candidate distance."""
-    from capi_side_report import annotation_color, draw_side_annotations, retained_candidate_contours
+    from capi_side_report import annotation_color, draw_side_annotations, is_candidate_polygon, retained_candidate_contours
 
     related = [p for p in (comparison or {}).get("points", []) if item["id"] in p["candidate_ids"]]
     hit = any(item["id"] in p["retained_candidate_ids"] for p in related)
@@ -698,8 +695,8 @@ def _candidate_comparison(item, side, front, omit, mask=None, *, payload=None, c
         def draw(image, crop_bounds):
             height, width = image.shape[:2]
             scale = np.array([width / crop_bounds[2], height / crop_bounds[3]])
-            if not remaining:
-                contour = (item.get("front_contour") if kind == "front" else item["side_contour"])
+            contour = item.get(kind + "_contour")
+            if not remaining and is_candidate_polygon(contour):
                 pixels = np.rint((np.asarray(contour) - crop_bounds[:2]) * scale).astype(np.int32)
                 cv2.polylines(image, [pixels], True, color, 1, cv2.LINE_AA)
             draw_side_annotations(image, payload, {**comparison, "points": related}, kind,

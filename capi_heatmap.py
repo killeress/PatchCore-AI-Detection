@@ -1523,7 +1523,8 @@ class HeatmapManager:
         bomb_diagnostics = getattr(tile_info, 'bomb_region_diagnostics', None) if tile_info else None
         ts_features = getattr(tile_info, 'dust_two_stage_features', None) if tile_info else None
         roi_core = None
-        shared_core_decision = roi.get('dust_scope') == 'roi_top_percent'
+        dust_scope = roi.get('dust_scope')
+        shared_core_decision = dust_scope in ('roi', 'roi_top_percent')
         roi_top_percent = float(roi.get('dust_top_percent', roi.get('display_top_percent', dust_heatmap_top_percent)))
         if has_omit and roi.get('enabled') and roi_mask is not None and not bomb_diagnostics:
             decision_binary = getattr(tile_info, 'dust_heatmap_binary', None)
@@ -1541,7 +1542,11 @@ class HeatmapManager:
                     precise_dust = getattr(tile_info, 'dust_two_stage_dust_mask', None)
                     if precise_dust is not None:
                         display_dust = precise_dust
-                if "TWO_STAGE" in dust_detail and display_dust is not None:
+                if "TWO_STAGE" in dust_detail and dust_scope == 'roi' and dust_iou_debug is not None:
+                    # This panel was drawn with the same scoped and exclusion-weighted
+                    # heatmap used to find the features, before score thresholding.
+                    roi_debug = iou_debug_panel
+                elif "TWO_STAGE" in dust_detail and display_dust is not None:
                     roi_debug = build_two_stage_debug_image(
                         tile_image, anomaly_map, display_dust, ts_features or [], is_dust,
                         top_percent=roi_top_percent, display_anomaly_map=display_map,
@@ -1617,7 +1622,7 @@ class HeatmapManager:
                 debug_label = "TwoStage Debug (G=Dust R=Real B=DustMask)"
             else:
                 debug_label = f"{metric_name} Debug (G=Dust R=RealNG B=DustOnly)"
-            cov_scope = "ROI Core" if shared_core_decision else "Overall"
+            cov_scope = "ROI Core" if dust_scope == 'roi_top_percent' else "Overall"
             labels = ["Original", "Preprocessed", "Heatmap", "OMIT Crop", f"Dust Mask ({cov_scope}{metric_name}:{dust_iou:.3f})", debug_label]
             panels = [orig, preprocessed, heatmap_panel, omit_panel, dust_panel, iou_debug_panel]
             for zoom_img, zoom_label in zoom_results:

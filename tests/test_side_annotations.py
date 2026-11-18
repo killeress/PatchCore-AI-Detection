@@ -9,8 +9,10 @@ import pytest
 from jinja2 import Environment, FileSystemLoader
 
 from capi_side_report import (SIDE_ANNOTATION_LEGEND, annotation_color, compare_side_record,
-                              draw_side_annotations, render_comparison_image, side_white_view)
+                              crop_original_image, draw_side_annotations, render_comparison_image,
+                              side_inference_decision, side_white_view)
 from test_side_mark_roi import roi_row
+from test_side_release_guard import guard_row
 
 
 def side_row(rotated=False):
@@ -62,6 +64,80 @@ def test_all_aoi_points_keep_source_coordinates_and_invalid_points_do_not_get_in
     assert set(labels) == {"A1", "A2"}
     assert comparison["points"][0]["source_xy"] == [1900, 1000]
     assert comparison["points"][2]["status"] == "unavailable"
+
+
+def test_incomplete_contour_keeps_located_aoi_other_candidates_and_crops(tmp_path, monkeypatch):
+    row = guard_row(10.86)
+    row["id"] = 1
+    payload = row["payload"]
+    payload["candidates"].insert(0, {"id": 6, "side_contour": [[200, 200], [179, 200]]})
+    row["aoi_machine_coords"]["W0F00000"].append({"defect_code": "CSJBL", "product_x": -1, "product_y": 0})
+    pixels = np.full((300, 500), 80, np.uint8)
+    for name in ("side.tif", "preview.jpg"):
+        assert cv2.imwrite(str(tmp_path / name), pixels)
+    bounds = [0, 0, 500, 300]
+    payload.update(side_image="side.tif", artifacts={"side": str(tmp_path / "preview.jpg")},
+                   preview_bounds={"side": bounds}, candidate_display={
+                       "tolerance_product_px": 50, "reason": "有 CSJBL 座標無法映射，僅顯示可對應黃框。"})
+    before = copy.deepcopy(row)
+    comparison = compare_side_record(row)
+    a1, a2 = comparison["points"]
+    assert comparison["mapped"] == 1 and a1["side_raw_xy"] == [450, 100]
+    assert a2["status"] == "unavailable" and "side_xy" not in a2
+    assert a1["status"] == "unverified" and a1["incomplete_candidate_ids"] == [6]
+    assert a1["candidate_ids"] == [1]
+    assert a1["nearest_retained_distance_product_px"] == pytest.approx(10.86, abs=.0001)
+    assert side_inference_decision(row)["final_judgment"] == "NG"
+
+    labels = []
+    monkeypatch.setattr(cv2, "putText", lambda image, text, *args: labels.append(text))
+    for kind in ("side", "front"):
+        labels.clear()
+        image = cv2.cvtColor(pixels, cv2.COLOR_GRAY2BGR)
+        draw_side_annotations(image, payload, comparison, kind, bounds, all_candidates=True)
+        assert labels[0] == "A1" and "#1" in labels
+        assert "A2" not in labels and "#6" not in labels
+        assert np.array_equal(image[100, 450 - 32], annotation_color("aoi"))
+    for crop in (crop_original_image, render_comparison_image):
+        image = crop(row, comparison, tmp_path, "side", 1, candidates=True)
+        assert image.shape[:2] == (a1["crop_size"], a1["crop_size"])
+        with pytest.raises(FileNotFoundError):
+            crop(row, comparison, tmp_path, "side", 2)
+    env = Environment(loader=FileSystemLoader(Path(__file__).resolve().parents[1] / "templates"))
+    env.globals["side_white_view"] = side_white_view
+    html = env.get_template("_side_white_result.html").render(detail={"side_white_result": row})
+    assert "(450.0, 100.0)" in html and "候選 #6 輪廓不完整" in html
+    assert "point=1" in html and "point=2" not in html
+    assert payload["candidate_display"]["reason"] not in html
+    assert row == before
+
+
+def test_degenerate_outline_uses_separate_measured_remainders_for_annotations():
+    row = guard_row()
+    candidate = row["payload"]["candidates"][0]
+    candidate.update(side_contour=[[438, 100], [465, 100]], remaining_contours=[
+        [[438, 99], [440, 99], [440, 101], [438, 101]],
+        [[457, 99], [465, 99], [465, 101], [457, 101]]])
+    comparison = compare_side_record(row)
+    point = comparison["points"][0]
+    assert point["candidate_ids"] == point["guard_candidate_ids"] == [1]
+    assert point["status"] == "guarded" and point["retained_candidate_ids"] == []
+    assert point["nearest_retained_distance_product_px"] == 7
+    image = np.zeros((300, 500, 3), np.uint8)
+    draw_side_annotations(image, row["payload"], comparison, "side", [0, 0, 500, 300])
+    assert image[98:103, 438:441].any()
+    assert image[98:103, 457:466].any()
+
+
+@pytest.mark.parametrize("distance, disposition, status", [
+    (8, "retained", "unverified"), (11, "retained", "no_anomaly"), (8, "excluded", "no_anomaly")])
+def test_missing_remainder_only_blocks_release_for_a_retained_contour_in_the_guard(distance, disposition, status):
+    row = guard_row(distance)
+    candidate = row["payload"]["candidates"][0]
+    candidate.update(remaining_contours=[candidate["side_contour"][:2]], disposition=disposition)
+    point = compare_side_record(row)["points"][0]
+    assert point["status"] == status
+    assert point["side_raw_xy"] == [450, 100] and not point["retained_candidate_distances"]
 
 
 def test_region_sources_use_distinct_colors_with_names_outside_the_picture(monkeypatch):

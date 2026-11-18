@@ -533,6 +533,28 @@ def _nearest_contour_point(contour, xy):
     return projected[np.argmin(np.sum((projected - xy) ** 2, axis=1))]
 
 
+def is_candidate_polygon(contour):
+    try:
+        points = np.asarray(contour, np.float32)
+    except (ValueError, TypeError, OverflowError):
+        return False
+    return (points.ndim == 2 and points.shape[1] == 2 and len(points) >= 3
+            and np.isfinite(points).all() and cv2.contourArea(points) > 0)
+
+
+def _candidate_contours(candidate):
+    """Keep measured outlines for display even when the full candidate cannot be verified."""
+    contour = candidate.get("side_contour")
+    outline = [contour] if is_candidate_polygon(contour) else []
+    if "remaining_contours" not in candidate:
+        return outline, outline, bool(outline)
+    saved = candidate["remaining_contours"]
+    if not isinstance(saved, (list, tuple)):
+        return outline, [], False
+    remaining = [c for c in saved if is_candidate_polygon(c)]
+    return outline, remaining, bool(outline) and len(remaining) == len(saved)
+
+
 def _report_mark_regions(payload, fallback=()):
     """Keep exact formal and saved side-detection masks, without ROI padding."""
     marks = mapped_inference_marks(payload, fallback)
@@ -697,6 +719,12 @@ def compare_side_record(row, tolerance=50):
             for kind, xy in (("front", front_xy), ("side", side_xy)):
                 item[kind + "_raw_xy"] = ((np.array(payload[kind + "_size"]) - 1 - xy)
                                          if payload.get("rotation_applied") else xy).tolist()
+            result["mapped"] += 1
+        except (ValueError, TypeError, KeyError, cv2.error, np.linalg.LinAlgError) as exc:
+            item["reason"] = str(exc)
+            continue
+
+        try:
             angles = np.linspace(0, 2 * np.pi, 32, endpoint=False)
             circle = product_xy + np.column_stack((np.cos(angles), np.sin(angles))) * tolerance
             item["side_roi"] = _transform(circle, to_side).tolist()
@@ -719,12 +747,17 @@ def compare_side_record(row, tolerance=50):
             point_tapes = [t for t in tapes if t["bbox"][0] <= side_xy[0] < t["bbox"][0] + t["bbox"][2]
                            and t["bbox"][1] <= side_xy[1] < t["bbox"][1] + t["bbox"][3]]
             nearby, omit_covers_point = [], False
+            incomplete_ids = []
+            product_point = tuple(map(float, product_xy))
             for candidate in payload.get("candidates", []):
-                contour = candidate.get("side_contour")
-                if not contour or len(contour) < 3:
-                    raise ValueError("候選輪廓資料不完整，保留檢查")
-                product_contour = _transform(contour, to_product)
-                distance = cv2.pointPolygonTest(product_contour, tuple(map(float, product_xy)), True)
+                outline, remaining, complete = _candidate_contours(candidate)
+                retained = candidate.get("disposition", "retained") == "retained" and not candidate.get("bomb_ids")
+                # Separate surviving pieces must never be joined across a gap.
+                distance = max((cv2.pointPolygonTest(_transform(c, to_product), product_point, True)
+                                for c in outline or remaining), default=-np.inf)
+                # Only retained evidence in the guard needs a remainder when the outer boundary is known.
+                if not complete and (not outline or (retained and distance >= -guard_radius)):
+                    incomplete_ids.append(candidate["id"])
                 if distance < -max(tolerance, guard_radius):
                     continue
                 item["candidate_ids"].append(candidate["id"])
@@ -745,12 +778,10 @@ def compare_side_record(row, tolerance=50):
                         and candidate.get("dust", {}).get("status") == "suppressed" and not candidate.get("bomb_ids")
                         and _inside_omit_regions(side_xy, candidate["dust"].get("suppressed_regions", []))):
                     omit_covers_point = True
-                if (candidate.get("disposition", "retained") == "retained"
-                        and not candidate.get("bomb_ids") and not sticker):
-                    remaining = candidate.get("remaining_contours", [contour])
+                if retained and not sticker:
                     # Old results may still contain a MARK candidate. Only remove
                     # whole contours contained in a confirmed MARK, never neighbours.
-                    outside_mark = [c for c in remaining if not (roi_marks and len(c) >= 3 and any(
+                    outside_mark = [c for c in remaining if not (roi_marks and any(
                         all(cv2.pointPolygonTest(np.asarray(m["side_polygon"], np.float32),
                                                 tuple(map(float, xy)), False) >= 0 for xy in c)
                         for m in roi_marks))]
@@ -759,14 +790,13 @@ def compare_side_record(row, tolerance=50):
                     remaining = outside_mark
                     if point_tapes:
                         outside_tape = [c for c in remaining if not any(
-                            len(c) >= 3 and all(cv2.pointPolygonTest(np.asarray(t["side_polygon"], np.float32),
+                            all(cv2.pointPolygonTest(np.asarray(t["side_polygon"], np.float32),
                                 tuple(map(float, xy)), False) >= 0 for xy in c) for t in point_tapes)]
                         if remaining and not outside_tape:
                             item["tape_candidate_ids"].append(candidate["id"])
                         remaining = outside_tape
-                    product_contours = [_transform(c, to_product) for c in remaining if len(c) >= 3]
-                    distances = [max(0., -cv2.pointPolygonTest(c, tuple(map(float, product_xy)), True))
-                                 for c in product_contours]
+                    product_contours = [_transform(c, to_product) for c in remaining]
+                    distances = [max(0., -cv2.pointPolygonTest(c, product_point, True)) for c in product_contours]
                     if distances:
                         nearest = min(distances)
                         edge_xy = _nearest_contour_point(product_contours[int(np.argmin(distances))], product_xy)
@@ -842,10 +872,14 @@ def compare_side_record(row, tolerance=50):
                     >= -match_tolerance for b in payload.get("bombs", []))
             if bomb_nearby:
                 item.update(status="unverified", reason="AOI 容錯範圍涉及炸彈驗證，保留檢查")
+            if incomplete_ids:
+                item["incomplete_candidate_ids"] = incomplete_ids
+                if item["status"] not in {"matched", "guarded", "unverified"}:
+                    ids = "、".join(f"#{i}" for i in incomplete_ids)
+                    item.update(status="unverified", reason=f"AOI 已定位，候選 {ids} 輪廓不完整，保留檢查")
             if row.get("status") not in {"CANDIDATES", "NO_CANDIDATES", "FILTERED"} or payload.get("truncated"):
                 item["status"] = "unverified"
                 item["reason"] = "檢測未完成或候選資料曾截斷，僅供位置對照"
-            result["mapped"] += 1
             result["matched"] += item["status"] == "matched"
             result["guarded"] += item["status"] == "guarded"
             result["mark_suppressed"] += item["status"] == "mark_suppressed"
@@ -853,7 +887,7 @@ def compare_side_record(row, tolerance=50):
             result["tape_suppressed"] += item["status"] == "tape_suppressed"
             result["no_anomaly"] += item["status"] == "no_anomaly"
         except (ValueError, TypeError, KeyError, cv2.error, np.linalg.LinAlgError) as exc:
-            item["status"] = "unavailable"
+            item["status"] = "unverified"
             item["reason"] = str(exc)
     return result
 
@@ -867,13 +901,21 @@ def retained_candidate_contours(payload, inference_marks=()):
         if (candidate.get("disposition", "retained") != "retained" or candidate.get("bomb_ids")
                 or omit_sticker_candidate(payload, candidate)):
             continue
-        contours = candidate.get("remaining_contours", [candidate.get("side_contour", [])])
-        contours = [c for c in contours if len(c) >= 3 and not any(
+        _, contours, _ = _candidate_contours(candidate)
+        contours = [c for c in contours if not any(
             all(cv2.pointPolygonTest(np.asarray(mask, np.float32), tuple(map(float, xy)), False) >= 0
                 for xy in c) for mask in masks)]
         if contours:
             retained[candidate["id"]] = contours
     return retained
+
+
+def candidate_preview_reason(comparison):
+    if not comparison["has_csjbl"]:
+        return "沒有 AOI CSJBL 座標，未顯示黃框。"
+    if comparison["mapped"] < len(comparison["points"]):
+        return "有 CSJBL 報點無法映射，僅標示可定位的報點。"
+    return ""
 
 
 def side_white_view(row, detail=None):
@@ -949,7 +991,7 @@ def side_white_view(row, detail=None):
                         reason=next((p["reason"] for p in hit_points if p.get("reason")), "尚無可轉 OK 結論。"))
         elif not points:
             mark.update(text=f"{label}，無 AOI 報點")
-        elif any(p["status"] == "unavailable" for p in points):
+        elif any("side_xy" not in p for p in points):
             mark.update(tone="warn", text=f"{label}，AOI 命中狀態未確認",
                         reason="AOI 位置無法映射，無法確認是否命中 MARK。")
 
@@ -970,6 +1012,7 @@ def side_white_view(row, detail=None):
               "dust_suppressed": "表面異物已排除"}
     candidate_rows = []
     tape_ids = {i for point in points for i in point.get("tape_candidate_ids", [])}
+    incomplete_ids = {i for point in points for i in point.get("incomplete_candidate_ids", [])}
     for candidate in candidates:
         dust = candidate.get("dust", {})
         sticker_match = omit_sticker_candidate(payload, candidate)
@@ -977,6 +1020,7 @@ def side_white_view(row, detail=None):
             "易撕貼已排除" if candidate["id"] in tape_ids else
             "貼紙已排除" if sticker_match else
             "放行保護範圍內 · 位置待確認，保留 NG" if candidate["id"] in guard_ids else
+            "輪廓不完整，保留檢查" if candidate["id"] in incomplete_ids and candidate["id"] not in yellow_ids else
             ("報點無保留輪廓 · 其餘僅供參考" if candidate["id"] in aoi_ids else "僅供參考 · AOI 未命中")
                 if candidate.get("disposition", "retained") == "retained"
                 and candidate["id"] not in yellow_ids and not candidate.get("bomb_ids") else
@@ -1002,7 +1046,7 @@ def side_white_view(row, detail=None):
     return {"headline": headline, "tone": tone, "sticker": sticker, "mark": mark, "tape": tape, "clear": clear,
             "legend": SIDE_ANNOTATION_LEGEND, "legacy_preview": legacy_preview,
             "missing_preview_bounds": missing_bounds,
-            "comparison": comparison, "candidates": candidate_rows,
+            "comparison": comparison, "candidates": candidate_rows, "preview_reason": candidate_preview_reason(comparison),
             "yellow_candidates": {"nearby": len(yellow_ids & yellow_nearby_ids), "total": len(yellow_ids)},
             "guard_candidates": {"nearby": len(guard_ids & nearby_ids), "total": len(guard_ids)},
             "reference_candidates": {"nearby": len((retained_ids - yellow_ids - guard_ids) & nearby_ids),
@@ -1021,7 +1065,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
     unit = min(1., max(.75, width / 1800))
     thickness = max(1, round(unit))
     font_scale = min(.6, max(.35, width / 2400))
-    labels, markers = [], []
+    aoi_labels, labels, markers = [], [], []
 
     def color_for(key):
         factor = 257 if image.dtype == np.uint16 else 1
@@ -1097,7 +1141,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
                             f"#{candidate['id']}" if index == 0 else None)
 
     for point in comparison["points"]:
-        if point["status"] == "unavailable" or coordinate_kind + "_xy" not in point:
+        if point.get(coordinate_kind + "_xy") is None:
             continue
         source_xy = np.asarray(point[coordinate_kind + "_xy"])
         xy = preview_points([source_xy])[0]
@@ -1129,7 +1173,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         # Detailed coordinates and region names belong outside the image.
         corners = preview_points([source_xy - 32, source_xy + 32])
         corners = np.array([corners.min(axis=0), corners.max(axis=0)])
-        labels.insert(0, (xy, f"A{point['id']}", color, corners))
+        aoi_labels.append((xy, f"A{point['id']}", color, corners))
         markers.append(corners)
 
     occupied = []
@@ -1141,7 +1185,7 @@ def draw_side_annotations(image, payload, comparison, kind, bounds, *, inference
         return any(rect[0] < r[2] and rect[2] > r[0] and rect[1] < r[3] and rect[3] > r[1]
                    for r in others)
 
-    for anchor, text, color, frame in labels:
+    for anchor, text, color, frame in aoi_labels + labels:
         (text_w, text_h), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness + 1)
         box_w, box_h = text_w + 2, text_h + baseline + 2
         gap = radius + 3
@@ -1250,7 +1294,7 @@ def render_comparison_image(row, comparison, root, kind="side", point_id=None, *
     points = comparison["points"]
     if point_id is not None:
         points = [p for p in points if p["id"] == point_id]
-        if not points or points[0]["status"] == "unavailable":
+        if not points or not points[0].get("crop_size"):
             raise FileNotFoundError("此 AOI 點沒有可用映射")
     if point_id is None:
         # A legacy marked JPEG cannot be recoloured safely without its clean copy.
@@ -1266,7 +1310,7 @@ def render_comparison_image(row, comparison, root, kind="side", point_id=None, *
         xy = (np.array(point[coordinate_kind + "_xy"]) - origin) * scale
         if np.any(xy < 0) or np.any(xy >= image.shape[1::-1]):
             raise FileNotFoundError("AOI 映射位置不在保存的預覽範圍")
-        size = _point_crop_size(point)
+        size = point["crop_size"]
         # Saved previews have already been reduced uniformly. Fit their square
         # crop uniformly back to the common canvas only when the original is gone.
         preview_size = max(1, int(round(size * min(scale))))
@@ -1308,11 +1352,11 @@ def crop_original_image(row, comparison, folder, kind="side", point_id=None, *, 
     if image.shape[1] != width or image.shape[0] != height:
         raise FileNotFoundError("原始圖檔尺寸與檢測紀錄不符")
     points = [p for p in comparison["points"] if p["id"] == point_id]
-    if not points or points[0]["status"] == "unavailable":
+    if not points or not points[0].get("crop_size"):
         raise FileNotFoundError("此 AOI 點沒有可用映射")
     point = points[0]
     # Keep a common square and AOI centre even at the source image's boundary.
-    crop_size = _point_crop_size(point)
+    crop_size = point["crop_size"]
     xy = np.array(point[coordinate_kind + "_xy"], np.float64)
     if np.any(xy < 0) or xy[0] >= width or xy[1] >= height:
         raise FileNotFoundError("AOI 映射位置不在原始圖範圍")
