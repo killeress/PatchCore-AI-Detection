@@ -60,6 +60,31 @@ def test_102_readable_report_has_priority_and_is_parsed():
     assert (defect.product_x, defect.product_y) == (1, 2)
 
 
+def test_next_day_public_report_is_parsed_before_tianmu():
+    worker = _worker()
+    next_day = Path('/102/20261114/CAHM0701/OK')
+    filename = 'PID_20261114120000_MODEL_120000.TXT'
+    entry = SimpleNamespace(name=filename, is_file=lambda: True,
+                            stat=lambda: SimpleNamespace(st_mtime=1))
+
+    def scan(directory):
+        if Path(directory) != next_day:
+            raise FileNotFoundError(str(directory))
+        context = MagicMock()
+        context.__enter__.return_value = iter([entry])
+        return context
+
+    def open_report(path, *args, **kwargs):
+        assert Path(path) == next_day / filename
+        return io.StringIO('PID\n@;NG;;NGPCDK20000100002W0F00000,\n')
+
+    with patch('capi_carux_report.os.scandir', side_effect=scan), \
+         patch('builtins.open', side_effect=open_report), \
+         patch.object(Path, 'exists', side_effect=AssertionError('legacy should not be read')):
+        parsed = _parse(worker)
+    assert _coordinates(parsed) == (1, 2)
+
+
 def test_102_no_matching_txt_reads_tianmu_report(caplog):
     worker = _worker()
     scan = MagicMock()
