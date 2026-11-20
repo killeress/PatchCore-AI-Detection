@@ -430,10 +430,11 @@ def _locate_frame(
     ys, xs = np.where(np.isin(labels, keep_ids))
     if len(xs) < 4:
         raise ValueError("insufficient_frame_points")
-    rect = cv2.minAreaRect(np.column_stack((xs, ys)).astype(np.float32))
+    points = np.column_stack((xs, ys)).astype(np.float32)
+    pixel_scale = np.array([width / small_w, height / small_h], dtype=np.float32)
+    points = (points + 0.5) * pixel_scale - 0.5
+    rect = cv2.minAreaRect(points)
     quad = _order_quad(cv2.boxPoints(rect))
-    quad[:, 0] *= float(width) / small_w
-    quad[:, 1] *= float(height) / small_h
 
     top, right, bottom, left = _quad_lengths(quad)
     frame_w = max(top, bottom)
@@ -446,7 +447,38 @@ def _locate_frame(
         raise ValueError("frame_height_too_small")
     if not (image_area * config.min_frame_area_ratio <= frame_area <= image_area * config.max_frame_area_ratio):
         raise ValueError("frame_area_out_of_range")
-    return quad, _threshold_value(gray, config)
+    return _fit_frame_quad(points, quad, config.max_edge_band_px), _threshold_value(gray, config)
+
+
+def _fit_frame_quad(points: np.ndarray, quad: np.ndarray, radius: int) -> np.ndarray:
+    """Fit each visible rail independently so opposite sides may converge."""
+    lines = []
+    for start, end in zip(quad, np.roll(quad, -1, axis=0)):
+        length = float(np.linalg.norm(end - start))
+        if length < 1:
+            return quad
+        tangent = (end - start) / length
+        normal = np.array([-tangent[1], tangent[0]], dtype=np.float32)
+        relative = points - start
+        along = (relative @ tangent) / length
+        near = (along >= 0.05) & (along <= 0.95) & (np.abs(relative @ normal) <= radius)
+        line = np.array([*normal, -(start @ normal)])
+        # Open corners and a missing side provide no reliable line of their own.
+        # Require support towards both ends before replacing the coarse side.
+        if np.any(near & (along <= 0.30)) and np.any(near & (along >= 0.70)):
+            vx, vy, x, y = cv2.fitLine(points[near], cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+            fitted = np.array([-vy, vx, vy * x - vx * y])
+            if max(abs(start @ fitted[:2] + fitted[2]), abs(end @ fitted[:2] + fitted[2])) <= radius:
+                line = fitted
+        lines.append(line)
+
+    corners = np.cross(np.roll(lines, 1, axis=0), lines)
+    if np.any(np.abs(corners[:, 2]) < 1e-6):
+        return quad
+    refined = (corners[:, :2] / corners[:, 2:]).astype(np.float32)
+    if not cv2.isContourConvex(refined) or np.any(np.linalg.norm(refined - quad, axis=1) > 2 * radius):
+        return quad
+    return refined
 
 
 def _order_quad(points: np.ndarray) -> np.ndarray:
@@ -486,18 +518,23 @@ def _inspect_sides(
         [output_w - 1, output_h - 1],
         [0, output_h - 1],
     ], dtype=np.float32)
-    transform = cv2.getPerspectiveTransform(quad, target)
     inverse = cv2.getPerspectiveTransform(target, quad)
-    aligned = cv2.warpPerspective(gray, transform, (output_w, output_h))
     band = int(round(min(output_w, output_h) * config.edge_band_ratio))
     band = max(config.min_edge_band_px, min(config.max_edge_band_px, band))
     band = min(band, max(1, min(output_w, output_h) // 4))
 
+    # The fitted sides are line centers. Keep the original band width and
+    # sample real pixels on both sides of each center, including outside the quad.
+    pad = band // 2
+    transform = cv2.getPerspectiveTransform(quad, target + pad)
+    aligned = cv2.warpPerspective(gray, transform, (output_w + 2 * pad, output_h + 2 * pad))
+    rows = slice(pad, pad + output_h)
+    cols = slice(pad, pad + output_w)
     profiles = {
-        "top": aligned[:band, :].max(axis=0),
-        "right": aligned[:, -band:].max(axis=1),
-        "bottom": aligned[-band:, :].max(axis=0),
-        "left": aligned[:, :band].max(axis=1),
+        "top": aligned[:band, cols].max(axis=0),
+        "right": aligned[rows, -band:].max(axis=1),
+        "bottom": aligned[-band:, cols].max(axis=0),
+        "left": aligned[rows, :band].max(axis=1),
     }
     results: Dict[str, Dict[str, Any]] = {}
     for side in SIDE_ORDER:

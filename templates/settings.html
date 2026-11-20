@@ -4420,6 +4420,7 @@
             morph_open: 0,
             min_aspect_ratio: 0.45,
             edge_margin_px: 4,
+            dust_mask_overlap_threshold_percent: 25,
             non_dot_residue_enabled: true,
             non_dot_residue_min_area_px: 500,
             non_dot_residue_min_long_side_px: 80,
@@ -4522,8 +4523,8 @@
         return `
             <label class="within-spec-param-field">
                 <span>${escapeHtml(label)}</span>
-                <input class="within-spec-param-input" type="number" min="${escapeAttr(min)}"${maxAttr} step="${escapeAttr(step)}"
-                    value="${formatWithinSpecNumber(value, fallback)}"${titleAttr}
+                <input class="within-spec-param-input" type="number" min="${escapeAttr(String(min))}"${maxAttr} step="${escapeAttr(step)}"
+                    value="${value === null ? '' : formatWithinSpecNumber(value, fallback)}"${titleAttr}
                     oninput="updateWithinSpecDotDetection('${field}', this.value)">
             </label>
         `;
@@ -4581,6 +4582,8 @@
             renderWithinSpecDotNumberField('open', 'morph_open', d.morph_open, 0, { min: 0, step: 1 }),
             renderWithinSpecDotNumberField('aspect', 'min_aspect_ratio', d.min_aspect_ratio, 0.45, { min: 0, max: 1, step: 0.05 }),
             renderWithinSpecDotNumberField('edge margin', 'edge_margin_px', d.edge_margin_px, 4, { min: 0, step: 1 }),
+            renderWithinSpecDotNumberField('灰塵遮罩重疊門檻 (%)', 'dust_mask_overlap_threshold_percent',
+                d.dust_mask_overlap_threshold_percent, 25, { min: 0, max: 100, step: 'any' }),
         ];
         const sizeFields = [
             renderWithinSpecDotMetricField(d),
@@ -4765,6 +4768,7 @@
                                     <div class="within-spec-help-item"><code>OFF</code><span>關閉規格內判定；推論原始 AI=NG 時不會因規格內規則轉為 OK-i。</span></div>
                                     <div class="within-spec-help-item"><code>aspect</code><span>候選框短邊/長邊下限，用來排除細長條紋；0 表示不過濾。</span></div>
                                     <div class="within-spec-help-item"><code>edge</code><span>排除距離影像邊界太近的 component，降低邊界亮暗帶干擾。</span></div>
+                                    <div class="within-spec-help-item"><code>灰塵遮罩重疊門檻</code><span>候選點的中心在灰塵遮罩內時，整顆排除。中心在外時，遮罩蓋住的比例達門檻才排除。設為 0% 時，只要有重疊就排除。</span></div>
                                     <div class="within-spec-help-item"><code>edgeW/edge+</code><span>hysteresis 邊緣加嚴：在影像邊緣寬度百分比內，把 high/low 門檻加上 edge+；<code>edgeW2/edge+2</code> 為 Group2。</span></div>
                                     <div class="within-spec-help-item"><code>suppress</code><span>hysteresis 後處理排除外圈百分比；預設 0 表示不額外排除。</span></div>
                                 </div>
@@ -4967,6 +4971,10 @@
             return;
         }
         const n = Number(rawValue);
+        if (field === 'dust_mask_overlap_threshold_percent') {
+            machineCfg.dot_detection[field] = rawValue === '' ? null : n;
+            return;
+        }
         if (!Number.isFinite(n)) {
             machineCfg.dot_detection[field] = 0;
             return;

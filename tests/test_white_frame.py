@@ -127,6 +127,29 @@ def test_rotated_top_break_reports_only_top_and_keeps_future_coordinate(tmp_path
     assert isinstance(top["gaps"][0]["center_y"], int)
 
 
+@pytest.mark.parametrize("broken", [False, True])
+def test_perspective_frame_tracks_top_line_near_right_corner(tmp_path, broken):
+    image = np.zeros((1600, 2500), np.uint8)
+    corners = np.array([[300, 230], [1930, 265], [1920, 1275], [293, 1270]], np.int32)
+    cv2.polylines(image, [corners], True, 200, 3, cv2.LINE_AA)
+    if broken:
+        image[250:275, 1763:1859] = 0
+        # A nearby reflection must not stand in for the missing frame pixels.
+        cv2.line(image, (1763, 286), (1858, 288), 200, 3, cv2.LINE_AA)
+    path = tmp_path / "WHITEFRA_PERSPECTIVE.png"
+    assert cv2.imwrite(str(path), image)
+
+    payload = inspect_white_frame_image(path).payload
+
+    assert payload["ng_sides"] == (["top"] if broken else [])
+    assert payload["status"] == ("NG" if broken else "OK")
+    if broken:
+        gap, = payload["sides"]["top"]["gaps"]
+        assert gap["length_px"] == pytest.approx(96, abs=3)
+        assert gap["center_x"] == pytest.approx(1810.5, abs=2)
+        assert gap["center_y"] == pytest.approx(262.4, abs=2)
+
+
 def test_missing_top_reports_top_without_corner_false_positives(tmp_path):
     image_path = _write_frame(tmp_path / "WHITEFRA_TOP_MISSING.png", angle=1.1, missing_side="top")
 

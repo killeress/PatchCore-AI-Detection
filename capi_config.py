@@ -69,6 +69,18 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
     return result
 
 
+DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT = 25.0
+
+
+def within_spec_dust_overlap_percent(dot_detection: Dict[str, Any]) -> float:
+    percent = dot_detection.get(
+        "dust_mask_overlap_threshold_percent", DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT
+    )
+    if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100:
+        raise ValueError("灰塵遮罩重疊門檻必須是 0 到 100 之間的數值（%）")
+    return float(percent)
+
+
 def _default_within_spec_judgment_rules() -> Dict[str, Any]:
     """Default within-spec dot judgment settings, keyed by machine id."""
     dot_detection = {
@@ -93,6 +105,7 @@ def _default_within_spec_judgment_rules() -> Dict[str, Any]:
         "morph_open": 0,
         "min_aspect_ratio": 0.45,
         "edge_margin_px": 4,
+        "dust_mask_overlap_threshold_percent": DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT,
         "non_dot_residue_enabled": True,
         "non_dot_residue_min_area_px": 500,
         "non_dot_residue_min_long_side_px": 80,
@@ -500,6 +513,11 @@ class CAPIConfig:
                 raw_preprocess = raw_dot_detection.get("preprocess_params", {})
                 if isinstance(raw_preprocess, dict):
                     machine_cfg["dot_detection"]["preprocess_params"].update(raw_preprocess)
+                try:
+                    percent = within_spec_dust_overlap_percent(raw_dot_detection)
+                except ValueError as exc:
+                    raise ValueError(f"{machine_id} 的{exc}") from exc
+                machine_cfg["dot_detection"]["dust_mask_overlap_threshold_percent"] = percent
 
             raw_screens = machine_raw.get("screens", {})
             if isinstance(raw_screens, dict):

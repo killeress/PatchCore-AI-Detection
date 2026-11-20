@@ -56,6 +56,7 @@ from capi_scratch_batch import (
     STATE_RUNNING as SCRATCH_STATE_RUNNING,
 )
 from capi_version import get_version_info, read_changelog
+from capi_config import DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT, within_spec_dust_overlap_percent
 from capi_retention import (
     RETENTION_PARAM, RETENTION_DESCRIPTION,
     resolve_retention_policy, normalize_retention_policy,
@@ -2417,6 +2418,8 @@ def _candidate_dust_overlap(
     candidate: Dict[str, Any],
     dust_mask,
     candidate_mask=None,
+    *,
+    threshold_percent: float = DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT,
 ) -> Optional[Dict[str, Any]]:
     import numpy as np
 
@@ -2450,7 +2453,8 @@ def _candidate_dust_overlap(
     cx = max(0, min(mask_w - 1, int(round(_as_float(candidate.get("center_x"), x + w / 2.0)))))
     cy = max(0, min(mask_h - 1, int(round(_as_float(candidate.get("center_y"), y + h / 2.0)))))
     center_in_dust = bool(dust_mask[cy, cx])
-    if not center_in_dust and overlap_ratio < 0.25:
+    meets_threshold = overlap_ratio > 0 and overlap_ratio >= threshold_percent / 100
+    if not (center_in_dust or meets_threshold):
         return None
 
     rejected = {
@@ -2460,6 +2464,7 @@ def _candidate_dust_overlap(
     rejected.update({
         "reason": "dust_mask_overlap",
         "dust_overlap_ratio": round(overlap_ratio, 4),
+        "dust_mask_overlap_threshold_percent": threshold_percent,
         "dust_overlap_basis": overlap_basis,
         "center_in_dust": center_in_dust,
     })
@@ -2501,7 +2506,9 @@ def _candidate_no_detect_overlap(candidate: Dict[str, Any], no_detect_mask) -> O
     return rejected
 
 
-def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict[str, Any]:
+def _remove_dust_overlap_candidates(
+    detected: Dict[str, Any], dust_mask, threshold_percent: float
+) -> Dict[str, Any]:
     if dust_mask is None:
         return detected
 
@@ -2513,7 +2520,7 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
     dust_filtered_rejected_count = 0
     for candidate in original_rejected:
         dust_rejected = _candidate_dust_overlap(
-            candidate, dust_mask, candidate_mask
+            candidate, dust_mask, candidate_mask, threshold_percent=threshold_percent
         )
         if dust_rejected:
             dust_rejected["source_reason"] = candidate.get("reason", "")
@@ -2523,7 +2530,7 @@ def _remove_dust_overlap_candidates(detected: Dict[str, Any], dust_mask) -> Dict
             rejected.append(candidate)
     for candidate in detected.get("candidates") or []:
         dust_rejected = _candidate_dust_overlap(
-            candidate, dust_mask, candidate_mask
+            candidate, dust_mask, candidate_mask, threshold_percent=threshold_percent
         )
         if dust_rejected:
             rejected.append(dust_rejected)
@@ -2768,7 +2775,9 @@ def _save_within_spec_dot_visuals(
             include_visuals=True,
             **({"evaluation_mask": evaluation_mask} if evaluation_mask is not None else {}),
         )
-        detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
+        detected = _remove_dust_overlap_candidates(
+            detected, runtime_dust_mask, within_spec_dust_overlap_percent(dot_cfg)
+        )
         detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
     dust_mask_color = None
     dust_overlay = None
@@ -3064,6 +3073,7 @@ def _evaluate_within_spec_suggestion_detail(
         effective_segmentation_method = "background_diff"
     effective_hysteresis = _dot_hysteresis_kwargs(dot_cfg)
     non_dot_cfg = _non_dot_residue_config(dot_cfg)
+    dust_overlap_percent = within_spec_dust_overlap_percent(dot_cfg)
     result["parameter_snapshot"] = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "input_rotation_degrees": 180 if rotate_180 else 0,
@@ -3084,6 +3094,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "morph_open": max(0, _as_int(dot_cfg.get("morph_open"), 0)),
                 "min_aspect_ratio": max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
                 "edge_margin_px": max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
+                "dust_mask_overlap_threshold_percent": dust_overlap_percent,
                 "non_dot_residue": _json_safe_snapshot(non_dot_cfg),
                 "size_metric": str(dot_cfg.get("size_metric") or "bbox_diagonal"),
                 "unit_per_px": max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
@@ -3252,7 +3263,7 @@ def _evaluate_within_spec_suggestion_detail(
                     include_visuals=reuse_visual_detection,
                     **({"evaluation_mask": evaluation_mask} if evaluation_mask is not None else {}),
                 )
-                detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask)
+                detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask, dust_overlap_percent)
                 detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
                 candidates = detected["candidates"]
                 max_size_mm = max((_as_float(c.get("size_mm"), 0.0) for c in candidates), default=0.0)
@@ -14234,6 +14245,18 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._send_json({"error": "請填寫修改原因"})
                 return
             user = self._current_settings_user() or {}
+            if param_name == WITHIN_SPEC_PARAM:
+                from capi_config import CAPIConfig
+                try:
+                    if isinstance(new_value, str):
+                        new_value = json.loads(new_value)
+                    if not isinstance(new_value, dict):
+                        raise ValueError("規格內判定設定必須是物件")
+                    # Validate before saving. Sparse rules should keep inheriting defaults at read time.
+                    CAPIConfig._normalize_within_spec_judgment_rules(new_value)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                    return
             if param_name == RETENTION_PARAM:
                 try:
                     new_value = normalize_retention_policy(new_value)

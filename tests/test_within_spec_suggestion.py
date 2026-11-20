@@ -39,6 +39,17 @@ def test_candidate_dust_overlap_uses_component_pixels_instead_of_whole_bbox():
     assert rejected["dust_overlap_basis"] == "component"
 
 
+@pytest.mark.parametrize(("threshold_percent", "overlapping_pixels", "excluded"), [
+    (25, 4, True), (25.01, 4, False), (0, 0, False), (0, 1, True),
+])
+def test_candidate_dust_overlap_threshold_boundaries(threshold_percent, overlapping_pixels, excluded):
+    candidate = {"x": 0, "y": 0, "w": 4, "h": 4, "center_x": 2, "center_y": 2}
+    dust_mask = np.zeros((4, 4), dtype=bool)
+    dust_mask[0, :overlapping_pixels] = True
+    result = _candidate_dust_overlap(candidate, dust_mask, threshold_percent=threshold_percent)
+    assert (result is not None) is excluded
+
+
 def _rules(*, screen_limit=1, tile_limit=1, threshold_mm=0.3, white_enabled=False, segmentation_method="background_diff"):
     return {
         "default": {
@@ -746,6 +757,41 @@ def test_within_spec_counts_dust_mask_candidate_as_zero_point(tmp_path):
     assert urls["dust_overlay_url"].endswith("_dust_overlay.png")
     assert (visual_dir / Path(urls["dust_mask_url"]).name).is_file()
     assert (visual_dir / Path(urls["dust_overlay_url"]).name).is_file()
+
+
+@pytest.mark.parametrize(("model_id", "threshold_percent", "expected_count", "deferred"), [
+    ("UNKNOWN", 25, 0, False), ("MODEL_A", 50, 1, False), ("MODEL_A", 50, 1, True),
+])
+def test_within_spec_dust_threshold_applies_to_panel_and_visuals(
+    tmp_path, model_id, threshold_percent, expected_count, deferred,
+):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(32, 48), (64, 48)])
+    detail = _detail(path, model_id=model_id)
+    mask = np.zeros((96, 96), dtype=np.uint8)
+    mask[:, :32] = 255  # Partial coverage of the first dot, excluding its center.
+    mask[48, 64] = 255  # Only the center of the second dot is covered.
+    detail["images"][0]["tiles"][0]["_runtime_dust_mask"] = mask
+    rules = _rules(screen_limit=0)
+    rules["MODEL_A"] = _rules(screen_limit=0)["default"]
+    rules["MODEL_A"]["dot_detection"]["dust_mask_overlap_threshold_percent"] = 50
+    jobs = [] if deferred else None
+
+    result = _evaluate_within_spec_suggestion_detail(
+        detail, rules, visual_output_dir=tmp_path, visual_url_prefix="/visuals", deferred_visual_jobs=jobs,
+    )
+    if deferred:
+        _flush_within_spec_visual_jobs(jobs)
+
+    assert result["panel_totals"][0]["total_count"] == expected_count
+    assert result["panel_totals"][0]["within"] is (expected_count == 0)
+    assert result["visuals"][0]["count"] == expected_count
+    assert result["visuals"][0]["dust_mask_filtered_count"] == 2 - expected_count
+    effective = result["parameter_snapshot"]["dot_detection"]["effective"]
+    assert effective["dust_mask_overlap_threshold_percent"] == threshold_percent
+    rejected = next(step["rejected"]["black_dot"] for step in result["steps"] if "rejected" in step)
+    assert any(dot["center_in_dust"] and dot["dust_overlap_ratio"] < 0.25 for dot in rejected)
+    assert all(dot["dust_mask_overlap_threshold_percent"] == threshold_percent for dot in rejected)
 
 
 @pytest.mark.parametrize("deferred", [False, True])
