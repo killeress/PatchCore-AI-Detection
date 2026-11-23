@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="/static/css/edge-ng-evidence.css">
 <script src="/static/js/edge-ng-evidence.js" defer></script>
 <style>
-    body { --edge-ng-color: #fca5a5; --edge-ng-link: #93c5fd; }
+    body { --edge-ng-color: #fca5a5; --edge-ng-link: #93c5fd; --within-spec-color: #5eead4; }
     .detail-section {
         margin-top: 32px;
     }
@@ -259,7 +259,7 @@
 {% endblock %}
 
 {% block content %}
-{% from "_edge_ng_evidence.html" import badge as edge_ng_badge, reason_link, tile_evidence %}
+{% from "_edge_ng_evidence.html" import badge as edge_ng_badge, reason_link, tile_evidence, within_spec_badge, within_spec_measurements %}
 <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
         <h2 style="margin:0">推論記錄 #{{ detail.id }}
@@ -504,7 +504,7 @@
             {% if wf %}
             <span class="badge" style="background:rgba(148,163,184,0.16);color:#94A3B8;">白框觀察</span>
             {% else %}
-            <span class="badge {{ img_badge }}">{{ img_status }}</span>
+            <span class="badge {{ img_badge }}">{{ '原始 NG' if img.get('within_spec_tile_count') else img_status }}</span>
             {{ edge_ng_badge(img) }}
             {% endif %}
             {% if not wf and detail.image_dir and img.image_name %}
@@ -514,6 +514,7 @@
                 onmouseout="this.style.background='rgba(59,130,246,0.15)'" title="在 Debug 頁面對此圖片執行單圖推論">🔧 Debug 推論</a>
             {% endif %}
         </h3>
+        {{ within_spec_measurements(img) }}
         <p style="color:var(--text-muted);font-size:0.85rem;margin:8px 0;font-family:'Fira Code',monospace;">
             {% if wf %}
             尺寸: {{ img.image_width }}x{{ img.image_height }} |
@@ -576,7 +577,9 @@
                     <td>{{ t.width }}x{{ t.height }}</td>
                     <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
                     <td>
-                        {% if is_scratch %}
+                        {% if t.get('within_spec_converted') %}
+                        {{ within_spec_badge() }}
+                        {% elif is_scratch %}
                         <span style="color: #0D9488; font-weight: 600;">{{ t_info }}</span>
                         {% elif 'DUST' in t_info or '灰塵' in t_info %}
                         <span style="color: #D97706;">{{ t_info }}</span>
@@ -601,7 +604,7 @@
             <div class="image-box">
                 <h4
                     style="margin-bottom:8px;color:var(--text-muted);font-size:0.85rem;font-family:'Fira Code',monospace;">
-                    異常標記總覽圖 Overview</h4>
+                    異常標記總覽圖 Overview{% if img.get('within_spec_tile_count') %}（原始 NG 標記，{{ img.within_spec_tile_count }} 處規格內轉 OK）{% endif %}</h4>
                 <img src="/heatmaps/{{ hm_url }}" alt="overview" onclick="openLightbox(this.src)">
             </div>
             {% endif %}
@@ -616,7 +619,8 @@
             <div class="image-box">
                 <h4
                     style="margin-bottom:8px;color:{% if is_scratch %}#0D9488{% else %}var(--text-muted){% endif %};font-size:0.85rem;font-family:'Fira Code',monospace;">
-                    {% if is_scratch %}🧽 {% endif %}區域 #{{ t.tile_id }} 熱力圖</h4>
+                    {% if is_scratch %}🧽 {% endif %}區域 #{{ t.tile_id }} 熱力圖
+                    {% if t.get('within_spec_converted') %}{{ within_spec_badge() }}{% endif %}</h4>
                 {% call tile_evidence(t) %}
                 <img src="/heatmaps/{{ thm_url }}" alt="tile{{ t.tile_id }} heatmap" onclick="openLightbox(this.src)">
                 {% endcall %}

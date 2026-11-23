@@ -1,3 +1,9 @@
+.within-spec-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 6px; white-space: nowrap;
+    color: var(--within-spec-color, #0f766e); background: rgba(13, 148, 136, .12);
+    border: 1px solid rgba(13, 148, 136, .35); font-size: 12px; font-weight: 600;
+}
+.within-spec-measurement { margin: 4px 0; color: var(--text-muted, #475569); font-size: 13px; }
 .edge-ng-badge {
     display: inline-block; padding: 2px 7px; border-radius: 5px;
     background: rgba(239, 68, 68, .12); color: var(--edge-ng-color, #b91c1c); font-size: 12px;

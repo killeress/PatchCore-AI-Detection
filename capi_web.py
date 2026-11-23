@@ -2695,6 +2695,63 @@ def _format_within_spec_inference_note(within_spec_info: Dict[str, Any], detail_
     return "\n".join(lines)
 
 
+def _decorate_record_within_spec(detail: dict, station_adapter) -> None:
+    """Show this run's front releases alongside the original detector evidence."""
+    note = (detail.get("inference_log") or "").partition("[WITHIN_SPEC_INFERENCE] 原始 AI=NG，")[2]
+    side_payload = (detail.get("side_white_result") or {}).get("payload") or {}
+    front = side_payload.get("front_decision") or {}
+    if front:
+        if not front.get("within_spec_passed") or front.get("judgment") != "OK-i":
+            return
+        released = front.get("resolved_ng_details")
+    elif detail.get("ai_judgment") == "OK-i" or note.startswith("一般缺陷符合規格內；整片判定合併側拍結果"):
+        # Also covers mixed records where side inspection was disabled.
+        released = detail.get("ng_details")
+    else:
+        return
+    if isinstance(released, str):
+        try:
+            released = json.loads(released)
+        except ValueError:
+            return
+    if not isinstance(released, list):
+        return
+    released_tiles = {
+        (item["image"], str(item["tile_id"])) for item in released
+        if isinstance(item, dict) and isinstance(item.get("image"), str) and item.get("tile_id") is not None
+    }
+    if not released_tiles:
+        return
+
+    # The appended note belongs to this inference. Review and recalculation logs
+    # can use newer rules, so their measurements must not label the original image.
+    summaries = {}
+    for line in note.partition("\n  明細：")[0].splitlines():
+        if line.startswith("  - ") and line.endswith("；結果=OK"):
+            screen, _, summary = line[4:].removesuffix("；結果=OK").partition(" ")
+            summaries.setdefault(screen, []).append(
+                summary.replace(" [OK]", "").replace(" <= ", " ≤ ").replace("；", " · ")
+            )
+
+    for image in detail.get("images") or []:
+        name = image.get("image_name") or image.get("image_path") or ""
+        stem = Path(name).stem.removeprefix("overview_")
+        count = 0
+        for tile in image.get("tiles") or []:
+            evidence = tile.get("decision_evidence") or {}
+            if evidence.get("status") == "NG" and (stem, str(tile.get("tile_id"))) in released_tiles:
+                tile["within_spec_converted"] = True
+                evidence["status"] = "OK"
+                evidence["flow"] = f"{evidence['rule_label']} → 原始 NG → 規格內轉 OK"
+                count += 1
+        if count:
+            image["within_spec_tile_count"] = count
+            screen = station_adapter.image_prefix(stem)
+            image["within_spec_summaries"] = (
+                summaries.get(screen) or summaries.get(station_adapter.model_prefix(screen), [])
+            )
+
+
 def _within_spec_machine_candidates(detail: Dict[str, Any], machine_id: str = "") -> List[str]:
     candidates: List[str] = []
     for value in (
@@ -5086,7 +5143,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         )
         self._send_response(200, html)
 
-    def _handle_record_detail(self, record_id_str: str, path: str):
+    def _handle_record_detail(self, record_id_str: str, path: str, template_name: str = "record_detail.html"):
         """記錄詳情頁"""
         try:
             record_id = int(record_id_str)
@@ -5098,11 +5155,13 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
         if not detail:
             self._send_404(path)
             return
-        self._decorate_record_image_prefix_labels(detail, self._station_adapter())
+        station = self._station_adapter()
+        self._decorate_record_image_prefix_labels(detail, station)
         self._decorate_record_preprocess_info(detail)
-        self._decorate_record_aoi_point_numbers(detail, self._station_adapter())
+        self._decorate_record_aoi_point_numbers(detail, station)
+        _decorate_record_within_spec(detail, station)
 
-        template = self.jinja_env.get_template("record_detail.html")
+        template = self.jinja_env.get_template(template_name)
         html = template.render(
             detail=detail,
             heatmap_base_dir=self.heatmap_base_dir,
@@ -5337,27 +5396,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
 
     def _handle_record_detail_v3(self, record_id_str: str, path: str):
         """V3 高階 UI 記錄詳情頁"""
-        try:
-            record_id = int(record_id_str)
-        except ValueError:
-            self._send_404(path)
-            return
-
-        detail = self.db.get_record_detail(record_id) if self.db else None
-        if not detail:
-            self._send_404(path)
-            return
-        self._decorate_record_image_prefix_labels(detail, self._station_adapter())
-        self._decorate_record_preprocess_info(detail)
-        self._decorate_record_aoi_point_numbers(detail, self._station_adapter())
-
-        template = self.jinja_env.get_template("record_detail_v3.html")
-        html = template.render(
-            detail=detail,
-            heatmap_base_dir=self.heatmap_base_dir,
-            request_path=path
-        )
-        self._send_response(200, html)
+        self._handle_record_detail(record_id_str, path, "record_detail_v3.html")
 
     @staticmethod
     def _decorate_record_image_prefix_labels(detail: dict, station_adapter=None) -> None:

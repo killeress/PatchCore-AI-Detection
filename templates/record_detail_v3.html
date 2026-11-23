@@ -671,7 +671,7 @@
             </h3>
 
             {% from "_aoi_point_label.html" import aoi_point_label %}
-            {% from "_edge_ng_evidence.html" import badge as edge_ng_badge, reason_link, tile_evidence %}
+            {% from "_edge_ng_evidence.html" import badge as edge_ng_badge, reason_link, tile_evidence, within_spec_badge, within_spec_measurements %}
             {% for img in detail.images %}
             {% set wf = img.get("white_frame_result") %}
             {% set display_tiles = img.tiles %}
@@ -684,7 +684,7 @@
                     style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; border-bottom: 1px solid #F1F5F9; padding-bottom: 16px;">
                     <div style="display: flex; align-items: center; justify-content: space-between;">
                         <h4
-                            style="font-size: 16px; font-weight: 700; color: #0F172A; display: flex; align-items: center; gap: 8px; margin: 0;">
+                            style="font-size: 16px; font-weight: 700; color: #0F172A; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0;">
                             <svg width="20" height="20" fill="none" stroke="#64748B" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                     d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z">
@@ -696,12 +696,13 @@
                             {% else %}
                             <span
                                 class="badge {% if img_status == 'OK' %}bg-ok-subtle{% elif img_status == 'NG' %}bg-ng-subtle{% else %}bg-err-subtle{% endif %}">
-                                {{ img_status }}
+                                {{ '原始 NG' if img.get('within_spec_tile_count') else img_status }}
                             </span>
                             {{ edge_ng_badge(img) }}
                             {% endif %}
                         </h4>
                     </div>
+                    {{ within_spec_measurements(img) }}
 
                     <div
                         style="display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: #64748B; background: #F8FAFC; padding: 10px 12px; border-radius: 8px; border: 1px solid #E2E8F0;">
@@ -826,7 +827,9 @@
                                     </span>
                                 </td>
                                 <td style="font-size: 13px;">
-                                    {% if t.get('decision_evidence') %}
+                                    {% if t.get('within_spec_converted') %}
+                                    {{ within_spec_badge() }}
+                                    {% elif t.get('decision_evidence') %}
                                     <span style="color: {{ '#0D9488' if t.decision_evidence.status == 'OK' else '#DC2626' }};">最終 {{ t.decision_evidence.status }}</span>
                                     {% elif is_scratch %}
                                     <span style="color: #0D9488; font-weight: 500;">{{ t_info }}</span>
@@ -852,7 +855,7 @@
                     {% set hm_url = hm_relative(img.heatmap_path, heatmap_base_dir) %}
                     {% if hm_url %}
                     <div class="image-box">
-                        <div class="image-box-label" style="color: #2563EB;">總覽圖 Overview</div>
+                        <div class="image-box-label" style="color: #2563EB;">總覽圖 Overview{% if img.get('within_spec_tile_count') %}（原始 NG 標記，{{ img.within_spec_tile_count }} 處規格內轉 OK）{% endif %}</div>
                         <img src="/heatmaps/{{ hm_url }}" alt="overview" onclick="openLightbox(this.src)">
                     </div>
                     {% endif %}
@@ -867,6 +870,7 @@
                     <div class="image-box{% if t.get('decision_evidence') %} edge-ng-image-box{% endif %}">
                         <div class="image-box-label"{% if is_scratch %} style="color: #0D9488;"{% endif %}>
                             {% if is_scratch %}🧽 {% endif %}{% if t.get("is_aoi_coord") %}🎯 {{ aoi_point_label(t) }}{% else %}區域 #{{ t.tile_id }}{% endif %}
+                            {% if t.get('within_spec_converted') %}{{ within_spec_badge() }}{% endif %}
                         </div>
                         {% call tile_evidence(t) %}
                         <img src="/heatmaps/{{ thm_url }}" alt="{% if t.get('is_aoi_coord') %}{{ aoi_point_label(t) }} 熱力圖{% else %}tile{{ t.tile_id }} heatmap{% endif %}" data-tile-id="{{ t.tile_id }}"

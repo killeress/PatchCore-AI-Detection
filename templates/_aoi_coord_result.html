@@ -1,6 +1,6 @@
 {% if aoi_tiles %}
 {% from "_aoi_point_label.html" import aoi_point_label %}
-{% from "_edge_ng_evidence.html" import reason_link, tile_evidence %}
+{% from "_edge_ng_evidence.html" import reason_link, tile_evidence, within_spec_badge %}
 <div style="margin-top: 24px; padding-top: 16px; border-top: 2px solid #10b981;">
     <h4 style="color: #10b981; margin-bottom: 12px; font-family: 'Fira Code', monospace; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
         🎯 {{ aoi_section_title | default('AOI 機檢座標推論') }}
@@ -54,7 +54,9 @@
                 <td>{{ t.width }}x{{ t.height }}</td>
                 <td><span class="badge {{ t_badge }}">{{ t.score | round(3) }}</span></td>
                 <td>
-                    {% if aoi_is_scratch %}
+                    {% if t.get('within_spec_converted') %}
+                    {{ within_spec_badge() }}
+                    {% elif aoi_is_scratch %}
                     <span style="color: #0D9488; font-weight: 600;">🧽 Scratch 救回 OK</span>
                     <span style="color: #0D9488; font-size: 0.8rem;"> (score={{ aoi_scr_score | round(3) }})</span>
                     {% elif t.get('decision_evidence') and t.decision_evidence.status == 'OK' %}
@@ -111,7 +113,9 @@
                 {% set aoi_dx = t.get("aoi_tile_shift_dx", 0) or 0 %}
                 {% set aoi_dy = t.get("aoi_tile_shift_dy", 0) or 0 %}
                 <span style="color: #38BDF8;">shift({% if aoi_dx > 0 %}+{% endif %}{{ aoi_dx }},{% if aoi_dy > 0 %}+{% endif %}{{ aoi_dy }})</span>
-                {% if t.get("scratch_filtered") %}
+                {% if t.get('within_spec_converted') %}
+                {{ within_spec_badge() }}
+                {% elif t.get("scratch_filtered") %}
                 <span style="color: #0D9488;">[🧽 Scratch 救回 OK]</span>
                 {% elif t.get('is_bomb') and t.get('is_anomaly') %}
                 <span style="color: #C026D3;">[BOMB 已排除]</span>

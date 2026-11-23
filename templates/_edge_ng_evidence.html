@@ -1,4 +1,13 @@
+{% macro within_spec_badge(count=none) -%}
+<span class="within-spec-badge">{% if count is none %}原始 NG → {% else %}{{ count }} 處{% endif %}規格內轉 OK</span>
+{%- endmacro %}
+
+{% macro within_spec_measurements(img) -%}
+{% for summary in img.get('within_spec_summaries', []) %}<div class="within-spec-measurement">{{ summary | e }}</div>{% endfor %}
+{%- endmacro %}
+
 {% macro badge(img) -%}
+{% if img.get('within_spec_tile_count') %}{{ within_spec_badge(img.within_spec_tile_count) }}{% endif %}
 {% for label in img.get('ng_reason_labels', []) %}<span class="edge-ng-badge">{{ label }}</span>{% else %}{% if img.get('has_edge_ng') %}<span class="edge-ng-badge">邊緣檢查</span>{% endif %}{% endfor %}
 {%- endmacro %}
 
@@ -6,7 +15,7 @@
 {% set evidence = t.get('decision_evidence') or t.get('edge_ng_evidence') %}
 {% if evidence %}
 <div class="edge-ng-table-reason{% if evidence.status == 'OK' %} decision-ok{% endif %}">
-    <span>{{ evidence.rule_label }} · {{ evidence.title }}</span>
+    <span>{% if t.get('within_spec_converted') %}初判依據 · {% endif %}{{ evidence.rule_label }} · {{ evidence.title }}</span>
     <button type="button" class="edge-ng-toggle" data-edge-evidence="{{ prefix }}-{{ t.id }}"
             aria-controls="{{ prefix }}-{{ t.id }}" aria-expanded="false">查看依據 ▾</button>
 </div>
@@ -17,7 +26,7 @@
 {% set evidence = t.get('decision_evidence') or t.get('edge_ng_evidence') %}
 {% if evidence %}
 <div class="edge-ng-reason-bar{% if evidence.status == 'OK' %} decision-ok{% endif %}">
-    <span>{{ '判定原因' if evidence.status == 'OK' else 'NG 原因' }}：<strong>{{ evidence.title }}</strong> <span class="edge-ng-secondary">（{{ evidence.rule_label }}）</span></span>
+    <span>{{ '原始 NG 依據' if t.get('within_spec_converted') else ('判定原因' if evidence.status == 'OK' else 'NG 原因') }}：<strong>{{ evidence.title }}</strong> <span class="edge-ng-secondary">（{{ evidence.rule_label }}）</span></span>
     <button type="button" class="edge-ng-toggle" data-edge-evidence="{{ prefix }}-{{ t.id }}"
             aria-controls="{{ prefix }}-{{ t.id }}" aria-expanded="false">查看依據 ▾</button>
 </div>
@@ -34,8 +43,8 @@
     {% for note in evidence.notes %}<div class="edge-ng-secondary">{{ note }}</div>{% endfor %}
     {% if evidence.detail %}<details class="edge-ng-source"><summary>灰塵／複核紀錄</summary><div class="edge-ng-flow">{{ evidence.detail }}</div></details>{% endif %}
     {% else %}
-    <div class="edge-ng-evidence-title">{{ evidence.rule_label }} → 改判 NG</div>
-    <div class="edge-ng-flow">灰塵檢查 DUST{% if evidence.two_stage %} → 兩階段複核 DUST{% endif %} → {{ evidence.title }}命中 → 最終 NG</div>
+    <div class="edge-ng-evidence-title">{{ evidence.flow if t.get('within_spec_converted') else evidence.rule_label ~ ' → 改判 NG' }}</div>
+    <div class="edge-ng-flow">灰塵檢查 DUST{% if evidence.two_stage %} → 兩階段複核 DUST{% endif %} → {{ evidence.title }}命中 → {{ '原始 NG → 規格內轉 OK' if t.get('within_spec_converted') else '最終 NG' }}</div>
     <div class="edge-ng-measures">
         <div><span>{{ '最大暗化灰階差' if evidence.historical else '最大亮化灰階差' }}</span>
             <strong>{{ '%.2f' | format(evidence.max_delta) if evidence.max_delta is not none else '未記錄' }}</strong>
