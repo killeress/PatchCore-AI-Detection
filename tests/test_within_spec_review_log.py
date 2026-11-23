@@ -235,6 +235,56 @@ def test_within_spec_detail_explains_dust_only_ok_i():
     assert "仍判定為點偵測未命中" not in text
 
 
+def test_saved_single_polarity_visual_shows_both_dot_types_from_original_trace():
+    from capi_web import _within_spec_log_view
+
+    source = {"image": "panelW0F00000.tif", "tile_id": 0, "crop_box": [345, 2166, 857, 2678]}
+    black = {"x": 223, "y": 267, "w": 7, "h": 7, "size_mm": 0.2425, "reason": "dust_mask_overlap"}
+    white = {"x": 45, "y": 242, "w": 20, "h": 17, "size_mm": 0.6431, "reason": "dust_mask_overlap"}
+    small = {"x": 506, "y": 185, "w": 2, "h": 2, "reason": "dust_mask_overlap", "source_reason": "area_too_small"}
+    counts = {kind: {"count": 0, "dust_mask_filtered_count": 1} for kind in ("black_dot", "white_dot")}
+    log = {
+        "id": 3696, "inference_record_id": 10902, "client_record_id": None, "suggested": True,
+        "reason": "W0F00000 黑點 0.0000 mm", "created_at": "", "detail": {
+            "steps": [
+                {"image": source["image"], "screen": "W0F00000"},
+                {**source, "rejected": {"black_dot": [black], "white_dot": [small, white]}},
+                {**source, "detection": counts},
+                {**source, "detection": counts, "classified_as": "black_dot"},
+            ],
+            "panel_totals": [{"screen": "W0F00000", "dot_type": "black_dot", "total_count": 0}],
+            "visuals": [{"image_name": source["image"], "tile_id": 0, "crop_box": source["crop_box"],
+                         "dot_type": "black_dot", "dot_label": "黑點", "candidates": [],
+                         "urls": {"crop_url": "/heatmaps/crop.png", "dust_mask_url": "/heatmaps/dust-mask.png",
+                                  "dust_overlay_url": "/heatmaps/dust.png"}}],
+        },
+    }
+    env = Environment(loader=FileSystemLoader("templates"))
+    page = env.get_template("within_spec_detail.html").render(
+        log=log, app_version={"version": ""}, host_identity="", **_within_spec_log_view(log))
+    summary = page.split("判定原因與點偵測摘要", 1)[1].split("</section>", 1)[0]
+    for label, size in (("黑點", "0.2425"), ("白點", "0.6431")):
+        assert f"{label}偵測 1 點（最大 {size} mm），灰塵排除 1，不檢測區排除 0，計入 Panel 0 點" in summary
+    overlay = page.split('<svg class="ws-main-img ws-dot-map"', 1)[1].split("</svg>", 1)[0]
+    assert 'viewBox="0 0 512 512"' in overlay and 'href="/heatmaps/crop.png"' in overlay
+    assert 'class="ws-map-mask" href="/heatmaps/dust-mask.png"' in overlay
+    assert 'x="223" y="267" width="7" height="7"' in overlay
+    assert 'x="45" y="242" width="20" height="17"' in overlay
+    assert overlay.count("ws-excluded") == 2 and 'x="506"' not in overlay
+    assert "/heatmaps/dust.png" in page
+    assert "白點 / white_dot" in page.split("Panel 點數加總</div>")[-1].split("</table>")[0]
+
+    # Some older logs kept counts after truncating the rejected-coordinate list.
+    log["detail"]["steps"][1]["rejected"]["white_dot"] = [small]
+    log["detail"]["visuals"][0]["aoi_judgment_roi"] = {"enabled": True}
+    limited = env.get_template("within_spec_detail.html").render(
+        log=log, app_version={"version": ""}, host_identity="", **_within_spec_log_view(log))
+    assert "白點有 1 點未保存座標" in limited and "白點偵測 1 點，灰塵排除 1" in limited
+    overlay = limited.split('<svg class="ws-main-img ws-dot-map"', 1)[1].split("</svg>", 1)[0]
+    assert 'viewBox="0 0 512 536"' in overlay and 'translate(0 24)' in overlay
+    assert overlay.count("<rect ") == 1
+
+
 def test_within_spec_report_template_renders():
     env = Environment(loader=FileSystemLoader("templates"))
     env.globals.update(app_version={"version": "test"}, host_identity="")

@@ -102,6 +102,10 @@
         word-break: break-word;
     }
 
+    .ws-reason { grid-column: 1 / -1; }
+    .ws-reason .value, .ws-dot-counts { line-height: 1.65; font-family: inherit; }
+    .ws-rule-reason { margin-top: 6px; color: var(--text-muted); }
+
     .ws-badge {
         display: inline-flex;
         padding: 4px 10px;
@@ -144,7 +148,7 @@
 
     .ws-visual-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
         gap: 14px;
     }
 
@@ -158,6 +162,9 @@
     .ws-visual-head {
         display: flex;
         justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        overflow-wrap: anywhere;
         gap: 10px;
         margin-bottom: 10px;
         color: #e2e8f0;
@@ -172,6 +179,24 @@
         border: 1px solid rgba(148, 163, 184, 0.18);
         border-radius: 6px;
     }
+
+    .ws-map-button { display: block; width: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
+    .ws-dot-map { display: block; height: auto; }
+    .ws-dot-black_dot { color: #67e8f9; }
+    .ws-dot-white_dot { color: #fbbf24; }
+    .ws-dot-map rect { fill: none; stroke: currentColor; stroke-width: 2px; vector-effect: non-scaling-stroke; }
+    .ws-dot-map .ws-excluded rect { stroke-dasharray: 4 2; }
+    .ws-dot-map text { fill: currentColor; stroke: #0f172a; stroke-width: 2px; paint-order: stroke; font-weight: 700; }
+    .ws-map-mask { display: none; opacity: 0.55; mix-blend-mode: screen; }
+    .ws-show-masks .ws-map-mask { display: block; }
+    .ws-mask-toggle { cursor: pointer; white-space: nowrap; font-size: 0.8rem; }
+    .ws-dot-counts { margin: 8px 0; font-size: 0.86rem; }
+    .ws-dot-counts strong { margin-right: 0.5em; }
+    .ws-visual details > summary { cursor: pointer; margin: 8px 0; }
+    .ws-map-dialog { width: min(92vw, 1000px); padding: 12px; background: #0f172a; color: #f8fafc; }
+    .ws-map-dialog::backdrop { background: rgba(0, 0, 0, 0.75); }
+    .ws-map-dialog svg { max-height: 78vh; }
+    .ws-map-dialog button { margin-bottom: 8px; }
 
     .ws-thumbs {
         display: grid;
@@ -277,10 +302,6 @@
             </div>
         </div>
         <div class="ws-metric">
-            <div class="label">原因</div>
-            <div class="value">{{ log.reason or auto_decision.reason or log.error_message or "無" }}</div>
-        </div>
-        <div class="ws-metric">
             <div class="label">設定來源</div>
             <div class="value">
                 {{ rule_selection.matched_machine_key or "default" }}
@@ -302,6 +323,16 @@
         <div class="ws-metric">
             <div class="label">跳過 Tile</div>
             <div class="value">{{ summary.skipped_tiles or {} }}</div>
+        </div>
+        <div class="ws-metric ws-reason">
+            <div class="label">判定原因與點偵測摘要</div>
+            <div class="value">
+                {% for line in detection_lines %}<div>{{ line | e }}</div>{% endfor %}
+                {% if partial_trace %}<div class="ws-rule-reason">舊紀錄僅保存部分點類明細，偵測與排除數為已保存的小計。</div>{% endif %}
+                {% set reason = rule_reason | default(log.reason or auto_decision.reason or log.error_message or "") %}
+                {% if reason %}<div class="ws-rule-reason">{{ reason | e }}</div>
+                {% elif not detection_lines %}無{% endif %}
+            </div>
         </div>
     </div>
 </section>
@@ -368,6 +399,14 @@
                 <td>{{ item.evaluated_tiles }}</td>
             </tr>
             {% endfor %}
+            {% for screen, kind in uncompared_types %}
+            <tr>
+                <td>{{ screen | e }}</td>
+                <td>{{ dot_labels[kind] }} / {{ kind }}</td>
+                <td>0</td>
+                <td colspan="5">此點類已偵測，本次沒有 Tile 以此點類比對規格。</td>
+            </tr>
+            {% endfor %}
         </tbody>
     </table>
     {% if dust_only_ok_i %}
@@ -430,7 +469,62 @@
     {% if detail.visuals %}
     <div class="ws-visual-grid">
         {% for visual in detail.visuals %}
+        {% set tile = visual_tiles[loop.index0] if visual_tiles else none %}
+        {% set box = visual.crop_box %}
+        {% set combined = tile and tile.types and box and box|length == 4 and visual.urls and visual.urls.crop_url %}
         <div class="ws-visual">
+            {% if combined %}
+            {% set width = box[2] - box[0] %}
+            {% set height = box[3] - box[1] %}
+            {% set top = roi_header_px if visual.aoi_judgment_roi else 0 %}
+            {% set font_px = [width / 32, 16] | min %}
+            {% set statuses = {"kept": "過濾後保留", "dust_mask_overlap": "灰塵排除", "no_detect_mask_overlap": "不檢測區排除"} %}
+            <div class="ws-visual-head">
+                <strong>{{ visual.image_name | e }} / Tile {{ visual.tile_id }} / 黑點、白點</strong>
+                {% if visual.urls.dust_mask_url or visual.urls.no_detect_mask_url %}
+                <label class="ws-mask-toggle"><input type="checkbox"> 疊加{% if visual.urls.dust_mask_url %}灰塵{% endif %}{% if visual.urls.no_detect_mask_url %}{{ '與' if visual.urls.dust_mask_url }}不檢測區{% endif %}遮罩</label>
+                {% endif %}
+            </div>
+            <button class="ws-map-button" type="button" aria-label="放大 Tile {{ visual.tile_id }} 點位圖">
+                <svg class="ws-main-img ws-dot-map" viewBox="0 0 {{ width }} {{ height + top }}" role="img" aria-label="各點類偵測位置">
+                    <image href="{{ visual.urls.crop_url | e }}" width="{{ width }}" height="{{ height + top }}"/>
+                    {% for mask_url in (visual.urls.dust_mask_url, visual.urls.no_detect_mask_url) if mask_url %}
+                    <image class="ws-map-mask" href="{{ mask_url | e }}" width="{{ width }}" height="{{ height + top }}"/>
+                    {% endfor %}
+                    <g transform="translate(0 {{ top }})">
+                    {% for kind, layer in tile.types.items() %}
+                        {% for point in layer.dots %}
+                        {% set right = point.x > width / 2 %}
+                        {% set label_y = point.y - 3 if kind == 'black_dot' else point.y + point.h + font_px %}
+                        <g class="ws-dot-{{ kind }} {{ 'ws-excluded' if point.status != 'kept' }}">
+                            <title>{{ dot_labels[kind] }} · {{ statuses[point.status] }}{% if point.size_mm is not none %} · {{ '%.4f'|format(point.size_mm) }} mm{% endif %}</title>
+                            <rect x="{{ point.x }}" y="{{ point.y }}" width="{{ point.w }}" height="{{ point.h }}"/>
+                            <text x="{{ point.x + point.w if right else point.x }}" y="{{ [[label_y, font_px]|max, height - 2]|min }}"
+                                  font-size="{{ font_px }}" text-anchor="{{ 'end' if right else 'start' }}">{{ dot_labels[kind] }}{% if point.size_mm is not none %} {{ '%.4f'|format(point.size_mm) }} mm{% endif %}</text>
+                        </g>
+                        {% endfor %}
+                    {% endfor %}
+                    </g>
+                </svg>
+            </button>
+            <div class="ws-dot-counts">
+                {% for kind, layer in tile.types.items() %}
+                <div><strong class="ws-dot-{{ kind }}">{{ dot_labels[kind] }}</strong>偵測 {{ layer.detected }} 點，灰塵排除 {{ layer.dust }}，不檢測區排除 {{ layer.no_detect }}，過濾後保留 {{ layer.kept }} 點{% if tile.panel_dot_type %}，計入 Panel {{ layer.kept if tile.panel_dot_type == kind else 0 }} 點{% endif %}</div>
+                {% if layer.dots|length < layer.detected %}
+                <div class="ws-rule-reason">{{ dot_labels[kind] }}有 {{ layer.detected - layer.dots|length }} 點未保存座標。</div>
+                {% endif %}
+                {% endfor %}
+                {% for kind, message in tile.unavailable.items() %}
+                <div><strong class="ws-dot-{{ kind }}">{{ dot_labels[kind] }}</strong>{{ message }}</div>
+                {% endfor %}
+            </div>
+            {% if tile.types.values()|selectattr('dust')|list or tile.types.values()|selectattr('no_detect')|list %}
+            <div class="ws-rule-reason">虛線框標示遮罩排除的點。</div>
+            {% endif %}
+            <details{% if visual.unmeasured_residual_reason or visual.non_dot_residues %} open{% endif %}>
+                <summary>{{ visual.dot_label }}判定疊圖與分割明細</summary>
+            {% endif %}
+            {% if visual.urls %}
             <div class="ws-visual-head">
                 <div>{{ visual.image_name }} / Tile {{ visual.tile_id }} / {{ visual.dot_label }}</div>
                 <div>
@@ -545,6 +639,10 @@
                 </tbody>
             </table>
             {% endif %}
+            {% else %}
+            <div class="ws-rule-reason">此 Tile 的偵測圖片未保存。</div>
+            {% endif %}
+            {% if combined %}</details>{% endif %}
         </div>
         {% endfor %}
     </div>
@@ -558,6 +656,10 @@
     </div>
     {% endif %}
 </section>
+<dialog id="wsMapDialog" class="ws-map-dialog" aria-label="放大點位圖">
+    <form method="dialog"><button type="submit" class="ws-link ws-button">關閉</button></form>
+    <div></div>
+</dialog>
 
 <section class="ws-band">
     <div class="ws-section-title">計算過程 Log</div>
@@ -581,6 +683,18 @@
 <script>
 (() => {
     const status = document.getElementById('wsRegenStatus');
+    const mapDialog = document.getElementById('wsMapDialog');
+    document.querySelectorAll('.ws-mask-toggle input').forEach(toggle => {
+        toggle.addEventListener('change', () => {
+            toggle.closest('.ws-visual').querySelector('.ws-dot-map').classList.toggle('ws-show-masks', toggle.checked);
+        });
+    });
+    document.querySelectorAll('.ws-map-button').forEach(button => {
+        button.addEventListener('click', () => {
+            mapDialog.querySelector('div').replaceChildren(button.querySelector('svg').cloneNode(true));
+            mapDialog.showModal();
+        });
+    });
     const debugPayload = {
         copied_at: new Date().toISOString(),
         page: 'within_spec_detail',
@@ -597,6 +711,7 @@
         rule_selection: {{ rule_selection | tojson }},
         panel_summary: {{ summary | tojson }},
         panel_totals: {{ (detail.panel_totals or []) | tojson }},
+        {% if detail.dot_evidence is defined %}dot_evidence: {{ detail.dot_evidence | tojson }},{% endif %}
         matches: {{ (detail.matches or []) | tojson }},
         steps: {{ (detail.steps or []) | tojson }},
         parameter_snapshot: {{ parameter_snapshot | tojson }},

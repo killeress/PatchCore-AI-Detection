@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from http.cookies import SimpleCookie
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
+from itertools import chain
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import re
@@ -864,6 +865,9 @@ DOT_RULER_CALIBRATION_SOURCE = "default mm/px ratio 0.0245"
 DOT_PREPROCESS_METHOD = "gaussian"
 DOT_PREPROCESS_PARAMS = {"kernel_size": 7, "sigma": 1.0}
 WITHIN_SPEC_PARAM = "within_spec_judgment_rules"
+WITHIN_SPEC_DOT_LABELS = {"black_dot": "黑點", "white_dot": "白點"}
+WITHIN_SPEC_ROI_HEADER_PX = 24
+WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX = 2
 
 
 def _preprocess_dot_image_for_detection(image_bgr, method: str = None, params: dict = None) -> tuple:
@@ -2096,7 +2100,7 @@ def _within_spec_aoi_roi_for_tile(tile, shape, crop_box):
 
 
 def _unmeasured_aoi_peaks(detected, peaks):
-    """Return peaks outside every calibrated component surviving both masks."""
+    """Return peaks beyond the Euclidean tolerance of any retained, measured dot pixel."""
     import cv2
 
     if not peaks or not detected["candidates"]:
@@ -2105,12 +2109,20 @@ def _unmeasured_aoi_peaks(detected, peaks):
     _, labels, stats, _ = cv2.connectedComponentsWithStats(detected["mask"], connectivity=8)
     measured = {(c["x"], c["y"], c["w"], c["h"], c["area_px"]) for c in detected["candidates"]
                 if c.get("size_mm") is not None}
-    missing = []
-    for peak in peaks:
-        label = labels[peak[1], peak[0]] if peak is not None else 0
-        if not label or tuple(stats[label]) not in measured:
-            missing.append(peak)
-    return missing
+    radius = WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX
+    height, width = labels.shape
+
+    def near_measured_component(peak_x, peak_y):
+        for y in range(max(0, peak_y - radius), min(height, peak_y + radius + 1)):
+            for x in range(max(0, peak_x - radius), min(width, peak_x + radius + 1)):
+                if (x - peak_x) ** 2 + (y - peak_y) ** 2 > radius ** 2:
+                    continue
+                label = labels[y, x]
+                if label and tuple(stats[label]) in measured:
+                    return True
+        return False
+
+    return [peak for peak in peaks if peak is None or not near_measured_component(*peak)]
 
 
 def _within_spec_unmeasured_reason(evidence):
@@ -2534,6 +2546,7 @@ def _remove_dust_overlap_candidates(
         )
         if dust_rejected:
             rejected.append(dust_rejected)
+            detected.setdefault("excluded_measured_dots", []).append(dust_rejected)
         else:
             kept.append(candidate)
 
@@ -2567,6 +2580,7 @@ def _remove_no_detect_overlap_candidates(detected: Dict[str, Any], no_detect_mas
         no_detect_rejected = _candidate_no_detect_overlap(candidate, no_detect_mask)
         if no_detect_rejected:
             rejected.append(no_detect_rejected)
+            detected.setdefault("excluded_measured_dots", []).append(no_detect_rejected)
         else:
             kept.append(candidate)
 
@@ -2577,6 +2591,158 @@ def _remove_no_detect_overlap_candidates(detected: Dict[str, Any], no_detect_mas
     detected["no_detect_mask_filtered_count"] = original_count - len(kept)
     detected["no_detect_mask_filtered_rejected_count"] = no_detect_filtered_rejected_count
     return detected
+
+
+def _within_spec_dot_layer(detection, candidates, excluded):
+    """Keep measured dots from one polarity, including those removed by a mask."""
+    dots = []
+    for dot in chain(candidates, excluded):
+        status = dot.get("source_reason") or dot.get("reason") or "kept"
+        if status not in ("kept", "dust_mask_overlap", "no_detect_mask_overlap"):
+            continue
+        if not all(key in dot for key in ("x", "y", "w", "h")):
+            continue
+        dots.append({"x": dot["x"], "y": dot["y"], "w": dot["w"], "h": dot["h"],
+                     "size_mm": dot.get("size_mm"), "status": status})
+    kept = _as_int(detection.get("count"), len(candidates))
+    dust = _as_int(detection.get("dust_mask_filtered_count"))
+    no_detect = _as_int(detection.get("no_detect_mask_filtered_count"))
+    return {"detected": kept + dust + no_detect, "kept": kept, "dust": dust,
+            "no_detect": no_detect, "dots": dots}
+
+
+def _within_spec_tile_key(image, tile_id, crop_box):
+    return (image, tile_id, tuple(crop_box or ()))
+
+
+def _within_spec_logged_dot_evidence(detail):
+    """Older logs stored both counts in steps, filtered coordinates in rejected, and kept dots in visuals."""
+    if detail.get("dot_evidence"):
+        return detail["dot_evidence"]
+    screens = {row["image_name"]: row["screen"] for row in detail.get("matches") or []
+               if row.get("image_name") and row.get("screen")}
+    screen_codes = (detail.get("parameter_snapshot") or {}).get("screen_rules_used") or {
+        row["screen"] for row in detail.get("panel_totals") or [] if row.get("screen")}
+    detections = {}
+    rejections = {}
+    classified = {}
+    for step in detail.get("steps") or []:
+        image = step.get("image")
+        if not image:
+            continue
+        if step.get("screen"):
+            screens[image] = step["screen"]
+        key = _within_spec_tile_key(image, step.get("tile_id"), step.get("crop_box"))
+        if step.get("detection"):
+            detections[key] = dict(step["detection"])
+        if step.get("rejected"):
+            rejections[key] = step["rejected"]
+        if step.get("classified_as"):
+            classified[key] = step["classified_as"]
+
+    visuals = {}
+    for visual in detail.get("visuals") or []:
+        kind = visual.get("dot_type")
+        if kind in WITHIN_SPEC_DOT_LABELS:
+            key = _within_spec_tile_key(visual.get("image_name"), visual.get("tile_id"), visual.get("crop_box"))
+            visuals[key, kind] = visual
+            detections.setdefault(key, {}).setdefault(kind, visual)
+
+    tiles = []
+    for key, counts in detections.items():
+        image, tile_id, crop_box = key
+        types = {}
+        for kind in WITHIN_SPEC_DOT_LABELS:
+            if kind in counts:
+                candidates = visuals.get((key, kind), {}).get("candidates") or []
+                excluded = [dot for dot in rejections.get(key, {}).get(kind, [])
+                            if dot.get("reason") in ("dust_mask_overlap", "no_detect_mask_overlap")
+                            and (not dot.get("source_reason") or "size_mm" in dot or "size_px" in dot)]
+                types[kind] = _within_spec_dot_layer(counts[kind], candidates, excluded)
+        screen = screens.get(image) or next((code for code in screen_codes if code in (image or "")), image)
+        tiles.append({"image": image, "screen": screen, "tile_id": tile_id,
+                      "crop_box": crop_box, "types": types, "panel_dot_type": classified.get(key)})
+    return tiles
+
+
+def _within_spec_unavailable_dot_types(types, rules):
+    missing = {}
+    for kind in WITHIN_SPEC_DOT_LABELS:
+        if kind in types:
+            continue
+        rule = (rules or {}).get(kind) or {}
+        reason = "此筆紀錄未保存偵測資料"
+        if rule.get("enabled") is False:
+            reason = "規則未啟用"
+        elif rules is not None:
+            threshold_mm, screen_limit, tile_limit = _dot_rule_limits(rule)
+            if threshold_mm <= 0 or min(screen_limit, tile_limit) < 0:
+                reason = "缺少有效的點類規則"
+        missing[kind] = reason
+    return missing
+
+
+def _within_spec_dot_summary(tiles, panel_totals, screen_rules):
+    by_screen = {}
+    for tile in tiles:
+        totals = by_screen.setdefault(tile["screen"], {})
+        for kind, layer in tile["types"].items():
+            counts = totals.setdefault(kind, {
+                "detected": 0, "dust": 0, "no_detect": 0, "sized": 0, "max_mm": 0.0,
+            })
+            for field in ("detected", "dust", "no_detect"):
+                counts[field] += layer[field]
+            for dot in layer["dots"]:
+                if dot["size_mm"] is not None:
+                    counts["sized"] += 1
+                    counts["max_mm"] = max(counts["max_mm"], dot["size_mm"])
+    counted = {(row["screen"], row.get("dot_type")): row["total_count"] for row in panel_totals}
+    lines = []
+    for screen, totals in by_screen.items():
+        unavailable = _within_spec_unavailable_dot_types(totals, screen_rules.get(screen))
+        for kind, label in WITHIN_SPEC_DOT_LABELS.items():
+            if kind in unavailable:
+                lines.append(f"{screen} {label}　{unavailable[kind]}")
+                continue
+            counts = totals[kind]
+            maximum = ""
+            if counts["detected"] and counts["sized"] == counts["detected"]:
+                maximum = f"（最大 {counts['max_mm']:.4f} mm）"
+            lines.append(
+                f"{screen} {label}偵測 {counts['detected']} 點{maximum}，灰塵排除 {counts['dust']}，"
+                f"不檢測區排除 {counts['no_detect']}，計入 Panel {counted.get((screen, kind), 0)} 點"
+            )
+    return lines
+
+
+def _within_spec_log_view(log):
+    detail = log.get("detail") or {}
+    tiles = _within_spec_logged_dot_evidence(detail)
+    screen_rules = (detail.get("parameter_snapshot") or {}).get("screen_rules_used") or {}
+    by_tile = {}
+    for tile in tiles:
+        key = _within_spec_tile_key(tile["image"], tile["tile_id"], tile["crop_box"])
+        unavailable = _within_spec_unavailable_dot_types(tile["types"], screen_rules.get(tile["screen"]))
+        by_tile[key] = dict(tile, unavailable=unavailable)
+    panel_totals = detail.get("panel_totals") or []
+    lines = _within_spec_dot_summary(tiles, panel_totals, screen_rules)
+    compared = {(row.get("screen"), row.get("dot_type")) for row in panel_totals}
+    observed = dict.fromkeys((t["screen"], kind) for t in tiles for kind in t["types"])
+    panel_counts = (detail.get("panel_summary") or {}).get("candidate_summary") or {}
+    partial_trace = (not detail.get("dot_evidence") and _as_int(panel_counts.get("raw_candidate_count")) >
+                     sum(layer["detected"] for tile in tiles for layer in tile["types"].values()))
+    reason = (log.get("reason") or (detail.get("inference_auto_decision") or {}).get("reason")
+              or log.get("error_message") or "")
+    if lines:
+        reason = reason.removesuffix("；".join(lines)).rstrip("；")
+    return {
+        "rule_reason": reason, "detection_lines": lines, "dot_labels": WITHIN_SPEC_DOT_LABELS,
+        "roi_header_px": WITHIN_SPEC_ROI_HEADER_PX,
+        "partial_trace": partial_trace,
+        "uncompared_types": [key for key in observed if key not in compared],
+        "visual_tiles": [by_tile.get(_within_spec_tile_key(v.get("image_name"), v.get("tile_id"), v.get("crop_box")))
+                         for v in detail.get("visuals") or []],
+    }
 
 
 def _format_within_spec_panel_summary(detail: Dict[str, Any], fallback: str = "") -> str:
@@ -2658,6 +2824,7 @@ def _format_within_spec_panel_summary_parts(detail: Dict[str, Any]) -> List[str]
             f"{screen} {label}："
             f"數量 {len(items)} > 0 [NG]{detail_text}；結果=NG"
         )
+    parts.extend((detail.get("panel_summary") or {}).get("dot_detection_lines") or [])
     return parts
 
 
@@ -2959,7 +3126,7 @@ def _save_within_spec_dot_visuals(
         cv2.drawContours(frame, contours, -1, (200, 200, 120), 1)
         canvas = cv2.addWeighted(canvas, 0.8, frame, 0.2, 0)
         # Put the mode above the image; never cover the defect with text or a cross.
-        canvas = cv2.copyMakeBorder(canvas, 24, 0, 0, 0, cv2.BORDER_CONSTANT)
+        canvas = cv2.copyMakeBorder(canvas, WITHIN_SPEC_ROI_HEADER_PX, 0, 0, 0, cv2.BORDER_CONSTANT)
         radius = (aoi_roi or {}).get("radius_product_px", "?")
         cv2.putText(canvas, f"AOI +/-{radius}px | whole intersecting defects", (4, 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 220, 220), 1, cv2.LINE_AA)
@@ -3088,6 +3255,7 @@ def _evaluate_within_spec_suggestion_detail(
         "evaluated_tile_count": 0,
         "panel_totals": [],
         "panel_summary": {},
+        "dot_evidence": [],
         "candidate_summary": {
             "raw_candidate_count": 0,
             "final_candidate_count": 0,
@@ -3152,6 +3320,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "min_aspect_ratio": max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
                 "edge_margin_px": max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
                 "dust_mask_overlap_threshold_percent": dust_overlap_percent,
+                "aoi_peak_tolerance_px": WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX,
                 "non_dot_residue": _json_safe_snapshot(non_dot_cfg),
                 "size_metric": str(dot_cfg.get("size_metric") or "bbox_diagonal"),
                 "unit_per_px": max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
@@ -3170,10 +3339,6 @@ def _evaluate_within_spec_suggestion_detail(
         add_step("找不到 screen 規則，停止判定", machine=machine_key or "default")
         return result
 
-    dot_types = (
-        ("black_dot", "black", "黑點"),
-        ("white_dot", "white", "白點"),
-    )
     aggregates: Dict[Tuple[str, str], Dict[str, Any]] = {}
     non_dot_residues: List[Dict[str, Any]] = []
     non_dot_keys = set()
@@ -3286,7 +3451,9 @@ def _evaluate_within_spec_suggestion_detail(
                 peaks = [p for p in peaks if p is None or not no_detect_mask[p[1], p[0]]]
 
             detections = []
-            for dot_type, polarity, label in dot_types:
+            dot_layers = {}
+            for dot_type, label in WITHIN_SPEC_DOT_LABELS.items():
+                polarity = dot_type.removesuffix("_dot")
                 rule = screen_rules.get(dot_type) or {}
                 threshold_mm, screen_limit, tile_limit = _dot_rule_limits(rule)
                 if rule.get("enabled") is False:
@@ -3323,6 +3490,9 @@ def _evaluate_within_spec_suggestion_detail(
                 detected = _remove_dust_overlap_candidates(detected, runtime_dust_mask, dust_overlap_percent)
                 detected = _remove_no_detect_overlap_candidates(detected, no_detect_mask)
                 candidates = detected["candidates"]
+                dot_layers[dot_type] = _within_spec_dot_layer(
+                    detected, candidates, detected.get("excluded_measured_dots", [])
+                )
                 max_size_mm = max((_as_float(c.get("size_mm"), 0.0) for c in candidates), default=0.0)
                 detections.append({
                     "_detected": detected if reuse_visual_detection else None,
@@ -3363,6 +3533,9 @@ def _evaluate_within_spec_suggestion_detail(
                 )
                 continue
 
+            tile_evidence = {"image": image.get("image_name") or image_path.name, "tile_id": tile.get("tile_id"),
+                             "crop_box": crop_box, "screen": screen_code, "types": dot_layers, "panel_dot_type": None}
+            result["dot_evidence"].append(tile_evidence)
             chosen = max(detections, key=lambda d: (d["max_size_mm"], d["count"]))
             tile_candidate_summary = {
                 "final_candidate_count": sum(_as_int(d.get("count"), 0) for d in detections),
@@ -3552,6 +3725,7 @@ def _evaluate_within_spec_suggestion_detail(
                 continue
 
             result["evaluated_tile_count"] += 1
+            tile_evidence["panel_dot_type"] = chosen["dot_type"]
             key = (screen_code, chosen["dot_type"])
             state = aggregates.setdefault(key, {
                 "screen": screen_code,
@@ -3686,6 +3860,9 @@ def _evaluate_within_spec_suggestion_detail(
         "missed_dot_tile_count": len(result["missed_dot_tiles"]),
         "skipped_tiles": result["skipped_tiles"],
         "candidate_summary": result["candidate_summary"],
+        "dot_detection_lines": _within_spec_dot_summary(
+            result["dot_evidence"], panel_totals, result["parameter_snapshot"]["screen_rules_used"]
+        ),
     }
     result["matches"] = matches[:5]
     if non_dot_residues:
@@ -3718,6 +3895,9 @@ def _evaluate_within_spec_suggestion_detail(
         ),
         "matches": matches[:5],
     }
+    detection_lines = result["panel_summary"]["dot_detection_lines"]
+    if detection_lines:
+        result["suggestion"]["reason"] += "；" + "；".join(detection_lines)
     add_step("判定結果：建議規格內", reason=result["suggestion"]["reason"])
     return result
 
@@ -7658,7 +7838,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 self._send_404(path)
                 return
             template = self.jinja_env.get_template("within_spec_detail.html")
-            html = template.render(log=log, request_path=path)
+            html = template.render(log=log, request_path=path, **_within_spec_log_view(log))
             self._send_response(200, html)
         except Exception as e:
             logger.error("Within-spec log page error: %s", e, exc_info=True)

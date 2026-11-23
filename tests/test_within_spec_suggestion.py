@@ -14,6 +14,7 @@ from capi_web import (
     _evaluate_within_spec_suggestion_detail,
     _format_within_spec_inference_note,
     _format_within_spec_panel_summary,
+    _unmeasured_aoi_peaks,
     _within_spec_auto_visual_output,
     _flush_within_spec_visual_jobs,
 )
@@ -454,6 +455,42 @@ def test_within_spec_suggestion_classifies_white_dot_tile(tmp_path):
     assert suggestion["matches"][0]["dot_type"] == "white_dot"
 
 
+@pytest.mark.parametrize(("mode", "black_status", "white_status", "panel_count"), [
+    ("dust", "dust_mask_overlap", "dust_mask_overlap", 0),
+    ("mark", "kept", "no_detect_mask_overlap", 1),
+    ("clear", "kept", "kept", 1),
+])
+def test_within_spec_preserves_both_measured_dot_types_for_display(tmp_path, mode, black_status, white_status, panel_count):
+    path = tmp_path / "W0F00000.png"
+    image = np.full((96, 96, 3), 128, dtype=np.uint8)
+    cv2.circle(image, (24, 48), 3, (60, 60, 60), -1)
+    cv2.circle(image, (72, 48), 5, (210, 210, 210), -1)
+    assert cv2.imwrite(str(path), image)
+    source = _detail(path)
+    if mode == "dust":
+        source["images"][0]["tiles"][0]["_runtime_dust_mask"] = np.ones((96, 96), dtype=np.uint8)
+    if mode == "mark":
+        source["images"][0].update(mark_bbox="62,38,20,20", within_spec_no_detect={"mark_padding_px": 0})
+
+    result = _evaluate_within_spec_suggestion_detail(source, _rules(white_enabled=True))
+    tile, = result["dot_evidence"]
+    assert result["panel_summary"]["total_dot_count"] == panel_count
+    for kind, x, status in [("black_dot", 24, black_status), ("white_dot", 72, white_status)]:
+        layer = tile["types"][kind]
+        dot, = layer["dots"]
+        assert layer["detected"] == 1
+        assert layer["kept"] == int(status == "kept")
+        assert dot["x"] <= x < dot["x"] + dot["w"]
+        assert dot["status"] == status
+        assert dot["size_mm"] > 0
+    for text in (_format_within_spec_panel_summary(result), result["suggestion"]["reason"]):
+        assert "黑點偵測 1 點" in text and "白點偵測 1 點" in text
+    if mode == "clear":
+        assert tile["panel_dot_type"] == "white_dot"
+        black, white = result["panel_summary"]["dot_detection_lines"]
+        assert "計入 Panel 0 點" in black and "計入 Panel 1 點" in white
+
+
 def test_within_spec_zero_white_dot_limit_means_not_allowed(tmp_path):
     image_path = tmp_path / "W0F00000.png"
     _write_white_dot_image(image_path, [(48, 48)])
@@ -586,6 +623,7 @@ def test_within_spec_detail_saves_visuals_and_panel_totals(tmp_path):
     assert detail["parameter_snapshot"]["preprocess"]["params"]["kernel_size"] == 7
     assert detail["parameter_snapshot"]["screen_rules_used"]["W0F00000"]["black_dot"]["area_threshold_mm"] == 0.3
     assert detail["parameter_snapshot"]["full_rules"]["default"]["dot_detection"]["size_metric"] == "bbox_max"
+    assert "W0F00000 白點　規則未啟用" in detail["panel_summary"]["dot_detection_lines"]
     assert detail["visuals"][0]["urls"]["overlay_url"].startswith("/heatmaps/test/within_spec/")
     assert any(p.name.endswith("_overlay.png") for p in visual_dir.iterdir())
 
@@ -836,8 +874,22 @@ def test_within_spec_keeps_unmeasured_aoi_shadow_ng_after_dust_filter(tmp_path, 
     assert tuple(overlay[24 + 48, 48 + 8]) == (0, 0, 255)
 
 
+def test_aoi_peak_tolerance_uses_only_measured_component_pixels():
+    mask = np.zeros((12, 12), np.uint8)
+    mask[3, 2] = 255
+    mask[4:7, 1:4] = 255
+    mask[6:8, 9:11] = 255  # A filtered component still present in the raw mask.
+    measured_dot = {"x": 1, "y": 3, "w": 3, "h": 4, "area_px": 10, "size_mm": 0.151}
+    detected = {"mask": mask, "candidates": [measured_dot]}
+
+    # The rightmost measured pixel on row 6 is x=3. On row 3 it is only x=2.
+    peaks = [[4, 6], [5, 6], [4, 7], [5, 3], [6, 6], [9, 6], None]
+    assert _unmeasured_aoi_peaks(detected, peaks) == [[5, 3], [6, 6], [9, 6], None]
+
+
 @pytest.mark.parametrize(("status", "peak", "can_pass"), [
     ("remaining", [48, 48], True),   # Measured dot at the residual peak, within spec.
+    ("remaining", [54, 48], True),   # Two pixels from the measured edge.
     ("remaining", [42, 42], False),  # A different in-spec dot cannot explain the peak.
     ("remaining", None, False),
     ("unconfirmed", None, False),
@@ -933,6 +985,8 @@ def test_within_spec_historical_real_regions_do_not_share_one_saved_peak(tmp_pat
 @pytest.mark.parametrize(("threshold_mm", "peak_xy", "expected_outcome"), [
     (0.35, [48, 48], "within_spec"),
     (0.05, [48, 48], "over_spec"),
+    (0.35, [54, 48], "within_spec"),  # The measured dot ends at x=52.
+    (0.05, [54, 48], "over_spec"),
     (0.35, [24, 24], "unmeasured"),
 ])
 def test_within_spec_grid_real_defect_evaluates_measured_dot_instead_of_dust_unconfirmed(
