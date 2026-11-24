@@ -8683,6 +8683,7 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 defects,
                 host_name=_get_host_identity(),
                 station_profile=station_profile,
+                facility=repository.facility,
             )
             stage_timings["comparison"] = time.monotonic() - stage_started
             stage_started = time.monotonic()
@@ -8781,11 +8782,15 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 server_config.get("mes_report") or {}, station_profile=station_profile,
             )
             rows = repository.fetch_report_details(panel_id, cutoff)
-            detail_columns = list(rows[0]) if rows else list(WP_DEFTHIS_COLUMNS)
+            detail_columns = list(rows[0]) if rows else (
+                [] if repository.facility == "CARUX" else list(WP_DEFTHIS_COLUMNS)
+            )
             self._send_json({
                 "success": True,
                 "source": repository.source_label,
                 "rule": (
+                    repository.rule_label
+                    if repository.facility == "CARUX" else
                     repository.rule_label + "；明細含清單外不良碼供核對"
                     if station_profile == "aapi" else
                     "同玻璃 ID、DEFT_OPER=1600、IF_NEWER=Y、推論時間後"
