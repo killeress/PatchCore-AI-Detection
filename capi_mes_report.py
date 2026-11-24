@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import time
 from datetime import datetime
 from functools import lru_cache
@@ -19,6 +20,7 @@ DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "mes_de
 AAPI_DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "aapi_mes_defect_codes.json"
 
 CAPI_MES_RULE = "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值"
+CARUX_MES_RULE = "FAC_ID=AA02、MAIN_WC=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
 AAPI_MES_RULE = (
     "接收時間後有 1400→2100 過站，且 DEFT_OPER=1400、IF_NEWER=Y、"
     "TRANS_DATE 嚴格晚於接收時間的不良命中 AAPI 畫面碼清單才判 NG；"
@@ -116,6 +118,21 @@ def _parse_datetime(value) -> Optional[datetime]:
         except ValueError:
             continue
     return None
+
+
+def _carux_trans_date_is_at_or_after(value, cutoff: datetime) -> bool:
+    """CARUX 的字串時間須可比較；格式或時區不明時不可當成查無資料。"""
+    parsed = _parse_datetime(value)
+    complete_text = (
+        not isinstance(value, str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}[ T](?:[0-9]{2}:[0-9]{2}:[0-9]{2}|[0-9]{2}\.[0-9]{2}\.[0-9]{2})(?:\.[0-9]{1,6})?",
+            value.strip(),
+        ) is not None
+    )
+    if parsed is None or parsed.tzinfo is not None or cutoff.tzinfo is not None or not complete_text:
+        raise ValueError("CARUX MES TRANS_DATE 或推論時間格式／時區無法安全比較，請確認現場資料")
+    return parsed >= cutoff
 
 
 def _display_datetime(value) -> str:
@@ -227,8 +244,8 @@ def _build_coordinate_match(
     return result
 
 
-def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
-    """依 LOGIC.xlsx 判斷一筆 AI 推論之後，MES 是否有人員有效不良。"""
+def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime, *, facility: str = "") -> Dict:
+    """原 CAPI 依 LOGIC.xlsx 判斷推論後人員有效不良；CARUX 依指定規則判斷。"""
     defect_code_catalog = load_defect_code_catalog()
     qualifying = []
     row_count = 0
@@ -236,18 +253,22 @@ def classify_mes_judgment(rows: Iterable[Mapping], cutoff: datetime) -> Dict:
         row_count += 1
         trans_date = _parse_datetime(row.get("trans_date"))
         defect_code = str(row.get("dfct_code") or "").strip().upper()
-        if trans_date is None or trans_date < cutoff:
-            continue
-        if defect_code == "PCK21":
-            continue
-        if not _has_coordinate(row.get("x_axis")) or not _has_coordinate(row.get("y_axis")):
-            continue
+        if facility == "CARUX":
+            if not _carux_trans_date_is_at_or_after(row.get("trans_date"), cutoff):
+                continue
+        else:
+            if trans_date is None or trans_date < cutoff:
+                continue
+            if defect_code == "PCK21":
+                continue
+            if not _has_coordinate(row.get("x_axis")) or not _has_coordinate(row.get("y_axis")):
+                continue
         defect_info = defect_code_catalog.get(defect_code, {})
         qualifying.append({
             "dfct_code": defect_code,
             "severity": defect_info.get("severity", ""),
             "description": defect_info.get("description", ""),
-            "trans_date": _display_datetime(trans_date),
+            "trans_date": _display_datetime(row.get("trans_date")),
             "x_axis": row.get("x_axis"),
             "y_axis": row.get("y_axis"),
         })
@@ -342,9 +363,11 @@ def build_mes_comparison(
     *,
     host_name: str = "",
     station_profile: str = "capi",
+    facility: str = "",
 ) -> Dict:
     """組合逐筆結果與以全部可比對推論為分母的過／漏檢統計。"""
     classify = classify_aapi_mes_judgment if station_profile == "aapi" else classify_mes_judgment
+    facility = str(facility or "").strip().upper()
     normalized_defects = {
         str(panel_id or "").strip().upper(): rows
         for panel_id, rows in defects_by_panel.items()
@@ -356,11 +379,12 @@ def build_mes_comparison(
         glass_id = str(record.get("glass_id") or "").strip()
         ai_judgment = _normalize_ai_judgment(record.get("ai_judgment"))
         cutoff = _parse_datetime(record.get("request_time"))
-        mes_result = (
-            classify(normalized_defects.get(glass_id.upper(), []), cutoff)
-            if cutoff is not None else
-            {"judgment": None, "mes_row_count": 0, "qualifying_defects": []}
-        )
+        if cutoff is None:
+            mes_result = {"judgment": None, "mes_row_count": 0, "qualifying_defects": []}
+        elif station_profile == "aapi":
+            mes_result = classify(normalized_defects.get(glass_id.upper(), []), cutoff)
+        else:
+            mes_result = classify(normalized_defects.get(glass_id.upper(), []), cutoff, facility=facility)
 
         if ai_judgment is None or cutoff is None or not glass_id:
             comparison = "uncomparable"
@@ -475,11 +499,18 @@ class OracleMESRepository:
         normalized_tns = {str(name).upper(): value for name, value in tns_configs.items()}
         if not self.facility:
             raise MESReportConfigurationError("MES Oracle 設定缺少：facility")
-        self.wp_defthis_schema = WP_DEFTHIS_SCHEMA_BY_FACILITY.get(self.facility)
-        if not self.wp_defthis_schema:
-            raise MESReportConfigurationError(f"MES Oracle 找不到廠別 WP_DEFTHIS schema：{self.facility}")
-        self.wp_defthis_fac_id = WP_DEFTHIS_FAC_ID_BY_FACILITY[self.facility]
-        self.wp_defthis_index_hint = WP_DEFTHIS_INDEX_HINT_BY_FACILITY[self.facility]
+        if self.facility == "CARUX":
+            if self.station_profile != "capi":
+                raise MESReportConfigurationError("CARUX MES Report 尚未支援 AAPI 站別")
+            self.wp_defthis_schema = None
+            self.wp_defthis_fac_id = "AA02"
+            self.wp_defthis_index_hint = ""
+        else:
+            self.wp_defthis_schema = WP_DEFTHIS_SCHEMA_BY_FACILITY.get(self.facility)
+            if not self.wp_defthis_schema:
+                raise MESReportConfigurationError(f"MES Oracle 找不到廠別 WP_DEFTHIS schema：{self.facility}")
+            self.wp_defthis_fac_id = WP_DEFTHIS_FAC_ID_BY_FACILITY[self.facility]
+            self.wp_defthis_index_hint = WP_DEFTHIS_INDEX_HINT_BY_FACILITY[self.facility]
         if self.facility not in normalized_tns:
             raise MESReportConfigurationError(f"MES Oracle 找不到廠別 TNS：{self.facility}")
 
@@ -502,6 +533,8 @@ class OracleMESRepository:
 
     @property
     def source_label(self) -> str:
+        if self.facility == "CARUX":
+            return f"CARUX / {self.service_name.upper()} / MAA02SHIS_DEFECTCODE"
         source = f"{self.facility} / {self.service_name.upper()} / {self.wp_defthis_schema}.WP_DEFTHIS"
         if self.station_profile == "aapi":
             source += f" + {self.wp_defthis_schema}.WP_PNLHIST"
@@ -509,6 +542,8 @@ class OracleMESRepository:
 
     @property
     def rule_label(self) -> str:
+        if self.facility == "CARUX":
+            return CARUX_MES_RULE
         return AAPI_MES_RULE if self.station_profile == "aapi" else CAPI_MES_RULE
 
     def fetch_defects(self, panel_ids: Sequence[str], min_trans_date: datetime) -> Dict[str, List[Dict]]:
@@ -540,6 +575,22 @@ class OracleMESRepository:
                     chunk = panel_ids[offset:offset + batch_size]
                     panel_binds = {f"panel_{idx}": value for idx, value in enumerate(chunk)}
                     placeholders = ", ".join(f":panel_{idx}" for idx in range(len(chunk)))
+                    if self.facility == "CARUX":
+                        cursor.execute(
+                            f"""SELECT w.ENTITY_NO, w.DFCT_CODE, w.TRANS_DATE, w.X_AXIS, w.Y_AXIS
+                                FROM MAA02SHIS_DEFECTCODE w
+                                WHERE w.FAC_ID = :fac_id
+                                  AND w.MAIN_WC IN ('1600', '1605')
+                                  AND w.ENTITY_NO IN ({placeholders})""",
+                            {"fac_id": self.wp_defthis_fac_id, **panel_binds},
+                        )
+                        for pnl_id, code, trans_date, x_axis, y_axis in cursor:
+                            key = str(pnl_id or "").strip().upper()
+                            result.setdefault(key, []).append({
+                                "pnl_id": key, "dfct_code": code, "trans_date": trans_date,
+                                "x_axis": x_axis, "y_axis": y_axis,
+                            })
+                        continue
                     aapi = self.station_profile == "aapi"
                     rework_column = ", h.REWORK_TRANS_DATE" if aapi else ""
                     # MAX 僅用於「是否存在接收後過站」，避免 MRWK/MVIN 多筆過站放大不良數。
@@ -604,7 +655,7 @@ class OracleMESRepository:
         return result
 
     def fetch_report_details(self, panel_id: str, min_trans_date: datetime) -> List[Dict]:
-        """按需取得單筆 AI 推論所使用 MES 記錄的全部 WP_DEFTHIS 欄位。"""
+        """按需取得單筆 AI 推論所使用 MES 記錄的完整原始欄位。"""
         normalized_panel_id = str(panel_id or "").strip().upper()
         if not normalized_panel_id:
             return []
@@ -626,42 +677,54 @@ class OracleMESRepository:
             cursor.arraysize = 1000
             cursor.prefetchrows = 1000
             try:
-                # MOD1/MCRDA1 與 MOD2/MERDA1 的 WP_DEFTHIS 欄位並非完全相同。
-                # MOD1 使用實際欄位清單，避免查詢不存在的欄位（例如 SYS_TRANS_FLAG）。
-                columns_sql = "*" if self.facility == "MOD1" else ", ".join(WP_DEFTHIS_COLUMNS)
-                aapi = self.station_profile == "aapi"
-                rework_filter = f"""
-                          AND EXISTS (
-                              SELECT 1 FROM {self.wp_defthis_schema}.WP_PNLHIST h
-                              WHERE h.FAC_ID = :fac_id AND h.PNL_ID = :panel_id
-                                AND h.OPER = '1400' AND h.TO_OPER = '2100'
-                                AND h.TRANS_DATE > :min_trans_date
-                          )
-                """ if aapi else ""
-                time_operator = ">" if aapi else ">="
-                date_order = "DEFT_DATE, TRANS_NBR, ITEM_NBR" if aapi else "TRANS_DATE, TRANS_NBR"
-                cursor.execute(
-                    f"""
-                        SELECT {columns_sql}
-                        FROM {self.wp_defthis_schema}.WP_DEFTHIS
-                        WHERE FAC_ID = :fac_id
-                          AND PNL_ID = :panel_id
-                          AND DEFT_OPER = :deft_oper
-                          AND IF_NEWER = 'Y'
-                          AND TRANS_DATE {time_operator} :min_trans_date
-                          {rework_filter}
-                        ORDER BY {date_order}
-                    """,
-                    {
-                        "fac_id": self.wp_defthis_fac_id,
-                        "panel_id": normalized_panel_id,
-                        "deft_oper": "1400" if aapi else "1600",
-                        "min_trans_date": min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f"),
-                    },
-                )
+                if self.facility == "CARUX":
+                    cursor.execute(
+                        """SELECT * FROM MAA02SHIS_DEFECTCODE
+                           WHERE FAC_ID = :fac_id
+                             AND MAIN_WC IN ('1600', '1605')
+                             AND ENTITY_NO = :panel_id""",
+                        {"fac_id": self.wp_defthis_fac_id, "panel_id": normalized_panel_id},
+                    )
+                else:
+                    # MOD1/MCRDA1 與 MOD2/MERDA1 的 WP_DEFTHIS 欄位並非完全相同。
+                    # MOD1 使用實際欄位清單，避免查詢不存在的欄位（例如 SYS_TRANS_FLAG）。
+                    columns_sql = "*" if self.facility == "MOD1" else ", ".join(WP_DEFTHIS_COLUMNS)
+                    aapi = self.station_profile == "aapi"
+                    rework_filter = f"""
+                              AND EXISTS (
+                                  SELECT 1 FROM {self.wp_defthis_schema}.WP_PNLHIST h
+                                  WHERE h.FAC_ID = :fac_id AND h.PNL_ID = :panel_id
+                                    AND h.OPER = '1400' AND h.TO_OPER = '2100'
+                                    AND h.TRANS_DATE > :min_trans_date
+                              )
+                    """ if aapi else ""
+                    time_operator = ">" if aapi else ">="
+                    date_order = "DEFT_DATE, TRANS_NBR, ITEM_NBR" if aapi else "TRANS_DATE, TRANS_NBR"
+                    cursor.execute(
+                        f"""
+                            SELECT {columns_sql}
+                            FROM {self.wp_defthis_schema}.WP_DEFTHIS
+                            WHERE FAC_ID = :fac_id
+                              AND PNL_ID = :panel_id
+                              AND DEFT_OPER = :deft_oper
+                              AND IF_NEWER = 'Y'
+                              AND TRANS_DATE {time_operator} :min_trans_date
+                              {rework_filter}
+                            ORDER BY {date_order}
+                        """,
+                        {
+                            "fac_id": self.wp_defthis_fac_id,
+                            "panel_id": normalized_panel_id,
+                            "deft_oper": "1400" if aapi else "1600",
+                            "min_trans_date": min_trans_date.strftime("%Y-%m-%d %H.%M.%S.%f"),
+                        },
+                    )
                 description = getattr(cursor, "description", None) or []
                 columns = [str(item[0]).upper() for item in description] or list(WP_DEFTHIS_COLUMNS)
                 rows = [dict(zip(columns, values)) for values in cursor]
+                if self.facility == "CARUX":
+                    rows = [row for row in rows
+                            if _carux_trans_date_is_at_or_after(row.get("TRANS_DATE"), min_trans_date)]
             finally:
                 cursor.close()
         finally:
