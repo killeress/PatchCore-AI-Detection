@@ -17,7 +17,7 @@ def carux_oracle(monkeypatch):
     """Use a real SQLite table for the SQL; replace only the external Oracle connection."""
     connection = sqlite3.connect(":memory:")
     connection.execute("""CREATE TABLE MAA02SHIS_DEFECTCODE (
-        FAC_ID TEXT, ENTITY_NO TEXT, MAIN_WC TEXT, DFCT_CODE TEXT,
+        FAC_ID TEXT, ENTITY_NO TEXT, WORK_CTR TEXT, MAIN_WC TEXT, DFCT_CODE TEXT,
         TRANS_DATE TEXT, X_AXIS NUMERIC, Y_AXIS NUMERIC, ERROR_FLAG TEXT,
         PROD_NBR TEXT, TRANS_NBR TEXT, ITEM_NBR INTEGER
     )""")
@@ -61,9 +61,9 @@ def insert_row(connection, *, panel="PANEL-1", fac="AA02", station="1600",
                error_flag=None):
     connection.execute(
         """INSERT INTO MAA02SHIS_DEFECTCODE
-           (FAC_ID, ENTITY_NO, MAIN_WC, DFCT_CODE, TRANS_DATE, X_AXIS, Y_AXIS, ERROR_FLAG)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (fac, panel, station, code, time, x, y, error_flag),
+           (FAC_ID, ENTITY_NO, WORK_CTR, MAIN_WC, DFCT_CODE, TRANS_DATE, X_AXIS, Y_AXIS, ERROR_FLAG)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (fac, panel, station, "OTHER", code, time, x, y, error_flag),
     )
 
 
@@ -85,11 +85,12 @@ def test_carux_query_and_detail_apply_time_per_inference(carux_oracle):
     assert {row["TRANS_DATE"] for row in details} == {
         "2026-11-23 08:00:00", "2026-11-24 00:01:00",
     }
-    assert {row["MAIN_WC"] for row in details} == {"1600", "1605"}
+    assert {row["WORK_CTR"] for row in details} == {"1600", "1605"}
+    assert {row["MAIN_WC"] for row in details} == {"OTHER"}
     assert all(row["ENTITY_NO"] == "PANEL-1" for row in details)
     assert any(row["ERROR_FLAG"] == "Y" for row in details)
     assert "MAA02SHIS_DEFECTCODE" in repository.source_label
-    assert repository.rule_label == "FAC_ID=AA02、MAIN_WC=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
+    assert repository.rule_label == "FAC_ID=AA02、WORK_CTR=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
 
 
 def test_carux_counts_pck21_and_missing_coordinates_after_each_inference(carux_oracle):
@@ -267,7 +268,7 @@ def test_carux_summary_api_uses_real_query_and_displays_configured_rule(carux_or
     assert response["success"] is True
     assert response["records"][0]["mes_judgment"] == "NG"
     assert response["summary"]["miss_detection"] == 1
-    assert response["rule"] == "FAC_ID=AA02、MAIN_WC=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
+    assert response["rule"] == "FAC_ID=AA02、WORK_CTR=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
 
 
 def test_carux_uncomparable_mes_time_is_reported_by_summary_and_detail_api(carux_oracle, monkeypatch):
@@ -337,4 +338,4 @@ def test_carux_detail_api_displays_carux_rule(carux_oracle, monkeypatch):
     response = responses[-1][0]
     assert response["success"] is True
     assert response["rows"][0]["ENTITY_NO"] == "PANEL-1"
-    assert response["rule"] == "FAC_ID=AA02、MAIN_WC=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
+    assert response["rule"] == "FAC_ID=AA02、WORK_CTR=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"

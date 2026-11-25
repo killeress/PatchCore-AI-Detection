@@ -20,7 +20,7 @@ DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "mes_de
 AAPI_DEFECT_CODE_CATALOG_PATH = Path(__file__).resolve().parent / "configs" / "aapi_mes_defect_codes.json"
 
 CAPI_MES_RULE = "DEFT_OPER=1600、IF_NEWER=Y、推論時間後、排除 PCK21、X/Y 皆有值"
-CARUX_MES_RULE = "FAC_ID=AA02、MAIN_WC=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
+CARUX_MES_RULE = "FAC_ID=AA02、WORK_CTR=1600/1605、TRANS_DATE>=推論時間，不要求 X/Y，查無資料或未命中判 OK"
 AAPI_MES_RULE = (
     "接收時間後有 1400→2100 過站，且 DEFT_OPER=1400、IF_NEWER=Y、"
     "TRANS_DATE 嚴格晚於接收時間的不良命中 AAPI 畫面碼清單才判 NG；"
@@ -580,7 +580,7 @@ class OracleMESRepository:
                             f"""SELECT w.ENTITY_NO, w.DFCT_CODE, w.TRANS_DATE, w.X_AXIS, w.Y_AXIS
                                 FROM MAA02SHIS_DEFECTCODE w
                                 WHERE w.FAC_ID = :fac_id
-                                  AND w.MAIN_WC IN ('1600', '1605')
+                                  AND w.WORK_CTR IN ('1600', '1605')
                                   AND w.ENTITY_NO IN ({placeholders})""",
                             {"fac_id": self.wp_defthis_fac_id, **panel_binds},
                         )
@@ -681,7 +681,7 @@ class OracleMESRepository:
                     cursor.execute(
                         """SELECT * FROM MAA02SHIS_DEFECTCODE
                            WHERE FAC_ID = :fac_id
-                             AND MAIN_WC IN ('1600', '1605')
+                             AND WORK_CTR IN ('1600', '1605')
                              AND ENTITY_NO = :panel_id""",
                         {"fac_id": self.wp_defthis_fac_id, "panel_id": normalized_panel_id},
                     )

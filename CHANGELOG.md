@@ -4,7 +4,7 @@
 
 ### [MES 报表] 支持 CARUX 的 Report 数据比对
 
-- CARUX CAPI 站点使用 `MAA02SHIS_DEFECTCODE` 数据表，以 `ENTITY_NO` 关联玻璃 ID，筛选 `FAC_ID=AA02`、`MAIN_WC=1600/1605` 的 MES 记录。
+- CARUX CAPI 站点使用 `MAA02SHIS_DEFECTCODE` 数据表，以 `ENTITY_NO` 关联玻璃 ID，筛选 `FAC_ID=AA02`、`WORK_CTR=1600/1605` 的 MES 记录。
 - 每笔推理仅比对 `TRANS_DATE` 大于或等于推理时间的记录；不要求 X/Y，查询成功但没有匹配记录时判为 MES OK。时间格式或时区无法安全比较时回报错误，避免误判为 OK。
 - 完整数据明细沿用相同的玻璃、厂别、站点与时间条件，显示 CARUX 原始字段；MOD1、MOD2 和其他既有站别维持原规则。
 
