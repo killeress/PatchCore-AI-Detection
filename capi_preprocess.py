@@ -1074,6 +1074,27 @@ def classify_anchor_zone(
     return zone, signed_distance
 
 
+def build_tile_polygon_mask(
+    tile_rect: Tuple[int, int, int, int],
+    polygon: Optional[np.ndarray],
+) -> Optional[np.ndarray]:
+    """Return a 0/255 uint8 polygon mask when a tile crosses outside the panel."""
+    if polygon is None:
+        return None
+    x1, y1, x2, y2 = tile_rect
+    tile_w = x2 - x1
+    tile_h = y2 - y1
+    if tile_w <= 0 or tile_h <= 0:
+        return None
+    mask = np.zeros((tile_h, tile_w), np.uint8)
+    shifted = np.asarray(polygon, dtype=np.float32).copy()
+    shifted[:, 0] -= x1
+    shifted[:, 1] -= y1
+    cv2.fillPoly(mask, [shifted.astype(np.int32)], 255)
+    coverage = float((mask > 0).sum()) / (tile_w * tile_h)
+    return mask if coverage < 1.0 - 1e-6 else None
+
+
 def classify_tile_zone(
     tile_rect: Tuple[int, int, int, int],
     polygon: Optional[np.ndarray],
@@ -2045,7 +2066,11 @@ def _generate_tiles(
         tile_preprocess_total_ms = 0.0
         if getattr(config, "preprocess_after_tiling", False) and tile_pipeline:
             from capi_image_preprocess_lab import apply_preprocess_pipeline
-            pipeline_result = apply_preprocess_pipeline(tile_img, tile_pipeline)
+            pipeline_result = apply_preprocess_pipeline(
+                tile_img,
+                tile_pipeline,
+                **({"mask": mask} if mask is not None else {}),
+            )
             tile_img = pipeline_result["image"]
             tile_preprocess_steps = pipeline_result["steps"]
             tile_preprocess_total_ms = float(

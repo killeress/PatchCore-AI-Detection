@@ -29,7 +29,7 @@ from capi_image_naming import canonical_image_prefix
 from capi_image_orientation import read_detection_image
 from capi_preprocess import (
     PreprocessConfig, preprocess_panel_folder, PanelPreprocessResult,
-    classify_anchor_zone, detect_panel_geometry,
+    build_tile_polygon_mask, classify_anchor_zone, detect_panel_geometry,
     image_preprocess_pipeline_for_zone, map_product_coord_to_image,
     rect_polygon_from_bounds, resolve_aoi_inward_shift_axes,
     resolve_inward_polygon_tile,
@@ -989,7 +989,13 @@ def sample_ng_tiles(
                     try:
                         pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
                         if pipeline:
-                            crop = apply_preprocess_pipeline(crop, pipeline)["image"]
+                            from capi_dog import load_crop_mask_sidecar
+                            cached_mask = load_crop_mask_sidecar(crop_path, crop.shape[:2])
+                            crop = apply_preprocess_pipeline(
+                                crop,
+                                pipeline,
+                                **({"mask": cached_mask} if cached_mask is not None else {}),
+                            )["image"]
                             cached_preprocessed_n += 1
                     except Exception as exc:
                         log(f"  ⚠ {lighting}: NG 快取前處理失敗 {crop_path.name}: {exc}")
@@ -1196,6 +1202,10 @@ def sample_ng_tiles(
             zone, _anchor_distance = classify_anchor_zone(
                 (img_x, img_y), polygon, half,
             )
+            tile_mask = build_tile_polygon_mask(
+                (tile_x, tile_y, tile_x + tile_size, tile_y + tile_size),
+                polygon,
+            )
             if (
                 apply_preprocess_pipeline is not None
                 and preprocess_cfg is not None
@@ -1204,7 +1214,11 @@ def sample_ng_tiles(
                 try:
                     pipeline = image_preprocess_pipeline_for_zone(preprocess_cfg, zone)
                     if pipeline:
-                        crop = apply_preprocess_pipeline(crop, pipeline)["image"]
+                        crop = apply_preprocess_pipeline(
+                            crop,
+                            pipeline,
+                            **({"mask": tile_mask} if tile_mask is not None else {}),
+                        )["image"]
                         preprocessed_n += 1
                 except Exception as exc:
                     log(f"  ⚠ {lighting}: NG 前處理失敗 {raw_source_path.name}: {exc}")
@@ -1261,6 +1275,13 @@ def sample_ng_tiles(
                 try:
                     validation_dir.mkdir(parents=True, exist_ok=True)
                     validation_written = cv2.imwrite(str(validation_path), raw_crop)
+                    if validation_written:
+                        from capi_dog import crop_mask_sidecar_path
+                        mask_sidecar = crop_mask_sidecar_path(validation_path)
+                        if tile_mask is not None:
+                            cv2.imwrite(str(mask_sidecar), tile_mask)
+                        elif mask_sidecar.is_file():
+                            mask_sidecar.unlink()
                 except (OSError, cv2.error) as exc:
                     validation_written = False
                     validation_error_logged = True

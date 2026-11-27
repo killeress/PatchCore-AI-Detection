@@ -344,14 +344,19 @@ def normalize_preprocess_pipeline(pipeline: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
-def apply_preprocess_pipeline(image: np.ndarray, pipeline: Any) -> Dict[str, Any]:
+def apply_preprocess_pipeline(
+    image: np.ndarray,
+    pipeline: Any,
+    *,
+    mask: np.ndarray | None = None,
+) -> Dict[str, Any]:
     """Apply a sequence of preprocessing steps to an image."""
     normalized = normalize_preprocess_pipeline(pipeline)
     processed = image
     step_results: List[Dict[str, Any]] = []
     for idx, step in enumerate(normalized, 1):
         t0 = time.perf_counter()
-        result = apply_preprocess_method(processed, step["method"], step["params"])
+        result = apply_preprocess_method(processed, step["method"], step["params"], mask=mask)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         processed = result["image"]
         step_results.append({
@@ -424,6 +429,8 @@ def apply_preprocess_method(
     image: np.ndarray,
     method: str,
     params: Dict[str, Any] | None = None,
+    *,
+    mask: np.ndarray | None = None,
 ) -> Dict[str, Any]:
     """Apply one preprocessing method and return processed image plus metadata."""
     if image is None or not isinstance(image, np.ndarray):
@@ -456,8 +463,10 @@ def apply_preprocess_method(
         processed = cv2.GaussianBlur(work, (ksize, ksize), sigmaX=sigma)
         notes.append("高斯平滑適合近似高斯分布的 sensor/光電轉換雜訊。")
     elif method == "dog":
-        processed = render_dog(dog_residual(work, applied_params), applied_params)
+        processed = render_dog(dog_residual(work, applied_params, mask=mask), applied_params)
         notes.append("先去紋、再扣除背景並放大亮暗差；訓練與推論須使用相同參數及切圖順序。")
+        if mask is not None and not bool(np.all(np.asarray(mask) > 0)):
+            notes.append("已套用產品邊界遮罩，僅以面板內像素計算 DoG 背景，避免面板外暗區產生邊緣亮帶。")
     elif method == "bilateral":
         diameter = applied_params["diameter"]
         sigma_color = applied_params["sigma_color"]

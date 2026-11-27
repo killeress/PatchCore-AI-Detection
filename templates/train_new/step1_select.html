@@ -374,8 +374,8 @@
       <button type="button" id="pp-clear-all" style="background:#313244;color:#f38ba8;border:1px solid #f38ba8;border-radius:5px;padding:7px 14px;font-weight:700;">清空</button>
     </div>
     <p id="pp-dog-note" hidden style="color:#a6e3a1;font-size:.82rem;line-height:1.7;">
-      DoG 會先減少細碎紋理，再放大白丸與背景的亮暗差。下方六項都有調大／調小的說明。
-      這裡固定先切圖再強化，挑圖的縮圖與放大圖就是模型輸入；參數隨模型保存，正式推論自動沿用。
+      DoG 會先減少細碎紋理，再放大白丸／黑霧與背景的亮暗差。下方六項都有調大／調小的說明。
+      這裡固定先切圖再強化，跨產品邊界的切塊會自動只取面板內像素計算背景（排除面板外暗區造成的邊緣假亮帶），挑圖的縮圖與放大圖就是模型輸入；參數隨模型保存，正式推論自動沿用。
       流程會套用到所有選定光源的此區域，請各光源都檢查一次。Debug 白丸頁使用較大的周圍範圍，請以這裡的切圖預覽確認訓練效果。
     </p>
     <div id="pp-zone-tabs" style="display:none;gap:8px;margin-top:12px;">

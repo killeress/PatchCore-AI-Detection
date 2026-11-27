@@ -1900,7 +1900,11 @@ class CAPIInferencer:
                     and getattr(self.config, "image_preprocess_pipeline", None)
                 ):
                     from capi_image_preprocess_lab import apply_preprocess_pipeline
-                    pipeline_result = apply_preprocess_pipeline(tile_img, self.config.image_preprocess_pipeline)
+                    pipeline_result = apply_preprocess_pipeline(
+                        tile_img,
+                        self.config.image_preprocess_pipeline,
+                        mask=tile_mask,
+                    )
                     tile_img = pipeline_result["image"]
 
                 tiles.append(TileInfo(
@@ -5434,7 +5438,7 @@ class CAPIInferencer:
             for name, image in variants:
                 if tile_pipeline:
                     from capi_image_preprocess_lab import apply_preprocess_pipeline
-                    image = apply_preprocess_pipeline(image, tile_pipeline)["image"]
+                    image = apply_preprocess_pipeline(image, tile_pipeline, mask=tile.mask)["image"]
                 probe = replace(tile, image=image, decision_context=dict(tile.decision_context))
                 with cuda_stage("aoi-dust-residual", image=str(result.image_path), variant=name):
                     score, values = self.predict_tile(
@@ -7516,7 +7520,11 @@ class CAPIInferencer:
                 tile_pipeline = image_preprocess_pipeline_for_zone(pre_cfg, zone)
                 if tile_pipeline:
                     from capi_image_preprocess_lab import apply_preprocess_pipeline
-                    pipeline_result = apply_preprocess_pipeline(tile_img, tile_pipeline)
+                    pipeline_result = apply_preprocess_pipeline(
+                        tile_img,
+                        tile_pipeline,
+                        mask=tile_mask,
+                    )
                     tile_img = pipeline_result["image"]
                     result.preprocess_steps.extend(pipeline_result["steps"])
                     result.preprocess_total_ms += float(
@@ -11950,6 +11958,7 @@ class SubmodelScorer:
         zone: str,
         image_path: Path,
         preprocess_pipeline=None,
+        mask: Optional[np.ndarray] = None,
     ) -> float:
         """對一張已保存的 tile crop 套用 bundle 前處理後跑 raw score。"""
         pt_path = Path(bundle_dir) / f"{lighting}-{zone}.pt"
@@ -11958,8 +11967,18 @@ class SubmodelScorer:
         if image is None:
             raise FileNotFoundError(f"圖片不存在或無法讀取: {image_path}")
         if preprocess_pipeline:
+            from capi_dog import load_crop_mask_sidecar
             from capi_image_preprocess_lab import apply_preprocess_pipeline
-            image = apply_preprocess_pipeline(image, preprocess_pipeline)["image"]
+            resolved_mask = (
+                mask
+                if mask is not None
+                else load_crop_mask_sidecar(image_path, image.shape[:2])
+            )
+            image = apply_preprocess_pipeline(
+                image,
+                preprocess_pipeline,
+                **({"mask": resolved_mask} if resolved_mask is not None else {}),
+            )["image"]
         with self.gpu_lock:
             return self._score_one_tile(image, inferencer)
 

@@ -9127,6 +9127,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
             crop_path.relative_to(self._ng_validation_base_dir())
             if crop_path.is_file():
                 crop_path.unlink()
+            from capi_dog import crop_mask_sidecar_path
+            mask_sidecar = crop_mask_sidecar_path(crop_path)
+            if mask_sidecar.is_file():
+                mask_sidecar.unlink()
         except (OSError, ValueError) as exc:
             logger.warning(
                 "Remove reclassified NG crop failed: sample_id=%s error=%s",
@@ -9501,6 +9505,10 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                     raise OSError(f"NG crop 不是一般檔案: {crop_path}")
                 crop_path.unlink()
                 file_deleted = True
+            from capi_dog import crop_mask_sidecar_path
+            mask_sidecar = crop_mask_sidecar_path(crop_path)
+            if mask_sidecar.is_file():
+                mask_sidecar.unlink()
         except OSError as exc:
             logger.error("Delete NG validation crop failed: %s", exc, exc_info=True)
             self._send_json({"success": False, "error": f"NG 圖片刪除失敗: {exc}"}, status=500)
@@ -11623,7 +11631,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                 active_pipeline = configured_zone_pipelines.get(zone, [])
             if active_pipeline and preprocess_after_tiling and not is_skip_file:
                 pipeline_input = tile_info.image if grid_enabled else raw_tile_image
-                pipeline_result = apply_preprocess_pipeline(pipeline_input, active_pipeline)
+                pipeline_result = apply_preprocess_pipeline(
+                    pipeline_input,
+                    active_pipeline,
+                    **({"mask": tile_info.mask} if tile_info.mask is not None else {}),
+                )
                 tile_image = pipeline_result["image"]
                 configured_pipeline = pipeline_result["pipeline"]
                 preprocess_steps.extend(pipeline_result["steps"])
@@ -18330,7 +18342,11 @@ class CAPIWebHandler(ScratchCenterMixin, BaseHTTPRequestHandler):
                         "steps": grid_steps + list(tile.preprocess_steps),
                     }
                 else:
-                    result = apply_preprocess_pipeline(original, preview_pipeline)
+                    result = apply_preprocess_pipeline(
+                        original,
+                        preview_pipeline,
+                        **({"mask": tile.mask} if tile.mask is not None else {}),
+                    )
                     processed = result["image"]
                 diff = make_diff_image(original, processed)
 
