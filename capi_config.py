@@ -9,6 +9,7 @@ CAPI 配置管理模組
     config = CAPIConfig.from_yaml("configs/capi_3f.yaml")
 """
 
+import math
 import yaml
 import copy
 from dataclasses import dataclass, field
@@ -70,6 +71,7 @@ def normalize_side_white_params(value=None) -> Dict[str, Any]:
 
 
 DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT = 25.0
+DEFAULT_WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX = 2
 
 
 def within_spec_dust_overlap_percent(dot_detection: Dict[str, Any]) -> float:
@@ -79,6 +81,21 @@ def within_spec_dust_overlap_percent(dot_detection: Dict[str, Any]) -> float:
     if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100:
         raise ValueError("灰塵遮罩重疊門檻必須是 0 到 100 之間的數值（%）")
     return float(percent)
+
+
+def within_spec_aoi_peak_tolerance_px(dot_detection: Dict[str, Any]) -> int:
+    tolerance = dot_detection.get(
+        "aoi_peak_tolerance_px", DEFAULT_WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX
+    )
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not math.isfinite(tolerance)
+        or int(tolerance) != tolerance
+        or tolerance < 0
+    ):
+        raise ValueError("熱圖峰值重疊容差必須是大於等於 0 的整數（px）")
+    return int(tolerance)
 
 
 def _default_within_spec_judgment_rules() -> Dict[str, Any]:
@@ -106,6 +123,7 @@ def _default_within_spec_judgment_rules() -> Dict[str, Any]:
         "min_aspect_ratio": 0.45,
         "edge_margin_px": 4,
         "dust_mask_overlap_threshold_percent": DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT,
+        "aoi_peak_tolerance_px": DEFAULT_WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX,
         "non_dot_residue_enabled": True,
         "non_dot_residue_min_area_px": 500,
         "non_dot_residue_min_long_side_px": 80,
@@ -515,9 +533,11 @@ class CAPIConfig:
                     machine_cfg["dot_detection"]["preprocess_params"].update(raw_preprocess)
                 try:
                     percent = within_spec_dust_overlap_percent(raw_dot_detection)
+                    peak_tolerance_px = within_spec_aoi_peak_tolerance_px(raw_dot_detection)
                 except ValueError as exc:
                     raise ValueError(f"{machine_id} 的{exc}") from exc
                 machine_cfg["dot_detection"]["dust_mask_overlap_threshold_percent"] = percent
+                machine_cfg["dot_detection"]["aoi_peak_tolerance_px"] = peak_tolerance_px
 
             raw_screens = machine_raw.get("screens", {})
             if isinstance(raw_screens, dict):

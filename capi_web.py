@@ -57,7 +57,12 @@ from capi_scratch_batch import (
     STATE_RUNNING as SCRATCH_STATE_RUNNING,
 )
 from capi_version import get_version_info, read_changelog
-from capi_config import DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT, within_spec_dust_overlap_percent
+from capi_config import (
+    DEFAULT_WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX,
+    DEFAULT_WITHIN_SPEC_DUST_OVERLAP_PERCENT,
+    within_spec_aoi_peak_tolerance_px,
+    within_spec_dust_overlap_percent,
+)
 from capi_retention import (
     RETENTION_PARAM, RETENTION_DESCRIPTION,
     resolve_retention_policy, normalize_retention_policy,
@@ -867,7 +872,7 @@ DOT_PREPROCESS_PARAMS = {"kernel_size": 7, "sigma": 1.0}
 WITHIN_SPEC_PARAM = "within_spec_judgment_rules"
 WITHIN_SPEC_DOT_LABELS = {"black_dot": "黑點", "white_dot": "白點"}
 WITHIN_SPEC_ROI_HEADER_PX = 24
-WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX = 2
+WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX = DEFAULT_WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX
 
 
 def _preprocess_dot_image_for_detection(image_bgr, method: str = None, params: dict = None) -> tuple:
@@ -2099,7 +2104,7 @@ def _within_spec_aoi_roi_for_tile(tile, shape, crop_box):
     return mask > 0, roi
 
 
-def _unmeasured_aoi_peaks(detected, peaks):
+def _unmeasured_aoi_peaks(detected, peaks, tolerance_px: int = WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX):
     """Return peaks beyond the Euclidean tolerance of any retained, measured dot pixel."""
     import cv2
 
@@ -2109,7 +2114,7 @@ def _unmeasured_aoi_peaks(detected, peaks):
     _, labels, stats, _ = cv2.connectedComponentsWithStats(detected["mask"], connectivity=8)
     measured = {(c["x"], c["y"], c["w"], c["h"], c["area_px"]) for c in detected["candidates"]
                 if c.get("size_mm") is not None}
-    radius = WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX
+    radius = max(0, int(tolerance_px))
     height, width = labels.shape
 
     def near_measured_component(peak_x, peak_y):
@@ -2127,7 +2132,13 @@ def _unmeasured_aoi_peaks(detected, peaks):
 
 def _within_spec_unmeasured_reason(evidence):
     if "peaks_image_xy" in evidence:
-        return f"AOI 有 {evidence['count']} 個 REAL_NG 熱區，規格內未完整量測，保留 NG"
+        total_count = int(evidence.get("count") or 0)
+        unmeasured = evidence.get("unmeasured_crop_xy")
+        unmeasured_count = len(unmeasured) if isinstance(unmeasured, list) else total_count
+        if total_count > 0 and 0 < unmeasured_count < total_count:
+            return f"PatchCore {total_count} 個熱圖峰值中有 {unmeasured_count} 個未與規格內找點重疊，保留 NG"
+        display_count = unmeasured_count if unmeasured_count > 0 else total_count
+        return f"PatchCore 熱圖峰值（{display_count} 處）與規格內找點未重疊，保留 NG"
     if evidence.get("method") == "grid_original_roi":
         if evidence["status"] == "unconfirmed":
             return "Pixel Grid 灰塵證據不足，保留 NG"
@@ -3299,6 +3310,7 @@ def _evaluate_within_spec_suggestion_detail(
     effective_hysteresis = _dot_hysteresis_kwargs(dot_cfg)
     non_dot_cfg = _non_dot_residue_config(dot_cfg)
     dust_overlap_percent = within_spec_dust_overlap_percent(dot_cfg)
+    aoi_peak_tolerance_px = within_spec_aoi_peak_tolerance_px(dot_cfg)
     result["parameter_snapshot"] = {
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "input_rotation_degrees": 180 if rotate_180 else 0,
@@ -3320,7 +3332,7 @@ def _evaluate_within_spec_suggestion_detail(
                 "min_aspect_ratio": max(0.0, _as_float(dot_cfg.get("min_aspect_ratio"), 0.45)),
                 "edge_margin_px": max(0, _as_int(dot_cfg.get("edge_margin_px"), 4)),
                 "dust_mask_overlap_threshold_percent": dust_overlap_percent,
-                "aoi_peak_tolerance_px": WITHIN_SPEC_AOI_PEAK_TOLERANCE_PX,
+                "aoi_peak_tolerance_px": aoi_peak_tolerance_px,
                 "non_dot_residue": _json_safe_snapshot(non_dot_cfg),
                 "size_metric": str(dot_cfg.get("size_metric") or "bbox_diagonal"),
                 "unit_per_px": max(0.0, _as_float(dot_cfg.get("unit_per_px"), DOT_RULER_MM_PER_PX)),
@@ -3508,7 +3520,9 @@ def _evaluate_within_spec_suggestion_detail(
                     "tile_limit": tile_limit,
                     "candidates": candidates,
                     "unmeasured_peaks": (
-                        peaks if evidence.get("status") == "unconfirmed" else _unmeasured_aoi_peaks(detected, peaks)
+                        peaks if evidence.get("status") == "unconfirmed" else _unmeasured_aoi_peaks(
+                            detected, peaks, aoi_peak_tolerance_px
+                        )
                     ),
                     "rejected_candidates": detected.get("rejected_candidates", []),
                     "dust_mask_filtered_count": detected.get("dust_mask_filtered_count", 0),

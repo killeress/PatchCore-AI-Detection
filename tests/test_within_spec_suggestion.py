@@ -964,7 +964,11 @@ def test_within_spec_measures_each_final_aoi_real_region(tmp_path, dust_centers,
         regions = result["missed_dot_tiles"][0]["aoi_real_regions"]
         assert regions["peaks_image_xy"] == [[48, 32], [80, 64]]
         assert regions["unmeasured_crop_xy"] == missing
-        assert "2 個 REAL_NG 熱區" in _format_within_spec_panel_summary(result)
+        summary = _format_within_spec_panel_summary(result)
+        if len(missing) == 2:
+            assert "PatchCore 熱圖峰值（2 處）與規格內找點未重疊，保留 NG" in summary
+        else:
+            assert "PatchCore 2 個熱圖峰值中有 1 個未與規格內找點重疊，保留 NG" in summary
     else:
         assert result["panel_totals"][0]["total_count"] == 2
 
@@ -1033,7 +1037,27 @@ def test_within_spec_grid_real_defect_evaluates_measured_dot_instead_of_dust_unc
         assert result["suggestion"] is None
         assert result["panel_summary"]["evaluated_tile_count"] == 0
         assert result["panel_summary"]["missed_dot_tile_count"] == 1
-        assert "REAL_NG 熱區" in _format_within_spec_panel_summary(result)
+        assert "PatchCore 熱圖峰值（1 處）與規格內找點未重疊，保留 NG" in _format_within_spec_panel_summary(result)
+
+
+@pytest.mark.parametrize(("tolerance_px", "can_pass"), [
+    (2, False),
+    (12, True),
+])
+def test_within_spec_custom_aoi_peak_tolerance_px(tmp_path, tolerance_px, can_pass):
+    path = tmp_path / "W0F00000.png"
+    _write_black_dot_image(path, [(48, 48)])
+    detail = _with_aoi_roi(_detail(path), (12, 12, 84, 84))
+    tile = detail["images"][0]["tiles"][0]
+    tile["decision_context"] = json.dumps(dict(
+        json.loads(tile["decision_context"]),
+        aoi_real_regions={"count": 1, "peaks_image_xy": [[58, 48]]},
+    ))
+    rules = _rules()
+    rules["default"]["dot_detection"]["aoi_peak_tolerance_px"] = tolerance_px
+    result = _evaluate_within_spec_suggestion_detail(detail, rules)
+    assert result["parameter_snapshot"]["dot_detection"]["effective"]["aoi_peak_tolerance_px"] == tolerance_px
+    assert (result["suggestion"] is not None) is can_pass
 
 
 def test_within_spec_grid_partial_dust_overlap_still_blocks_as_unconfirmed(tmp_path):

@@ -391,11 +391,15 @@ def test_within_spec_judgment_rules_defaults_and_overrides():
     assert default_rules["dot_detection"]["min_aspect_ratio"] == 0.45
     assert default_rules["dot_detection"]["edge_margin_px"] == 4
     assert default_rules["dot_detection"]["dust_mask_overlap_threshold_percent"] == 25
+    assert default_rules["dot_detection"]["aoi_peak_tolerance_px"] == 2
 
     custom_rules = {
         "CAPI_3F": {},
         "MACHINE_A": {
-            "dot_detection": {"dust_mask_overlap_threshold_percent": 35.5},
+            "dot_detection": {
+                "dust_mask_overlap_threshold_percent": 35.5,
+                "aoi_peak_tolerance_px": 10,
+            },
             "screens": {
                 "STANDARD": {
                     "black_dot": {
@@ -413,6 +417,7 @@ def test_within_spec_judgment_rules_defaults_and_overrides():
     assert "default" in cfg2.within_spec_judgment_rules
     saved_dot_settings = cfg2.to_dict()["within_spec_judgment_rules"]["MACHINE_A"]["dot_detection"]
     assert saved_dot_settings["dust_mask_overlap_threshold_percent"] == 35.5
+    assert saved_dot_settings["aoi_peak_tolerance_px"] == 10
     assert cfg2.within_spec_judgment_rules["MACHINE_A"]["screens"]["STANDARD"]["black_dot"]["area_threshold_mm"] == 0.45
     assert cfg2.within_spec_judgment_rules["MACHINE_A"]["screens"]["STANDARD"]["black_dot"]["defect_code"] == "C1111"
     assert cfg2.to_dict()["within_spec_judgment_rules"]["MACHINE_A"]["screens"]["STANDARD"]["black_dot"]["defect_code"] == "C1111"
@@ -427,4 +432,11 @@ def test_within_spec_judgment_rules_defaults_and_overrides():
 def test_within_spec_dust_overlap_rejects_invalid_percent(percent):
     rules = {"MODEL_A": {"dot_detection": {"dust_mask_overlap_threshold_percent": percent}}}
     with pytest.raises(ValueError, match="MODEL_A 的灰塵遮罩重疊門檻"):
+        CAPIConfig._normalize_within_spec_judgment_rules(rules)
+
+
+@pytest.mark.parametrize("tolerance_px", [-1, 1.5, None, True, float("nan"), float("inf")])
+def test_within_spec_aoi_peak_tolerance_rejects_invalid_value(tolerance_px):
+    rules = {"MODEL_A": {"dot_detection": {"aoi_peak_tolerance_px": tolerance_px}}}
+    with pytest.raises(ValueError, match="MODEL_A 的熱圖峰值重疊容差"):
         CAPIConfig._normalize_within_spec_judgment_rules(rules)

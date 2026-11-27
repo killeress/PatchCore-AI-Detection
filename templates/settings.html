@@ -4421,6 +4421,7 @@
             min_aspect_ratio: 0.45,
             edge_margin_px: 4,
             dust_mask_overlap_threshold_percent: 25,
+            aoi_peak_tolerance_px: 2,
             non_dot_residue_enabled: true,
             non_dot_residue_min_area_px: 500,
             non_dot_residue_min_long_side_px: 80,
@@ -4584,6 +4585,12 @@
             renderWithinSpecDotNumberField('edge margin', 'edge_margin_px', d.edge_margin_px, 4, { min: 0, step: 1 }),
             renderWithinSpecDotNumberField('灰塵遮罩重疊門檻 (%)', 'dust_mask_overlap_threshold_percent',
                 d.dust_mask_overlap_threshold_percent, 25, { min: 0, max: 100, step: 'any' }),
+            renderWithinSpecDotNumberField('熱圖峰值重疊容差 (px)', 'aoi_peak_tolerance_px',
+                d.aoi_peak_tolerance_px, 2, {
+                    min: 0,
+                    step: 1,
+                    title: 'PatchCore 熱圖峰值與規格內找點像素之間的歐氏距離容差（px）',
+                }),
         ];
         const sizeFields = [
             renderWithinSpecDotMetricField(d),
@@ -4998,6 +5005,7 @@
             'max_area_px',
             'morph_open',
             'edge_margin_px',
+            'aoi_peak_tolerance_px',
             'non_dot_residue_min_area_px',
             'non_dot_residue_min_long_side_px',
             'non_dot_residue_min_max_diff',
